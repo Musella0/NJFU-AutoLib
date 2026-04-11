@@ -630,6 +630,11 @@ def toggle_user(pid):
         value = data.get("value")
         if field not in ("is_reserved", "late_protection"):
             return jsonify({"error": "无效字段"}), 400
+        # 统一存储为字符串 "True"/"False"，与前端和 scheduled_task 保持一致
+        if isinstance(value, bool):
+            value = "True" if value else "False"
+        elif not isinstance(value, str) or value not in ("True", "False"):
+            return jsonify({"error": "无效值"}), 400
         client, db = get_db()
         db.user_config_info.update_one({"pid": pid}, {"$set": {field: value}})
         client.close()

@@ -280,12 +280,17 @@ async function setupTotp(){
 
 // ===== Users =====
 async function loadUsers(){
-  try{const r=await fetch('/api/users');if(r.status===403){location.reload();return;}users=await r.json();
+  try{
+    document.getElementById('grid').innerHTML='<div style="color:var(--text3);text-align:center;padding:40px">加载中…</div>';
+    const r=await fetch('/api/users');if(r.status===403){location.reload();return;}
+    if(!r.ok){const d=await r.json().catch(()=>({}));document.getElementById('grid').innerHTML=`<div style="color:var(--red);text-align:center;padding:40px">加载失败：${d.error||r.statusText}</div>`;return;}
+    users=await r.json();
+    if(!Array.isArray(users)){document.getElementById('grid').innerHTML='<div style="color:var(--red);text-align:center;padding:40px">加载失败：数据格式异常</div>';return;}
     const on=users.filter(u=>u.is_reserved==='True').length;
     document.getElementById('s-total').textContent=users.length;document.getElementById('s-on').textContent=on;
     document.getElementById('s-off').textContent=users.length-on;
     document.getElementById('s-lp').textContent=users.filter(u=>u.late_protection==='True').length;
-    renderAll();}catch(e){document.getElementById('grid').innerHTML='<div style="color:var(--red);text-align:center;padding:40px">加载失败</div>';}
+    renderAll();}catch(e){document.getElementById('grid').innerHTML=`<div style="color:var(--red);text-align:center;padding:40px">加载失败：${e.message||e}</div>`;}
 }
 function renderAll(){
   const g=document.getElementById('grid');
@@ -332,11 +337,13 @@ function del(pid){document.getElementById('del-text').innerHTML=`删除 <span cl
 // ===== Announcements =====
 async function loadAnnouncements(){
   try{
+    document.getElementById('ann-grid').innerHTML='<div style="color:var(--text3);text-align:center;padding:20px">加载中…</div>';
     const r=await fetch('/api/admin/announcements');
-    if(!r.ok){document.getElementById('ann-grid').innerHTML='<div style="color:var(--red);text-align:center;padding:20px">加载失败</div>';return;}
+    if(!r.ok){const d=await r.json().catch(()=>({}));document.getElementById('ann-grid').innerHTML=`<div style="color:var(--red);text-align:center;padding:20px">加载失败：${d.error||r.statusText}</div>`;return;}
     announcements=await r.json();
+    if(!Array.isArray(announcements)){document.getElementById('ann-grid').innerHTML='<div style="color:var(--red);text-align:center;padding:20px">加载失败：数据格式异常</div>';return;}
     renderAnnouncements();
-  }catch(e){document.getElementById('ann-grid').innerHTML='<div style="color:var(--red);text-align:center;padding:20px">加载失败</div>';}
+  }catch(e){document.getElementById('ann-grid').innerHTML=`<div style="color:var(--red);text-align:center;padding:20px">加载失败：${e.message||e}</div>`;}
 }
 function renderAnnouncements(){
   const g=document.getElementById('ann-grid');
