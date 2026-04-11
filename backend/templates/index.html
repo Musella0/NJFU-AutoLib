@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AutoLib · 图书馆自动预约</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500&display=swap');
+  :root{--bg:#0a0e17;--bg2:#111827;--bg3:#1a2235;--card:#151d2e;--border:#263354;--border-hover:#3b5998;--text:#e2e8f0;--text2:#8896b3;--text3:#5a6a8a;--accent:#4f8eff;--accent2:#3b6fd9;--accent-glow:rgba(79,142,255,.15);--green:#34d399;--green-bg:rgba(52,211,153,.15);--green-border:rgba(52,211,153,.4);--red:#f87171;--red-bg:rgba(248,113,113,.1);--radius:10px;--mono:'JetBrains Mono',monospace}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:'Noto Sans SC',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;line-height:1.6}
+  .header{background:linear-gradient(135deg,var(--bg2),var(--bg3));border-bottom:1px solid var(--border);padding:20px 0;position:sticky;top:0;z-index:100}
+  .header-inner{max-width:960px;margin:0 auto;padding:0 24px;display:flex;align-items:center;justify-content:space-between}
+  .logo{display:flex;align-items:center;gap:12px}
+  .logo-icon{width:36px;height:36px;background:linear-gradient(135deg,var(--accent),#7c3aed);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px}
+  .logo-text{font-size:18px;font-weight:700}.logo-sub{font-size:12px;color:var(--text3)}
+  .header-right{display:flex;align-items:center;gap:12px;font-size:13px}
+  .header-user{color:var(--accent);font-family:var(--mono);font-weight:500}
+  .hbtn{padding:5px 12px;font-size:12px;color:var(--text2);background:var(--bg3);border:1px solid var(--border);border-radius:6px;cursor:pointer;font-family:inherit;transition:all .15s;text-decoration:none}
+  .hbtn:hover{color:var(--text);border-color:var(--border-hover)}
+  .container{max-width:960px;margin:0 auto;padding:24px}
+  .login-wrap{display:flex;align-items:center;justify-content:center;min-height:70vh}
+  .login-card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:40px;width:400px;max-width:90vw}
+  .login-title{font-size:24px;font-weight:700;text-align:center;margin-bottom:8px}
+  .login-sub{font-size:13px;color:var(--text3);text-align:center;margin-bottom:28px}
+  .login-toggle{display:flex;gap:4px;background:var(--bg);border-radius:8px;padding:3px;margin-bottom:20px}
+  .login-toggle button{flex:1;padding:8px;font-size:13px;font-weight:500;border:none;border-radius:6px;cursor:pointer;font-family:inherit;color:var(--text2);background:none;transition:all .2s}
+  .login-toggle button.active{color:#fff;background:var(--accent)}
+  .tabs{display:flex;gap:4px;background:var(--bg2);border-radius:var(--radius);padding:4px;margin-bottom:24px;border:1px solid var(--border)}
+  .tab{flex:1;padding:10px 16px;text-align:center;font-size:14px;font-weight:500;color:var(--text2);cursor:pointer;border-radius:7px;transition:all .2s;border:none;background:none}
+  .tab:hover{color:var(--text);background:var(--bg3)}
+  .tab.active{color:#fff;background:var(--accent);box-shadow:0 2px 8px rgba(79,142,255,.3)}
+  .tab-content{display:none}.tab-content.active{display:block}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:24px;margin-bottom:16px;transition:border-color .2s}
+  .card:hover{border-color:var(--border-hover)}
+  .card-title{font-size:14px;font-weight:500;color:var(--text2);text-transform:uppercase;letter-spacing:1px;margin-bottom:16px;display:flex;align-items:center;gap:8px}
+  .card-title::before{content:'';width:3px;height:14px;background:var(--accent);border-radius:2px}
+  .form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
+  .form-row.full{grid-template-columns:1fr}
+  .form-group{display:flex;flex-direction:column;gap:6px}
+  .form-group label{font-size:12px;color:var(--text2);font-weight:500}
+  .form-group .hint{font-size:11px;color:var(--text3);margin-top:2px}
+  input,select{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 12px;color:var(--text);font-size:14px;font-family:inherit;outline:none;transition:border-color .2s,box-shadow .2s}
+  input:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-glow)}
+  input::placeholder{color:var(--text3)}
+  .btn{padding:10px 20px;border-radius:6px;font-size:14px;font-weight:500;font-family:inherit;cursor:pointer;border:none;transition:all .2s;display:inline-flex;align-items:center;gap:6px}
+  .btn-primary{background:var(--accent);color:#fff;box-shadow:0 2px 8px rgba(79,142,255,.3)}
+  .btn-primary:hover{background:var(--accent2);transform:translateY(-1px)}
+  .btn-outline{background:transparent;color:var(--text2);border:1px solid var(--border)}
+  .btn-outline:hover{border-color:var(--accent);color:var(--accent)}
+  .btn-danger{background:var(--red-bg);color:var(--red);border:1px solid rgba(248,113,113,.2)}
+  .btn-danger:hover{background:rgba(248,113,113,.2)}
+  .btn-green{background:var(--green-bg);color:var(--green);border:1px solid var(--green-border);font-weight:600}
+  .btn-green:hover{background:rgba(52,211,153,.25)}
+  .btn-sm{padding:6px 12px;font-size:12px}
+  .btn:disabled{opacity:.5;cursor:not-allowed;transform:none!important}
+  .btn-group{display:flex;gap:8px;margin-top:16px}
+  .seat-picker-row{display:flex;gap:8px;align-items:end;margin-bottom:8px}
+  .seat-picker-row .form-group{flex:1}
+  .selected-seats{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;min-height:32px}
+  .seat-tag{display:inline-flex;align-items:center;gap:4px;background:var(--accent-glow);border:1px solid rgba(79,142,255,.3);color:var(--accent);font-family:var(--mono);font-size:12px;padding:4px 10px;border-radius:20px}
+  .seat-tag .remove{cursor:pointer;font-size:14px;color:var(--text3);margin-left:2px;line-height:1}
+  .seat-tag .remove:hover{color:var(--red)}
+  .seat-order{color:var(--text3);font-size:10px;margin-right:2px}
+  .time-grid{display:grid;grid-template-columns:auto 1fr 1fr;gap:8px;align-items:center}
+  .time-grid .day-label{font-size:13px;font-weight:500;color:var(--text2);text-align:right;padding-right:8px}
+  .resv-list{display:flex;flex-direction:column;gap:8px}
+  .resv-item{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between}
+  .resv-info{display:flex;flex-direction:column;gap:2px}
+  .resv-seat{font-family:var(--mono);font-size:14px;font-weight:600;color:var(--accent)}
+  .resv-time{font-size:12px;color:var(--text2)}
+  .resv-status{font-size:11px;padding:2px 8px;border-radius:10px}
+  .resv-status.active{background:var(--green-bg);color:var(--green)}
+  .resv-status.ended{background:rgba(100,100,100,.1);color:var(--text3)}
+  .resv-status.violation{background:var(--red-bg);color:var(--red)}
+  .result-box{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:16px;font-family:var(--mono);font-size:13px;color:var(--text2);white-space:pre-wrap;word-break:break-all;max-height:200px;overflow-y:auto;line-height:1.8}
+  /* Account list */
+  .acct-list{display:flex;flex-direction:column;gap:8px;margin-bottom:16px}
+  .acct-item{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;transition:all .15s}
+  .acct-item:hover{border-color:var(--accent)}
+  .acct-item.active{border-color:var(--accent);background:var(--accent-glow)}
+  .acct-pid{font-family:var(--mono);font-size:14px;font-weight:600}
+  .acct-meta{font-size:11px;color:var(--text3)}
+  .acct-badge{font-size:11px;padding:2px 8px;border-radius:10px}
+  .acct-badge.on{background:var(--green-bg);color:var(--green)}
+  .acct-badge.off{background:var(--red-bg);color:var(--red)}
+  .acct-actions{display:flex;gap:6px;align-items:center}
+  .toast-container{position:fixed;top:20px;right:20px;z-index:9999;display:flex;flex-direction:column;gap:8px}
+  .toast{padding:12px 20px;border-radius:8px;font-size:14px;font-weight:500;animation:slideIn .3s ease;box-shadow:0 4px 20px rgba(0,0,0,.3);max-width:360px}
+  .toast-success{background:var(--green-bg);color:var(--green);border:1px solid rgba(52,211,153,.3)}
+  .toast-error{background:var(--red-bg);color:var(--red);border:1px solid rgba(248,113,113,.3)}
+  .toast-info{background:var(--accent-glow);color:var(--accent);border:1px solid rgba(79,142,255,.3)}
+  @keyframes slideIn{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:translateX(0)}}
+  .spinner{width:16px;height:16px;border:2px solid transparent;border-top-color:currentColor;border-radius:50%;animation:spin .6s linear infinite;display:inline-block}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  /* Notice Center */
+  .notice-wrap{margin-bottom:16px}
+  .notice-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+  .notice-title{font-size:13px;color:var(--text2);text-transform:uppercase;letter-spacing:1px;font-weight:500;display:flex;align-items:center;gap:8px}
+  .notice-title::before{content:'';width:3px;height:14px;background:var(--accent);border-radius:2px}
+  .notice-toggle{font-size:11px;color:var(--text3);cursor:pointer;background:none;border:none;font-family:inherit}
+  .notice-toggle:hover{color:var(--accent)}
+  .notice-list{display:flex;flex-direction:column;gap:8px}
+  .notice-item{background:var(--card);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:8px;padding:12px 16px}
+  .notice-item.info{border-left-color:var(--accent)}
+  .notice-item.success{border-left-color:var(--green)}
+  .notice-item.warning{border-left-color:#facc15}
+  .notice-item.danger{border-left-color:var(--red)}
+  .notice-item-head{display:flex;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap}
+  .notice-tag{font-size:10px;padding:1px 7px;border-radius:10px;text-transform:uppercase;letter-spacing:.5px;font-weight:600}
+  .notice-tag.info{background:var(--accent-glow);color:var(--accent)}
+  .notice-tag.success{background:var(--green-bg);color:var(--green)}
+  .notice-tag.warning{background:rgba(250,204,21,.15);color:#facc15}
+  .notice-tag.danger{background:var(--red-bg);color:var(--red)}
+  .notice-tag.pin{background:rgba(124,58,237,.15);color:#a78bfa}
+  .notice-item-title{font-size:14px;font-weight:600;color:var(--text)}
+  .notice-item-body{font-size:12px;color:var(--text2);line-height:1.6;white-space:pre-wrap;word-break:break-word}
+  .notice-item-meta{font-size:10px;color:var(--text3);margin-top:6px;font-family:var(--mono)}
+  .notice-empty{font-size:12px;color:var(--text3);text-align:center;padding:14px;background:var(--card);border:1px dashed var(--border);border-radius:8px}
+  /* Auth hint & guest mode */
+  .auth-hint{font-size:12px;color:var(--text2);background:var(--accent-glow);border:1px solid rgba(79,142,255,.25);border-radius:8px;padding:10px 12px;line-height:1.7;margin-bottom:18px}
+  .auth-hint strong{color:var(--accent)}
+  .auth-guest{margin-top:18px;padding-top:16px;border-top:1px solid var(--border);display:flex;flex-direction:column;align-items:center;gap:10px}
+  .btn-link{background:none;border:none;color:var(--accent);font-size:13px;cursor:pointer;font-family:inherit;padding:4px 8px}
+  .btn-link:hover{text-decoration:underline}
+  .chk{font-size:12px;color:var(--text3);display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
+  .chk input{width:auto;margin:0;accent-color:var(--accent)}
+  .guest-banner{background:rgba(250,204,21,.08);border:1px solid rgba(250,204,21,.3);border-radius:8px;padding:12px 16px;margin-bottom:16px;font-size:13px;color:#facc15;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+  .guest-banner-text{flex:1;min-width:220px}
+  @media(max-width:640px){.form-row{grid-template-columns:1fr}.container{padding:16px}.seat-picker-row{flex-wrap:wrap}}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-inner">
+    <div class="logo">
+      <div class="logo-icon">📚</div>
+      <div><div class="logo-text">AutoLib</div><div class="logo-sub">NJFU 图书馆自动预约</div></div>
+    </div>
+    <div class="header-right" id="header-right" style="display:none">
+      <span class="header-user" id="header-uid"></span>
+      <button class="hbtn" id="header-login-btn" style="display:none" onclick="showAuthFromGuest()">登录 / 注册</button>
+      <button class="hbtn" id="header-logout-btn" onclick="doLogout()">退出</button>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+  <!-- Auth Page -->
+  <div id="auth-page" style="display:none">
+    <div class="login-wrap">
+      <div class="login-card">
+        <div class="login-title">欢迎使用 AutoLib</div>
+        <div class="login-sub">管理你的图书馆预约</div>
+        <div class="login-toggle">
+          <button class="active" onclick="switchAuth('login',this)">登录</button>
+          <button onclick="switchAuth('register',this)">注册</button>
+        </div>
+        <div class="auth-hint">
+          此账号为您的<strong>个人账号</strong>，与图书馆账号密码<strong>无关</strong>。注册登录后，您可以在该账号下管理多个图书馆账号及其密码。
+        </div>
+        <div class="form-group" style="margin-bottom:12px">
+          <label>用户名</label>
+          <input type="text" id="auth-uid" placeholder="设一个用户名">
+        </div>
+        <div class="form-group" style="margin-bottom:16px">
+          <label>密码</label>
+          <input type="password" id="auth-pass" placeholder="登录密码">
+        </div>
+        <button class="btn btn-primary" style="width:100%;justify-content:center" id="auth-btn" onclick="doAuth()">登录</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main Page -->
+  <div id="main-page" style="display:none">
+    <!-- Guest banner -->
+    <div id="guest-banner" class="guest-banner" style="display:none">
+      <div class="guest-banner-text">您正在使用 <strong>游客模式</strong>。登录后可添加图书馆账号、配置定时预约、接收通知推送。</div>
+      <div style="display:flex;align-items:center;gap:10px;flex-shrink:0">
+        <label class="chk" style="margin:0"><input type="checkbox" id="guest-no-remind-banner">不再提示</label>
+        <button class="btn btn-primary btn-sm" onclick="showAuthFromGuest()">登录 / 注册</button>
+        <button style="background:none;border:none;color:#facc15;font-size:18px;cursor:pointer;line-height:1;padding:2px 4px" onclick="dismissGuestBanner()" title="关闭">&times;</button>
+      </div>
+    </div>
+    <!-- Notice Center -->
+    <div class="notice-wrap" id="notice-wrap">
+      <div class="notice-header">
+        <div class="notice-title">通知中心</div>
+        <button class="notice-toggle" id="notice-toggle-btn" onclick="toggleNotices()">折叠</button>
+      </div>
+      <div class="notice-list" id="notice-list">
+        <div class="notice-empty">加载中...</div>
+      </div>
+    </div>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="accounts">我的账号</button>
+      <button class="tab" data-tab="config">预约配置</button>
+      <button class="tab" data-tab="status">预约状态</button>
+      <button class="tab" data-tab="notify">通知设置</button>
+    </div>
+
+    <!-- Tab: 账号列表 -->
+    <div class="tab-content active" id="tab-accounts">
+      <div class="card">
+        <div class="card-title">图书馆账号列表</div>
+        <div class="acct-list" id="acct-list">
+          <div style="color:var(--text3);font-size:13px">加载中...</div>
+        </div>
+        <div class="btn-group" style="margin-top:12px">
+          <button class="btn btn-green btn-sm" onclick="showAddAccount()">+ 添加学号</button>
+        </div>
+      </div>
+      <!-- Add account inline form -->
+      <div class="card" id="add-acct-card" style="display:none">
+        <div class="card-title">添加新学号</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>学号</label>
+            <input type="text" id="new-pid" placeholder="输入学号">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>VPN 密码</label>
+            <input type="password" id="new-vpn" placeholder="统一身份认证密码">
+          </div>
+          <div class="form-group">
+            <label>图书馆密码</label>
+            <input type="password" id="new-lib" placeholder="IC空间系统密码">
+          </div>
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-primary btn-sm" onclick="addAccount()">保存</button>
+          <button class="btn btn-outline btn-sm" onclick="hideAddAccount()">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab: 预约配置 (editing selected account) -->
+    <div class="tab-content" id="tab-config">
+      <div id="no-acct-msg" style="color:var(--text3);text-align:center;padding:40px">请先在"我的账号"中选择一个学号</div>
+      <div id="config-form" style="display:none">
+        <div class="card" style="padding:12px 20px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between">
+          <div style="font-family:var(--mono);font-size:15px;font-weight:600;color:var(--accent)" id="cfg-pid-label"></div>
+          <button class="btn btn-outline btn-sm" onclick="switchTab('accounts')">切换账号</button>
+        </div>
+        <div class="card">
+          <div class="card-title">密码</div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>VPN 密码（统一身份认证）</label>
+              <input type="password" id="vpn_password" placeholder="统一身份认证密码">
+            </div>
+            <div class="form-group">
+              <label>图书馆密码</label>
+              <input type="password" id="lib_password" placeholder="IC空间系统密码">
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title">座位选择（按优先级排列）</div>
+          <div class="seat-picker-row">
+            <div class="form-group"><label>楼层/区域</label><select id="seat-zone"><option value="">加载中...</option></select></div>
+            <div class="form-group"><label>座位号</label><select id="seat-name"><option value="">先选区域</option></select></div>
+            <button class="btn btn-green btn-sm" onclick="addSeat()" style="margin-bottom:1px;min-width:72px">+ 添加</button>
+          </div>
+          <div class="selected-seats" id="selected-seats"></div>
+        </div>
+        <div class="card">
+          <div class="card-title">预约时间</div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>预约模式</label>
+              <select id="mode" onchange="toggleTimeMode()">
+                <option value="week_time">按星期分配</option>
+                <option value="tomorrow">统一时段</option>
+              </select>
+            </div>
+          </div>
+          <div id="simple-time" style="display:none">
+            <div class="form-row">
+              <div class="form-group"><label>开始</label><select id="simple-begin"></select></div>
+              <div class="form-group"><label>结束</label><select id="simple-end"></select></div>
+            </div>
+          </div>
+          <div id="week-time"><div class="time-grid" id="week-grid"></div></div>
+        </div>
+        <div class="card">
+          <div class="card-title">功能开关</div>
+          <div class="form-row">
+            <div class="form-group"><label>自动预约</label><select id="is_reserved"><option value="True">开启</option><option value="False">关闭</option></select></div>
+            <div class="form-group"><label>迟到保护（测试）</label><select id="late_protection"><option value="True">开启</option><option value="False">关闭</option></select></div>
+          </div>
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-primary" id="btn-save" onclick="saveConfig()">保存配置</button>
+          <button class="btn btn-green" id="btn-reserve-now" onclick="reserveNow()">立即预约</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab: 预约状态 -->
+    <div class="tab-content" id="tab-status">
+      <div id="no-acct-status" style="color:var(--text3);text-align:center;padding:40px">请先在"我的账号"中选择一个学号</div>
+      <div id="status-content" style="display:none">
+        <div class="card" style="padding:12px 20px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between">
+          <div style="font-family:var(--mono);font-size:15px;font-weight:600;color:var(--accent)" id="status-pid-label"></div>
+          <div style="display:flex;gap:8px">
+            <select id="status-acct-select" onchange="switchStatusAccount()" style="font-size:12px;padding:4px 8px"></select>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title">最近预约结果</div>
+          <div class="result-box" id="last-result">加载中...</div>
+        </div>
+        <div class="card">
+          <div class="card-title">当前预约</div>
+          <div class="btn-group" style="margin-top:0;margin-bottom:16px">
+            <button class="btn btn-outline btn-sm" id="btn-query-live" onclick="queryLive()">刷新实时预约</button>
+          </div>
+          <div class="resv-list" id="resv-list">
+            <div style="color:var(--text3);font-size:13px">点击上方按钮查询</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab: 通知设置 -->
+    <div class="tab-content" id="tab-notify">
+      <div id="no-acct-notify" style="color:var(--text3);text-align:center;padding:40px">请先在"我的账号"中选择一个学号</div>
+      <div id="notify-content" style="display:none">
+        <div class="card">
+          <div class="card-title">邮件通知</div>
+          <div class="form-row full">
+            <div class="form-group">
+              <label>邮箱地址</label>
+              <input type="email" id="notify_email" placeholder="xxx@qq.com（留空不通知）">
+              <div class="hint">预约结果通过邮件推送（需管理员配置 SMTP）</div>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title">微信推送（Server酱）</div>
+          <div class="form-row full">
+            <div class="form-group">
+              <label>Server酱 SendKey</label>
+              <input type="text" id="notify_serverchan_key" placeholder="SCTxxx（留空不通知）">
+              <div class="hint">在 <a href="https://sct.ftqq.com" target="_blank" style="color:var(--accent)">sct.ftqq.com</a> 免费获取</div>
+            </div>
+          </div>
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-primary" onclick="saveConfig()">保存通知配置</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast-container" id="toast-container"></div>
+
+<script>
+let allSeats={},selectedSeats=[],accounts=[],currentPid='',authMode='login',noticeCollapsed=false,isGuest=false;
+function escHtml(s){return(s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+function toast(m,t='info'){const c=document.getElementById('toast-container'),e=document.createElement('div');e.className='toast toast-'+t;e.textContent=m;c.appendChild(e);setTimeout(()=>{e.style.opacity='0';setTimeout(()=>e.remove(),300)},3500)}
+
+// ===== Auth =====
+function switchAuth(mode,btn){authMode=mode;document.querySelectorAll('.login-toggle button').forEach(b=>b.classList.remove('active'));btn.classList.add('active');document.getElementById('auth-btn').textContent=mode==='login'?'登录':'注册';}
+async function doAuth(){
+  const uid=document.getElementById('auth-uid').value.trim(),pass=document.getElementById('auth-pass').value;
+  if(!uid||!pass)return toast('请填写用户名和密码','error');
+  const btn=document.getElementById('auth-btn');btn.disabled=true;btn.innerHTML='<span class="spinner"></span>';
+  try{const r=await fetch(`/api/auth/${authMode}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:uid,password:pass})});const d=await r.json();if(r.ok){toast(d.message,'success');showMain(uid);}else toast(d.error,'error');}catch(e){toast('网络错误','error')}finally{btn.disabled=false;btn.textContent=authMode==='login'?'登录':'注册'}}
+async function doLogout(){
+  await fetch('/api/auth/logout',{method:'POST'});
+  localStorage.removeItem('autolib_guest');
+  isGuest=false;currentPid='';accounts=[];
+  document.getElementById('main-page').style.display='none';
+  document.getElementById('header-right').style.display='none';
+  document.getElementById('auth-page').style.display='';
+}
+async function checkAuth(){
+  try{const r=await fetch('/api/auth/me'),d=await r.json();if(d.logged_in){showMain(d.uid);return;}}catch(e){}
+  showGuestMain();
+}
+function showMain(uid){
+  isGuest=false;localStorage.removeItem('autolib_guest');
+  document.getElementById('auth-page').style.display='none';
+  document.getElementById('main-page').style.display='';
+  document.getElementById('header-right').style.display='flex';
+  document.getElementById('header-uid').textContent=uid;
+  document.getElementById('header-login-btn').style.display='none';
+  document.getElementById('header-logout-btn').style.display='';
+  document.getElementById('guest-banner').style.display='none';
+  const addBtn=document.querySelector('#tab-accounts .btn-group .btn-green');if(addBtn)addBtn.style.display='';
+  loadSeats();loadAccounts();loadNotices();
+}
+function showGuestMain(){
+  isGuest=true;
+  document.getElementById('auth-page').style.display='none';
+  document.getElementById('main-page').style.display='';
+  document.getElementById('header-right').style.display='flex';
+  document.getElementById('header-uid').textContent='游客';
+  document.getElementById('header-login-btn').style.display='';
+  document.getElementById('header-logout-btn').style.display='none';
+  const noRemind=localStorage.getItem('autolib_guest')==='no-remind';
+  document.getElementById('guest-banner').style.display=noRemind?'none':'';
+  if(noRemind)document.getElementById('guest-no-remind-banner').checked=true;
+  const addBtn=document.querySelector('#tab-accounts .btn-group .btn-green');if(addBtn)addBtn.style.display='none';
+  loadSeats();loadAccounts();loadNotices();
+}
+function dismissGuestBanner(){
+  const noRemind=document.getElementById('guest-no-remind-banner').checked;
+  if(noRemind)localStorage.setItem('autolib_guest','no-remind');
+  document.getElementById('guest-banner').style.display='none';
+}
+function showAuthFromGuest(){
+  document.getElementById('main-page').style.display='none';
+  document.getElementById('header-right').style.display='none';
+  document.getElementById('auth-page').style.display='';
+}
+
+// ===== Tabs =====
+function switchTab(name){document.querySelectorAll('.tab').forEach(t=>{t.classList.toggle('active',t.dataset.tab===name)});document.querySelectorAll('.tab-content').forEach(t=>t.classList.remove('active'));document.getElementById('tab-'+name).classList.add('active');}
+document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>switchTab(tab.dataset.tab)));
+
+// ===== Accounts =====
+async function loadAccounts(){
+  if(isGuest){
+    accounts=[];
+    document.getElementById('acct-list').innerHTML='<div style="color:var(--text3);font-size:13px;text-align:center;padding:12px 0">游客模式下无法加载账号列表，请登录后使用</div>';
+    return;
+  }
+  try{const r=await fetch('/api/my/accounts'),d=await r.json();accounts=d;renderAccounts();loadNotices();}catch(e){toast('加载失败','error')}
+}
+function renderAccounts(){
+  const el=document.getElementById('acct-list');
+  if(!accounts.length){el.innerHTML='<div style="color:var(--text3);font-size:13px">还没有添加学号，点击下方按钮添加</div>';return;}
+  el.innerHTML=accounts.map(a=>{
+    const on=a.is_reserved==='True';const v=a.verified===true;
+    return `<div class="acct-item ${a.pid===currentPid?'active':''}" onclick="selectAccount('${a.pid}')">
+      <div><div class="acct-pid">${a.pid}</div><div class="acct-meta">${a.mode==='week_time'?'按星期':'统一时段'} · ${(a.seat_list||[]).length}个座位 · ${a.updated_at||''}</div></div>
+      <div class="acct-actions">
+        <span class="acct-badge ${v?'on':'off'}">${v?'已验证':'未验证'}</span>
+        <span class="acct-badge ${on?'on':'off'}">${on?'预约中':'已暂停'}</span>
+        <button class="btn btn-danger btn-sm" onclick="event.stopPropagation();deleteAccount('${a.pid}')">删除</button>
+      </div>
+    </div>`}).join('');
+  // Update status tab selector
+  const sel=document.getElementById('status-acct-select');
+  sel.innerHTML=accounts.map(a=>`<option value="${a.pid}" ${a.pid===currentPid?'selected':''}>${a.pid}</option>`).join('');
+}
+function selectAccount(pid){currentPid=pid;renderAccounts();loadAccountConfig(pid);updateStatusView();updateNotifyView();switchTab('config');}
+function showAddAccount(){if(isGuest)return toast('请先登录后再添加账号','error');document.getElementById('add-acct-card').style.display='';}
+function hideAddAccount(){document.getElementById('add-acct-card').style.display='none';}
+async function addAccount(){
+  const pid=document.getElementById('new-pid').value.trim();
+  const vpn=document.getElementById('new-vpn').value;
+  const lib=document.getElementById('new-lib').value;
+  if(!pid)return toast('请输入学号','error');
+  if(!vpn||!lib)return toast('请填写密码','error');
+
+  // Step 1: 先验证密码（账号此时还没进 DB）
+  toast('正在验证 VPN 和图书馆密码...','info');
+  const verified=await verifyAccount(pid,{vpn_password:vpn,lib_password:lib});
+  if(!verified){
+    // 验证失败 → 停在表单上，保留输入，不保存，不跳转
+    return;
+  }
+
+  // Step 2: 验证通过 → 保存账号并直接标记 verified:true
+  try{
+    const r=await fetch(`/api/my/accounts/${pid}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vpn_password:vpn,lib_password:lib,is_reserved:'False',late_protection:'True',mode:'week_time',verified:true})});
+    if(r.ok){
+      hideAddAccount();
+      document.getElementById('new-pid').value='';
+      document.getElementById('new-vpn').value='';
+      document.getElementById('new-lib').value='';
+      await loadAccounts();
+      selectAccount(pid);
+    }else{
+      const d=await r.json();
+      toast(d.error||'保存失败','error');
+    }
+  }catch(e){toast('网络错误','error')}
+}
+async function deleteAccount(pid){
+  if(!confirm(`确定删除学号 ${pid} 的所有配置？`))return;
+  try{const r=await fetch(`/api/my/accounts/${pid}`,{method:'DELETE'});if(r.ok){toast('已删除','success');if(currentPid===pid)currentPid='';loadAccounts();}else toast('失败','error');}catch(e){toast('失败','error')}
+}
+
+// ===== Config =====
+async function loadAccountConfig(pid){
+  document.getElementById('no-acct-msg').style.display='none';
+  document.getElementById('config-form').style.display='';
+  document.getElementById('cfg-pid-label').textContent='学号: '+pid;
+  try{
+    const r=await fetch(`/api/my/accounts/${pid}`),cfg=await r.json();
+    if(!cfg.pid)return;
+    document.getElementById('vpn_password').value=cfg.vpn_password||'';
+    document.getElementById('lib_password').value=cfg.lib_password||'';
+    document.getElementById('is_reserved').value=cfg.is_reserved||'True';
+    document.getElementById('late_protection').value=cfg.late_protection||'True';
+    document.getElementById('mode').value=cfg.mode||'week_time';
+    document.getElementById('notify_email').value=cfg.notify_email||'';
+    document.getElementById('notify_serverchan_key').value=cfg.notify_serverchan_key||'';
+    toggleTimeMode();selectedSeats=cfg.seat_list||[];renderSeats();
+    if(cfg.mode==='week_time'&&cfg.time&&cfg.time.week_time){for(let i=1;i<=7;i++){const v=cfg.time.week_time[String(i)];if(v){const[b,e]=v.split('-');const bE=document.getElementById(`week-begin-${i}`),eE=document.getElementById(`week-end-${i}`);if(bE)bE.value=b;if(eE)eE.value=e;}}}
+    else if(cfg.time&&cfg.time.tomorrow){const[b,e]=cfg.time.tomorrow.split('-');document.getElementById('simple-begin').value=b;document.getElementById('simple-end').value=e;}
+  }catch(e){}
+}
+async function saveConfig(){
+  if(!currentPid)return toast('请先选择一个学号','error');
+  const mode=document.getElementById('mode').value;let timeConfig={};
+  if(mode==='week_time'){const wt={};for(let i=1;i<=7;i++){const b=document.getElementById(`week-begin-${i}`).value,e=document.getElementById(`week-end-${i}`).value;wt[String(i)]=`${b}-${e}`;}timeConfig={week_time:wt};}
+  else{const b=document.getElementById('simple-begin').value,e=document.getElementById('simple-end').value;timeConfig={tomorrow:`${b}-${e}`};}
+  const body={vpn_password:document.getElementById('vpn_password').value,lib_password:document.getElementById('lib_password').value,seat_list:selectedSeats,mode,time:timeConfig,is_reserved:document.getElementById('is_reserved').value,late_protection:document.getElementById('late_protection').value,notify_email:document.getElementById('notify_email').value.trim(),notify_serverchan_key:document.getElementById('notify_serverchan_key').value.trim()};
+  const btn=document.getElementById('btn-save');btn.disabled=true;btn.innerHTML='<span class="spinner"></span> 保存中...';
+  try{const r=await fetch(`/api/my/accounts/${currentPid}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(r.ok){toast('配置已保存','success');await loadAccounts();const acct=accounts.find(a=>a.pid===currentPid);if(acct&&acct.verified===false){toast('密码已变更，正在重新验证...','info');await verifyAccount(currentPid);await loadAccounts();}}else{const d=await r.json();toast(d.error||'失败','error');}}
+  catch(e){toast('网络错误','error')}finally{btn.disabled=false;btn.innerHTML='保存配置'}
+}
+async function reserveNow(){
+  if(isGuest)return toast('请先登录后使用','error');
+  if(!currentPid)return toast('请先选择一个学号','error');
+  if(!confirm('立即执行一次预约？\n\n将使用当前已保存的配置（VPN/图书馆密码、座位列表、时间）立刻预约，可能需要几秒钟。建议先保存最新配置。'))return;
+  const btn=document.getElementById('btn-reserve-now');
+  btn.disabled=true;btn.innerHTML='<span class="spinner"></span> 预约中...';
+  try{
+    const r=await fetch(`/api/my/accounts/${currentPid}/reserve_now`,{method:'POST'});
+    const d=await r.json();
+    if(r.ok){
+      toast(d.success?'预约成功':'预约已完成，请查看结果',d.success?'success':'info');
+      loadResult();loadNotices();
+      if(d.result)alert('预约结果：\n\n'+d.result);
+    }else{
+      toast(d.error||'预约失败','error');
+    }
+  }catch(e){toast('网络错误','error')}
+  finally{btn.disabled=false;btn.innerHTML='立即预约'}
+}
+
+// ===== Status =====
+function updateStatusView(){
+  if(!currentPid){document.getElementById('no-acct-status').style.display='';document.getElementById('status-content').style.display='none';return;}
+  document.getElementById('no-acct-status').style.display='none';document.getElementById('status-content').style.display='';
+  document.getElementById('status-pid-label').textContent='学号: '+currentPid;loadResult();
+}
+function switchStatusAccount(){currentPid=document.getElementById('status-acct-select').value;document.getElementById('status-pid-label').textContent='学号: '+currentPid;loadResult();document.getElementById('resv-list').innerHTML='<div style="color:var(--text3);font-size:13px">点击刷新按钮查询</div>';}
+async function loadResult(){try{const r=await fetch(`/api/my/accounts/${currentPid}/result`),d=await r.json();document.getElementById('last-result').textContent=d.result||'暂无预约结果';}catch(e){}}
+async function queryLive(){
+  const btn=document.getElementById('btn-query-live');btn.disabled=true;btn.innerHTML='<span class="spinner"></span> 查询中...';
+  const list=document.getElementById('resv-list');list.innerHTML='<div style="color:var(--text3);font-size:13px">正在登录...</div>';
+  try{const r=await fetch(`/api/my/accounts/${currentPid}/reservations`),d=await r.json();
+    if(d.error){list.innerHTML=`<div style="color:var(--red);font-size:13px">${d.error}</div>`;return;}
+    if(!d.reservations||!d.reservations.length){list.innerHTML='<div style="color:var(--text3);font-size:13px">当前没有预约</div>';return;}
+    list.innerHTML=d.reservations.map(r=>{const seat=r.devInfo?.devName||'未知';const st=fmtSt(r.resvStatus);const sc=r.resvStatus<=2?'active':(r.resvStatus===1093?'violation':'ended');const cc=r.resvStatus<=3;
+      return `<div class="resv-item"><div class="resv-info"><div class="resv-seat">${seat}</div><div class="resv-time">${r.resvBeginTime} ~ ${r.resvEndTime}</div></div><div style="display:flex;align-items:center;gap:8px"><span class="resv-status ${sc}">${st}</span>${cc?`<button class="btn btn-danger btn-sm" onclick="cancelResv('${r.uuid}')">取消</button>`:''}</div></div>`;}).join('');
+  }catch(e){list.innerHTML=`<div style="color:var(--red);font-size:13px">失败: ${e.message}</div>`;}
+  finally{btn.disabled=false;btn.innerHTML='刷新实时预约'}
+}
+function fmtSt(s){return{1:'待签到',2:'使用中',3:'暂离',4:'已结束',5:'已取消',1093:'已违约'}[s]||`未知(${s})`;}
+async function cancelResv(uuid){if(!confirm('确定取消？'))return;try{const r=await fetch(`/api/my/accounts/${currentPid}/cancel`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uuid})});const d=await r.json();toast(d.message||'完成',d.success?'success':'error');if(d.success)queryLive();}catch(e){toast('失败','error')}}
+
+// ===== Notify =====
+function updateNotifyView(){
+  if(!currentPid){document.getElementById('no-acct-notify').style.display='';document.getElementById('notify-content').style.display='none';return;}
+  document.getElementById('no-acct-notify').style.display='none';document.getElementById('notify-content').style.display='';
+}
+
+// ===== Notice Center =====
+function toggleNotices(){
+  noticeCollapsed=!noticeCollapsed;
+  document.getElementById('notice-list').style.display=noticeCollapsed?'none':'';
+  document.getElementById('notice-toggle-btn').textContent=noticeCollapsed?'展开':'折叠';
+}
+async function loadNotices(){
+  try{
+    const promises=[fetch('/api/announcements').catch(()=>null)];
+    if(!isGuest)promises.push(fetch('/api/my/reservation_results').catch(()=>null));
+    const res=await Promise.all(promises);
+    const anns=res[0]&&res[0].ok?await res[0].json():[];
+    const results=res[1]&&res[1].ok?await res[1].json():[];
+    renderNotices(anns,results);
+  }catch(e){
+    document.getElementById('notice-list').innerHTML='<div class="notice-empty">通知加载失败</div>';
+  }
+}
+function renderNotices(anns,results){
+  const list=document.getElementById('notice-list');
+  const items=[];
+  // Admin announcements (only active ones — backend already filters)
+  (anns||[]).forEach(a=>{
+    const pin=a.pinned?'<span class="notice-tag pin">置顶</span>':'';
+    items.push(`<div class="notice-item ${a.level||'info'}">
+      <div class="notice-item-head">
+        <span class="notice-tag ${a.level||'info'}">公告</span>${pin}
+        <span class="notice-item-title">${escHtml(a.title)}</span>
+      </div>
+      <div class="notice-item-body">${escHtml(a.content)}</div>
+      <div class="notice-item-meta">${escHtml(a.updated_at||a.created_at||'')}</div>
+    </div>`);
+  });
+  // Per-account reservation results
+  (results||[]).forEach(r=>{
+    if(!r.result)return;
+    const lvl=r.success?'success':'danger';
+    const tag=r.success?'预约成功':'预约失败';
+    items.push(`<div class="notice-item ${lvl}">
+      <div class="notice-item-head">
+        <span class="notice-tag ${lvl}">${tag}</span>
+        <span class="notice-item-title">学号 ${escHtml(r.pid)}</span>
+      </div>
+      <div class="notice-item-body">${escHtml(r.result)}</div>
+      <div class="notice-item-meta">${escHtml(r.updated_at||'')}</div>
+    </div>`);
+  });
+  if(!items.length){list.innerHTML='<div class="notice-empty">暂无通知</div>';return;}
+  list.innerHTML=items.join('');
+}
+
+// ===== Verify =====
+async function verifyAccount(pid,payload){
+  try{
+    const opts={method:'POST'};
+    if(payload){opts.headers={'Content-Type':'application/json'};opts.body=JSON.stringify(payload);}
+    const r=await fetch(`/api/my/accounts/${pid}/verify`,opts);
+    const d=await r.json();
+    if(d.verified===true){toast('密码验证通过','success');return true;}
+    toast(d.error||'密码验证失败','error');
+    return false;
+  }catch(e){toast('验证请求失败','error');return false;}
+}
+
+// ===== Seats =====
+async function loadSeats(){try{const r=await fetch(isGuest?'/api/public/seats':'/api/seats'),d=await r.json();if(d.seats){allSeats=d.seats;const z=document.getElementById('seat-zone');z.innerHTML='<option value="">选择区域</option>';Object.keys(allSeats).sort((a,b)=>{const fa=a.match(/\d+/)?parseInt(a.match(/\d+/)[0]):99,fb=b.match(/\d+/)?parseInt(b.match(/\d+/)[0]):99;return fa-fb||a.localeCompare(b);}).forEach(k=>{z.innerHTML+=`<option value="${k}">${k} (${allSeats[k].length}个)</option>`;});}}catch(e){}}
+document.getElementById('seat-zone').addEventListener('change',function(){const s=allSeats[this.value]||[],n=document.getElementById('seat-name');n.innerHTML=s.length?s.map(v=>`<option value="${v}">${v}</option>`).join(''):'<option>无</option>';});
+function addSeat(){const n=document.getElementById('seat-name').value;if(!n)return toast('请先选择','error');if(selectedSeats.includes(n))return toast('已添加','error');selectedSeats.push(n);renderSeats();}
+function removeSeat(i){selectedSeats.splice(i,1);renderSeats();}
+function renderSeats(){const el=document.getElementById('selected-seats');if(!selectedSeats.length){el.innerHTML='<span style="color:var(--text3);font-size:13px">未选择座位</span>';return;}el.innerHTML=selectedSeats.map((s,i)=>`<span class="seat-tag"><span class="seat-order">#${i+1}</span>${s}<span class="remove" onclick="removeSeat(${i})">×</span></span>`).join('');}
+
+// ===== Time =====
+function genTimeOpts(){const o=[];for(let h=6;h<=22;h++)for(let m=0;m<60;m+=30){if(h===22&&m>0)break;o.push(`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`);}return o;}
+function populateTimes(){const t=genTimeOpts(),h=t.map(v=>`<option value="${v}">${v}</option>`).join('');document.getElementById('simple-begin').innerHTML=h;document.getElementById('simple-end').innerHTML=h;document.getElementById('simple-begin').value='08:00';document.getElementById('simple-end').value='22:00';const days=['一','二','三','四','五','六','日'],g=document.getElementById('week-grid');g.innerHTML='';days.forEach((d,i)=>{const n=i+1,de=n===5?'20:00':'22:00';g.innerHTML+=`<div class="day-label">周${d}</div><div class="form-group"><select id="week-begin-${n}">${h}</select></div><div class="form-group"><select id="week-end-${n}">${h}</select></div>`;setTimeout(()=>{const b=document.getElementById(`week-begin-${n}`),e=document.getElementById(`week-end-${n}`);if(b)b.value='08:00';if(e)e.value=de;},0);});}
+function toggleTimeMode(){const m=document.getElementById('mode').value;document.getElementById('simple-time').style.display=m==='tomorrow'?'':'none';document.getElementById('week-time').style.display=m==='week_time'?'':'none';}
+
+// ===== Init =====
+populateTimes();renderSeats();checkAuth();
+</script>
+</body>
+</html>
+

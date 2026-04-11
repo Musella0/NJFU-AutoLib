@@ -1,0 +1,11 @@
+flask
+pycryptodome
+requests
+beautifulsoup4
+flask-cors
+python-dotenv
+pymongo
+apscheduler
+pyotp
+qrcode
+Pillow

@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AutoLib · 管理后台</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700;900&family=JetBrains+Mono:wght@400;500&display=swap');
+  :root{--bg:#06080d;--bg2:#0d1117;--bg3:#161b22;--card:#0d1117;--border:#21262d;--border2:#30363d;--text:#e6edf3;--text2:#8b949e;--text3:#484f58;--accent:#58a6ff;--accent-dim:rgba(88,166,255,.1);--green:#3fb950;--green-dim:rgba(63,185,80,.12);--red:#f85149;--red-dim:rgba(248,81,73,.12);--yellow:#d29922;--purple:#bc8cff;--mono:'JetBrains Mono',monospace;--sans:'Noto Sans SC',-apple-system,sans-serif;--radius:8px}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh;-webkit-font-smoothing:antialiased}
+  .topbar{background:var(--bg2);border-bottom:1px solid var(--border);padding:0 32px;height:56px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+  .topbar-left{display:flex;align-items:center;gap:16px}
+  .topbar-logo{font-size:16px;font-weight:700;display:flex;align-items:center;gap:8px}
+  .topbar-logo span{background:linear-gradient(135deg,var(--accent),var(--purple));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  .topbar-sep{color:var(--text3);font-size:20px;font-weight:300}
+  .topbar-page{font-size:14px;color:var(--text2)}
+  .topbar-right{display:flex;gap:8px}
+  .topbar-btn{padding:5px 12px;font-size:12px;font-family:var(--sans);color:var(--text2);background:var(--bg3);border:1px solid var(--border);border-radius:6px;cursor:pointer;transition:all .15s;text-decoration:none}
+  .topbar-btn:hover{color:var(--text);border-color:var(--border2)}
+  .container{max-width:1200px;margin:0 auto;padding:24px 32px}
+  /* Login */
+  .admin-login-wrap{display:flex;align-items:center;justify-content:center;min-height:70vh}
+  .admin-login-card{background:var(--bg2);border:1px solid var(--border);border-radius:16px;padding:40px;width:380px;max-width:90vw}
+  .al-title{font-size:20px;font-weight:700;text-align:center;margin-bottom:20px}
+  .al-field{margin-bottom:12px;display:flex;flex-direction:column;gap:4px}
+  .al-field label{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:1px}
+  .al-field input{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:var(--mono);outline:none}
+  .al-field input:focus{border-color:var(--accent)}
+  .al-btn{width:100%;padding:10px;background:var(--accent);color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:500;cursor:pointer;font-family:var(--sans);margin-top:8px}
+  .al-btn:hover{opacity:.9}
+  .al-qr{text-align:center;margin:16px 0}
+  .al-qr img{border-radius:8px;max-width:200px}
+  .al-hint{font-size:11px;color:var(--text3);text-align:center;margin-top:8px}
+  /* Stats */
+  .stats{display:flex;gap:12px;margin-bottom:24px}
+  .stat-card{flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:16px 20px}
+  .stat-label{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:4px}
+  .stat-value{font-family:var(--mono);font-size:28px;font-weight:700}
+  /* Buttons */
+  .btn{padding:7px 14px;font-size:12px;font-family:var(--sans);font-weight:500;border-radius:6px;border:1px solid var(--border);cursor:pointer;transition:all .15s;display:inline-flex;align-items:center;gap:4px}
+  .btn-sm{padding:4px 10px;font-size:11px}
+  .btn-blue{background:var(--accent-dim);color:var(--accent);border-color:rgba(88,166,255,.2)}
+  .btn-blue:hover{background:rgba(88,166,255,.2)}
+  .btn-green{background:var(--green-dim);color:var(--green);border-color:rgba(63,185,80,.2)}
+  .btn-green:hover{background:rgba(63,185,80,.2)}
+  .btn-red{background:var(--red-dim);color:var(--red);border-color:rgba(248,81,73,.2)}
+  .btn-red:hover{background:rgba(248,81,73,.2)}
+  .btn-ghost{background:var(--bg3);color:var(--text2)}
+  .btn-ghost:hover{color:var(--text);background:var(--border)}
+  /* User cards */
+  .user-grid{display:flex;flex-direction:column;gap:12px}
+  .user-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;transition:border-color .15s}
+  .user-card:hover{border-color:var(--border2)}
+  .uc-header{display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--border);background:var(--card)}
+  .uc-header-left{display:flex;align-items:center;gap:12px}
+  .uc-avatar{width:36px;height:36px;border-radius:50%;background:var(--accent-dim);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:13px;font-weight:700;color:var(--accent)}
+  .uc-pid{font-family:var(--mono);font-size:15px;font-weight:600}
+  .uc-updated{font-size:11px;color:var(--text3);margin-top:1px}
+  .uc-header-right{display:flex;align-items:center;gap:8px}
+  .toggle-group{display:flex;align-items:center;gap:6px}
+  .toggle-label{font-size:11px;color:var(--text3)}
+  .toggle{position:relative;width:36px;height:20px;cursor:pointer}
+  .toggle input{display:none}
+  .toggle-track{position:absolute;inset:0;background:var(--border);border-radius:10px;transition:background .2s}
+  .toggle input:checked+.toggle-track{background:var(--green)}
+  .toggle-thumb{position:absolute;top:2px;left:2px;width:16px;height:16px;background:#fff;border-radius:50%;transition:transform .2s;pointer-events:none}
+  .toggle input:checked~.toggle-thumb{transform:translateX(16px)}
+  .uc-body{padding:16px 20px;display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px}
+  .uc-field{display:flex;flex-direction:column;gap:3px}
+  .uc-field-label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;font-weight:500}
+  .uc-field-value{font-size:13px;color:var(--text);font-family:var(--mono);word-break:break-all}
+  .uc-field-value.empty{color:var(--text3);font-style:italic;font-family:var(--sans)}
+  .seat-tags{display:flex;flex-wrap:wrap;gap:4px}
+  .seat-tag{font-family:var(--mono);font-size:11px;padding:2px 8px;border-radius:4px;background:var(--accent-dim);color:var(--accent);border:1px solid rgba(88,166,255,.15)}
+  .time-slots{display:flex;flex-direction:column;gap:2px;font-family:var(--mono);font-size:11px}
+  .time-slot{display:flex;gap:6px;color:var(--text2)}
+  .time-slot .day{color:var(--text3);min-width:24px}
+  .owned-info{font-family:var(--mono);font-size:11px;color:var(--text2);display:flex;flex-direction:column;gap:2px}
+  .owned-item{display:flex;align-items:center;gap:6px}
+  .owned-dot{width:5px;height:5px;border-radius:50%;background:var(--green);flex-shrink:0}
+  .uc-footer{padding:10px 20px;border-top:1px solid var(--border)}
+  .uc-result{font-size:11px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .uc-result.success{color:var(--green)}.uc-result.fail{color:var(--red)}
+  /* Modal */
+  .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:999;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
+  .modal-overlay.show{display:flex}
+  .modal{background:var(--bg2);border:1px solid var(--border2);border-radius:12px;width:480px;max-width:90vw;max-height:85vh;overflow-y:auto;box-shadow:0 16px 70px rgba(0,0,0,.5)}
+  .modal-header{padding:20px 24px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+  .modal-title{font-size:16px;font-weight:600}
+  .modal-close{background:none;border:none;color:var(--text3);font-size:20px;cursor:pointer;padding:4px;line-height:1}
+  .modal-close:hover{color:var(--text)}
+  .modal-body{padding:20px 24px;display:flex;flex-direction:column;gap:14px}
+  .modal-field{display:flex;flex-direction:column;gap:4px}
+  .modal-field label{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:1px}
+  .modal-field input,.modal-field select{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:var(--mono);outline:none}
+  .modal-field input:focus{border-color:var(--accent)}
+  .modal-footer{padding:16px 24px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px}
+  .confirm-text{font-size:14px;color:var(--text2);line-height:1.7;text-align:center;padding:20px}
+  .confirm-pid{font-family:var(--mono);color:var(--red);font-weight:600}
+  .loading{text-align:center;padding:60px 0;color:var(--text3)}
+  .spinner{width:20px;height:20px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite;display:inline-block;margin-bottom:12px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .toast-box{position:fixed;top:16px;right:16px;z-index:9999;display:flex;flex-direction:column;gap:8px}
+  .toast{padding:10px 16px;border-radius:6px;font-size:13px;font-weight:500;animation:fadeIn .25s ease;box-shadow:0 4px 24px rgba(0,0,0,.4)}
+  .toast-ok{background:var(--green-dim);color:var(--green);border:1px solid rgba(63,185,80,.2)}
+  .toast-err{background:var(--red-dim);color:var(--red);border:1px solid rgba(248,81,73,.2)}
+  .toast-info{background:var(--accent-dim);color:var(--accent);border:1px solid rgba(88,166,255,.2)}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(-10px)}}
+  /* Announcements */
+  .section-bar{display:flex;align-items:center;justify-content:space-between;margin:28px 0 12px}
+  .section-title{font-size:13px;color:var(--text2);text-transform:uppercase;letter-spacing:1.5px;font-weight:600;display:flex;align-items:center;gap:8px}
+  .section-title::before{content:'';width:3px;height:14px;background:var(--accent);border-radius:2px}
+  .ann-grid{display:flex;flex-direction:column;gap:10px;margin-bottom:24px}
+  .ann-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:14px 18px;display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+  .ann-card:hover{border-color:var(--border2)}
+  .ann-main{flex:1;min-width:0}
+  .ann-head{display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap}
+  .ann-title{font-size:14px;font-weight:600}
+  .ann-badge{font-size:10px;padding:2px 8px;border-radius:10px;text-transform:uppercase;letter-spacing:.5px;font-weight:600}
+  .ann-badge.info{background:var(--accent-dim);color:var(--accent)}
+  .ann-badge.success{background:var(--green-dim);color:var(--green)}
+  .ann-badge.warning{background:rgba(210,153,34,.15);color:var(--yellow)}
+  .ann-badge.danger{background:var(--red-dim);color:var(--red)}
+  .ann-badge.pinned{background:rgba(188,140,255,.15);color:var(--purple)}
+  .ann-badge.off{background:var(--bg3);color:var(--text3)}
+  .ann-content{font-size:12px;color:var(--text2);line-height:1.6;white-space:pre-wrap;word-break:break-word;max-height:72px;overflow:hidden}
+  .ann-meta{font-size:10px;color:var(--text3);margin-top:6px;font-family:var(--mono)}
+  .ann-actions{display:flex;gap:6px;flex-shrink:0}
+  .modal-field textarea{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:var(--sans);outline:none;min-height:100px;resize:vertical}
+  .modal-field textarea:focus{border-color:var(--accent)}
+  .checkbox-row{display:flex;gap:16px;align-items:center}
+  .checkbox-row label{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);cursor:pointer}
+  @media(max-width:768px){.container{padding:16px}.topbar{padding:0 16px}.stats{flex-direction:column}.uc-body{grid-template-columns:1fr 1fr}.uc-header{flex-direction:column;align-items:flex-start;gap:10px}.uc-header-right{align-self:flex-end}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-left">
+    <div class="topbar-logo">📚 <span>AutoLib</span></div>
+    <span class="topbar-sep">/</span>
+    <span class="topbar-page">管理后台</span>
+  </div>
+  <div class="topbar-right" id="admin-nav" style="display:none">
+    <a href="/" class="topbar-btn">← 用户端</a>
+    <button class="topbar-btn" onclick="loadUsers()">↻ 刷新</button>
+    <button class="topbar-btn" onclick="setupTotp()">TOTP 设置</button>
+    <button class="topbar-btn" onclick="adminLogout()">退出</button>
+  </div>
+</div>
+
+<div class="container">
+  <!-- Admin Login -->
+  <div id="admin-login" style="display:none">
+    <div class="admin-login-wrap">
+      <div class="admin-login-card">
+        <div class="al-title">管理员登录</div>
+        <div class="al-field"><label>用户名</label><input type="text" id="adm-user"></div>
+        <div class="al-field"><label>密码</label><input type="password" id="adm-pass"></div>
+        <div class="al-field"><label>动态验证码 (TOTP)</label><input type="text" id="adm-totp" placeholder="6位数字" maxlength="6"></div>
+        <button class="al-btn" onclick="adminLogin()">登录</button>
+        <div class="al-hint">使用 Google Authenticator / 微软验证器</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TOTP Setup Modal -->
+  <div id="totp-setup" style="display:none">
+    <div class="admin-login-wrap">
+      <div class="admin-login-card">
+        <div class="al-title">TOTP 绑定</div>
+        <div class="al-qr" id="totp-qr"></div>
+        <div class="al-hint">用验证器 App 扫描二维码绑定<br>或手动输入密钥: <code id="totp-secret" style="color:var(--accent)"></code></div>
+        <button class="al-btn" onclick="document.getElementById('totp-setup').style.display='none';document.getElementById('admin-main').style.display=''">完成</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Admin Main -->
+  <div id="admin-main" style="display:none">
+    <div class="stats">
+      <div class="stat-card"><div class="stat-label">总用户</div><div class="stat-value" style="color:var(--accent)" id="s-total">-</div></div>
+      <div class="stat-card"><div class="stat-label">预约中</div><div class="stat-value" style="color:var(--green)" id="s-on">-</div></div>
+      <div class="stat-card"><div class="stat-label">已暂停</div><div class="stat-value" style="color:var(--red)" id="s-off">-</div></div>
+      <div class="stat-card"><div class="stat-label">迟到保护</div><div class="stat-value" style="color:var(--yellow)" id="s-lp">-</div></div>
+    </div>
+    <div class="section-bar">
+      <div class="section-title">公告管理</div>
+      <button class="btn btn-green btn-sm" onclick="openAnnForm()">+ 新建公告</button>
+    </div>
+    <div class="ann-grid" id="ann-grid"><div class="loading" style="padding:24px 0"><div>加载中...</div></div></div>
+
+    <div class="section-bar">
+      <div class="section-title">用户列表</div>
+    </div>
+    <div class="user-grid" id="grid"><div class="loading"><div class="spinner"></div><div>加载中...</div></div></div>
+  </div>
+</div>
+
+<!-- Announcement Form Modal -->
+<div class="modal-overlay" id="m-ann">
+  <div class="modal">
+    <div class="modal-header"><div class="modal-title" id="ann-title">新建公告</div><button class="modal-close" onclick="closeM('m-ann')">✕</button></div>
+    <div class="modal-body">
+      <div class="modal-field"><label>标题</label><input type="text" id="ann-f-title" placeholder="公告标题"></div>
+      <div class="modal-field"><label>内容</label><textarea id="ann-f-content" placeholder="支持换行"></textarea></div>
+      <div class="modal-field">
+        <label>级别</label>
+        <select id="ann-f-level">
+          <option value="info">信息 (蓝)</option>
+          <option value="success">成功 (绿)</option>
+          <option value="warning">警告 (黄)</option>
+          <option value="danger">危险 (红)</option>
+        </select>
+      </div>
+      <div class="modal-field">
+        <label>&nbsp;</label>
+        <div class="checkbox-row">
+          <label><input type="checkbox" id="ann-f-pinned"> 置顶</label>
+          <label><input type="checkbox" id="ann-f-active" checked> 启用</label>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer"><button class="btn btn-ghost" onclick="closeM('m-ann')">取消</button><button class="btn btn-green" onclick="saveAnn()">保存</button></div>
+  </div>
+</div>
+
+<!-- Announcement Delete Confirm -->
+<div class="modal-overlay" id="m-ann-del">
+  <div class="modal" style="width:400px">
+    <div class="modal-header"><div class="modal-title">确认删除公告</div><button class="modal-close" onclick="closeM('m-ann-del')">✕</button></div>
+    <div class="confirm-text" id="ann-del-text"></div>
+    <div class="modal-footer"><button class="btn btn-ghost" onclick="closeM('m-ann-del')">取消</button><button class="btn btn-red" id="btn-ann-del">删除</button></div>
+  </div>
+</div>
+
+<!-- Edit Priority Modal -->
+<div class="modal-overlay" id="m-edit">
+  <div class="modal">
+    <div class="modal-header"><div class="modal-title" id="ed-title">编辑优先级</div><button class="modal-close" onclick="closeM('m-edit')">✕</button></div>
+    <div class="modal-body">
+      <div class="modal-field"><label>优先级（数字越大越优先）</label><input type="number" id="ed-priority" min="0" max="99"></div>
+    </div>
+    <div class="modal-footer"><button class="btn btn-ghost" onclick="closeM('m-edit')">取消</button><button class="btn btn-green" onclick="savePriority()">保存</button></div>
+  </div>
+</div>
+
+<!-- Delete Confirm -->
+<div class="modal-overlay" id="m-del">
+  <div class="modal" style="width:400px">
+    <div class="modal-header"><div class="modal-title">确认删除</div><button class="modal-close" onclick="closeM('m-del')">✕</button></div>
+    <div class="confirm-text" id="del-text"></div>
+    <div class="modal-footer"><button class="btn btn-ghost" onclick="closeM('m-del')">取消</button><button class="btn btn-red" id="btn-del">删除</button></div>
+  </div>
+</div>
+
+<div class="toast-box" id="tbox"></div>
+
+<script>
+let users=[],editPid=null,announcements=[],editAnnId=null;
+function toast(m,t='info'){const b=document.getElementById('tbox'),e=document.createElement('div');e.className='toast toast-'+({success:'ok',error:'err'}[t]||'info');e.textContent=m;b.appendChild(e);setTimeout(()=>{e.style.opacity='0';setTimeout(()=>e.remove(),300)},3000)}
+function openM(id){document.getElementById(id).classList.add('show')}
+function closeM(id){document.getElementById(id).classList.remove('show')}
+function esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+
+// ===== Admin Auth =====
+async function checkAdmin(){try{const r=await fetch('/api/admin/me'),d=await r.json();if(d.is_admin){showAdminMain();}else{document.getElementById('admin-login').style.display='';}}catch(e){document.getElementById('admin-login').style.display='';}}
+async function adminLogin(){
+  const u=document.getElementById('adm-user').value,p=document.getElementById('adm-pass').value,t=document.getElementById('adm-totp').value;
+  try{const r=await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p,totp_code:t})});const d=await r.json();if(r.ok){toast('登录成功','success');showAdminMain();}else toast(d.error,'error');}catch(e){toast('网络错误','error')}
+}
+async function adminLogout(){await fetch('/api/admin/logout',{method:'POST'});location.reload();}
+function showAdminMain(){document.getElementById('admin-login').style.display='none';document.getElementById('totp-setup').style.display='none';document.getElementById('admin-main').style.display='';document.getElementById('admin-nav').style.display='flex';loadUsers();loadAnnouncements();}
+async function setupTotp(){
+  try{const r=await fetch('/api/admin/totp_setup'),d=await r.json();if(d.error){toast(d.error,'error');return;}
+    document.getElementById('totp-qr').innerHTML=`<img src="${d.qr_image}" alt="TOTP QR">`;
+    document.getElementById('totp-secret').textContent=d.secret;
+    document.getElementById('admin-main').style.display='none';document.getElementById('totp-setup').style.display='';}
+  catch(e){toast('获取失败','error')}
+}
+
+// ===== Users =====
+async function loadUsers(){
+  try{const r=await fetch('/api/users');if(r.status===403){location.reload();return;}users=await r.json();
+    const on=users.filter(u=>u.is_reserved==='True').length;
+    document.getElementById('s-total').textContent=users.length;document.getElementById('s-on').textContent=on;
+    document.getElementById('s-off').textContent=users.length-on;
+    document.getElementById('s-lp').textContent=users.filter(u=>u.late_protection==='True').length;
+    renderAll();}catch(e){document.getElementById('grid').innerHTML='<div style="color:var(--red);text-align:center;padding:40px">加载失败</div>';}
+}
+function renderAll(){
+  const g=document.getElementById('grid');
+  if(!users.length){g.innerHTML='<div style="color:var(--text3);text-align:center;padding:60px">暂无用户</div>';return;}
+  g.innerHTML=users.map(card).join('');
+}
+function card(u){
+  const pid=u.pid||'?',av=pid.slice(-2),isOn=u.is_reserved==='True',lpOn=u.late_protection==='True';
+  const seats=(u.seat_list||[]).map(s=>`<span class="seat-tag">${s}</span>`).join('')||'<span class="uc-field-value empty">未设置</span>';
+  let timeH='';
+  if(u.mode==='week_time'&&u.time&&u.time.week_time){const d=['一','二','三','四','五','六','日'];timeH='<div class="time-slots">'+[1,2,3,4,5,6,7].map(i=>`<div class="time-slot"><span class="day">周${d[i-1]}</span>${u.time.week_time[i]||'-'}</div>`).join('')+'</div>';}
+  else if(u.time&&u.time.tomorrow){timeH=`<span class="uc-field-value">${u.time.tomorrow}</span>`;}
+  else{timeH='<span class="uc-field-value empty">未设置</span>';}
+  let ownH='';
+  if(u.owned_seat&&Object.keys(u.owned_seat).length){ownH='<div class="owned-info">';for(const[n,list]of Object.entries(u.owned_seat))for(const s of list)ownH+=`<div class="owned-item"><span class="owned-dot"></span>${n} ${s.target_time||''}</div>`;ownH+='</div>';}
+  else{ownH='<span class="uc-field-value empty">无</span>';}
+  const res=u.result||'',rc=res.includes('成功')?'success':(res?'fail':'');
+  return `<div class="user-card">
+    <div class="uc-header"><div class="uc-header-left"><div class="uc-avatar">${av}</div><div><div class="uc-pid">${pid}</div><div class="uc-updated">更新于 ${u.updated_at||'-'}</div></div></div>
+    <div class="uc-header-right">
+      <div class="toggle-group"><span class="toggle-label">预约</span><label class="toggle"><input type="checkbox" ${isOn?'checked':''} onchange="tog('${pid}','is_reserved',this.checked)"><div class="toggle-track"></div><div class="toggle-thumb"></div></label></div>
+      <div class="toggle-group"><span class="toggle-label">保护</span><label class="toggle"><input type="checkbox" ${lpOn?'checked':''} onchange="tog('${pid}','late_protection',this.checked)"><div class="toggle-track"></div><div class="toggle-thumb"></div></label></div>
+      <button class="btn btn-blue btn-sm" onclick="editPri('${pid}',${u.priority||0})">优先级</button>
+      <button class="btn btn-red btn-sm" onclick="del('${pid}')">删除</button>
+    </div></div>
+    <div class="uc-body">
+      <div class="uc-field"><div class="uc-field-label">所属用户</div><div class="uc-field-value">${u.web_uid||'-'}</div></div>
+      <div class="uc-field"><div class="uc-field-label">模式</div><div class="uc-field-value">${u.mode==='week_time'?'按星期':(u.mode||'-')}</div></div>
+      <div class="uc-field"><div class="uc-field-label">优先级</div><div class="uc-field-value">${u.priority??0}</div></div>
+      <div class="uc-field"><div class="uc-field-label">座位</div><div class="seat-tags">${seats}</div></div>
+      <div class="uc-field"><div class="uc-field-label">时间</div>${timeH}</div>
+      <div class="uc-field"><div class="uc-field-label">当前持有</div>${ownH}</div>
+    </div>
+    ${res?`<div class="uc-footer"><div class="uc-result ${rc}">结果: ${esc(res)}</div></div>`:''}
+  </div>`;}
+
+async function tog(pid,field,on){try{await fetch(`/api/users/${pid}/toggle`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({field,value:on?'True':'False'})});const u=users.find(x=>x.pid===pid);if(u)u[field]=on?'True':'False';const onc=users.filter(u=>u.is_reserved==='True').length;document.getElementById('s-on').textContent=onc;document.getElementById('s-off').textContent=users.length-onc;document.getElementById('s-lp').textContent=users.filter(u=>u.late_protection==='True').length;toast(`${pid} 已更新`,'success');}catch(e){toast('失败','error')}}
+
+function editPri(pid,cur){editPid=pid;document.getElementById('ed-title').textContent='优先级: '+pid;document.getElementById('ed-priority').value=cur;openM('m-edit');}
+async function savePriority(){if(!editPid)return;const p=parseInt(document.getElementById('ed-priority').value)||0;try{const r=await fetch(`/api/users/${editPid}/update`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({priority:p})});if(r.ok){toast('已更新','success');closeM('m-edit');loadUsers();}else toast('失败','error');}catch(e){toast('失败','error')}}
+
+function del(pid){document.getElementById('del-text').innerHTML=`删除 <span class="confirm-pid">${pid}</span> 的所有配置？<br>不可恢复。`;document.getElementById('btn-del').onclick=async()=>{try{const r=await fetch(`/api/users/${pid}`,{method:'DELETE'});if(r.ok){toast('已删除','success');closeM('m-del');loadUsers();}else toast('失败','error');}catch(e){toast('失败','error')}};openM('m-del');}
+
+// ===== Announcements =====
+async function loadAnnouncements(){
+  try{
+    const r=await fetch('/api/admin/announcements');
+    if(!r.ok){document.getElementById('ann-grid').innerHTML='<div style="color:var(--red);text-align:center;padding:20px">加载失败</div>';return;}
+    announcements=await r.json();
+    renderAnnouncements();
+  }catch(e){document.getElementById('ann-grid').innerHTML='<div style="color:var(--red);text-align:center;padding:20px">加载失败</div>';}
+}
+function renderAnnouncements(){
+  const g=document.getElementById('ann-grid');
+  if(!announcements.length){g.innerHTML='<div style="color:var(--text3);text-align:center;padding:30px">暂无公告，点击右上角新建</div>';return;}
+  g.innerHTML=announcements.map(a=>{
+    const lvl=a.level||'info';
+    const pinned=a.pinned?'<span class="ann-badge pinned">置顶</span>':'';
+    const off=!a.active?'<span class="ann-badge off">已停用</span>':'';
+    return `<div class="ann-card">
+      <div class="ann-main">
+        <div class="ann-head"><span class="ann-badge ${lvl}">${lvl}</span>${pinned}${off}<span class="ann-title">${esc(a.title)}</span></div>
+        <div class="ann-content">${esc(a.content)}</div>
+        <div class="ann-meta">创建 ${a.created_at||'-'}${a.updated_at&&a.updated_at!==a.created_at?`　·　更新 ${a.updated_at}`:''}</div>
+      </div>
+      <div class="ann-actions">
+        <button class="btn btn-blue btn-sm" onclick="openAnnForm('${a.id}')">编辑</button>
+        <button class="btn btn-red btn-sm" onclick="delAnn('${a.id}')">删除</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+function openAnnForm(id){
+  editAnnId=id||null;
+  document.getElementById('ann-title').textContent=id?'编辑公告':'新建公告';
+  if(id){
+    const a=announcements.find(x=>x.id===id);
+    if(!a)return;
+    document.getElementById('ann-f-title').value=a.title||'';
+    document.getElementById('ann-f-content').value=a.content||'';
+    document.getElementById('ann-f-level').value=a.level||'info';
+    document.getElementById('ann-f-pinned').checked=!!a.pinned;
+    document.getElementById('ann-f-active').checked=a.active!==false;
+  }else{
+    document.getElementById('ann-f-title').value='';
+    document.getElementById('ann-f-content').value='';
+    document.getElementById('ann-f-level').value='info';
+    document.getElementById('ann-f-pinned').checked=false;
+    document.getElementById('ann-f-active').checked=true;
+  }
+  openM('m-ann');
+}
+async function saveAnn(){
+  const body={
+    title:document.getElementById('ann-f-title').value.trim(),
+    content:document.getElementById('ann-f-content').value.trim(),
+    level:document.getElementById('ann-f-level').value,
+    pinned:document.getElementById('ann-f-pinned').checked,
+    active:document.getElementById('ann-f-active').checked,
+  };
+  if(!body.title||!body.content)return toast('请填写标题和内容','error');
+  try{
+    const url=editAnnId?`/api/admin/announcements/${editAnnId}`:'/api/admin/announcements';
+    const method=editAnnId?'PUT':'POST';
+    const r=await fetch(url,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d=await r.json();
+    if(r.ok){toast(editAnnId?'已更新':'已创建','success');closeM('m-ann');loadAnnouncements();}
+    else toast(d.error||'失败','error');
+  }catch(e){toast('网络错误','error')}
+}
+function delAnn(id){
+  const a=announcements.find(x=>x.id===id);
+  if(!a)return;
+  document.getElementById('ann-del-text').innerHTML=`删除公告 <span class="confirm-pid">${esc(a.title)}</span>？<br>不可恢复。`;
+  document.getElementById('btn-ann-del').onclick=async()=>{
+    try{
+      const r=await fetch(`/api/admin/announcements/${id}`,{method:'DELETE'});
+      if(r.ok){toast('已删除','success');closeM('m-ann-del');loadAnnouncements();}
+      else toast('失败','error');
+    }catch(e){toast('失败','error')}
+  };
+  openM('m-ann-del');
+}
+
+checkAdmin();
+</script>
+</body>
+</html>
