@@ -1,5 +1,7 @@
 flask
 pycryptodome
+cryptography
+flask-limiter
 requests
 beautifulsoup4
 flask-cors

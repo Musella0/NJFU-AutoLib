@@ -4,17 +4,30 @@ import base64
 from functools import wraps
 from flask import Flask, render_template, jsonify, request, session
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from pymongo import MongoClient, DESCENDING
 from bson import ObjectId
 from bson.errors import InvalidId
 from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
 from utils import config
+from utils.crypto import encrypt as _enc, decrypt as _dec
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", os.urandom(32).hex())
 app.permanent_session_lifetime = timedelta(days=30)
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SECURE"] = os.environ.get("FLASK_ENV") == "production"
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 CORS(app)
+
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[],
+    storage_uri="memory://",
+)
 
 from blueprints.database_bp import database_bp
 app.register_blueprint(database_bp, url_prefix="/db")
@@ -48,6 +61,18 @@ def admin_required(f):
     return decorated
 
 
+def _get_decrypted_cfg(pid: str, uid: str):
+    """从 DB 读取用户配置并解密密码，返回 cfg 或 None。"""
+    client, db = get_db()
+    cfg = db.user_config_info.find_one({"pid": pid, "web_uid": uid})
+    client.close()
+    if cfg:
+        for field in ("vpn_password", "lib_password"):
+            if field in cfg and cfg[field]:
+                cfg[field] = _dec(cfg[field])
+    return cfg
+
+
 # ==================== Pages ====================
 
 @app.route("/")
@@ -62,6 +87,7 @@ def admin():
 # ==================== User Auth ====================
 
 @app.route("/api/auth/register", methods=["POST"])
+@limiter.limit("3/minute")
 def register():
     data = request.get_json()
     uid = data.get("username", "").strip()
@@ -92,6 +118,7 @@ def register():
 
 
 @app.route("/api/auth/login", methods=["POST"])
+@limiter.limit("5/minute")
 def login():
     data = request.get_json()
     uid = data.get("username", "").strip()
@@ -129,6 +156,7 @@ def auth_me():
 # ==================== Admin Auth (2FA) ====================
 
 @app.route("/api/admin/login", methods=["POST"])
+@limiter.limit("5/minute")
 def admin_login():
     data = request.get_json()
     totp_code = data.get("totp_code", "")
@@ -215,6 +243,10 @@ def get_my_account(pid):
     client.close()
     if not cfg:
         return jsonify({}), 200
+    # 解密敏感字段返回前端
+    for field in ("vpn_password", "lib_password"):
+        if field in cfg and cfg[field]:
+            cfg[field] = _dec(cfg[field])
     if isinstance(cfg.get("updated_at"), datetime):
         cfg["updated_at"] = cfg["updated_at"].strftime("%Y-%m-%d %H:%M:%S")
     return jsonify(cfg), 200
@@ -230,6 +262,11 @@ def save_my_account(pid):
                "is_reserved", "late_protection",
                "notify_email", "notify_serverchan_key", "verified"]
     update = {k: v for k, v in data.items() if k in allowed and v is not None}
+
+    # 加密敏感字段
+    for field in ("vpn_password", "lib_password"):
+        if field in update:
+            update[field] = _enc(update[field])
     update["pid"] = pid
     update["web_uid"] = uid
     update["updated_at"] = datetime.now()
@@ -251,8 +288,9 @@ def save_my_account(pid):
     else:
         # Reset verified if passwords actually changed (unless explicitly set)
         if not explicit_verified:
-            if ("vpn_password" in update and update["vpn_password"] != existing.get("vpn_password")) or \
-               ("lib_password" in update and update["lib_password"] != existing.get("lib_password")):
+            vpn_changed = "vpn_password" in update and _dec(update["vpn_password"]) != _dec(existing.get("vpn_password", ""))
+            lib_changed = "lib_password" in update and _dec(update["lib_password"]) != _dec(existing.get("lib_password", ""))
+            if vpn_changed or lib_changed:
                 update["verified"] = False
 
     client, db = get_db()
@@ -283,9 +321,7 @@ def delete_my_account(pid):
 def get_account_reservations(pid):
     """Live query reservations for a specific library account"""
     uid = session["web_uid"]
-    client, db = get_db()
-    cfg = db.user_config_info.find_one({"pid": pid, "web_uid": uid})
-    client.close()
+    cfg = _get_decrypted_cfg(pid, uid)
 
     if not cfg or not cfg.get("vpn_password") or not cfg.get("lib_password"):
         return jsonify({"error": "请先保存 VPN 和图书馆密码"}), 400
@@ -313,9 +349,7 @@ def cancel_account_reservation(pid):
     if not uuid:
         return jsonify({"error": "缺少 uuid"}), 400
 
-    client, db = get_db()
-    cfg = db.user_config_info.find_one({"pid": pid, "web_uid": uid})
-    client.close()
+    cfg = _get_decrypted_cfg(pid, uid)
 
     if not cfg or not cfg.get("vpn_password") or not cfg.get("lib_password"):
         return jsonify({"error": "请先保存密码配置"}), 400
@@ -350,9 +384,7 @@ def verify_account(pid):
 
     # Fall back to DB if passwords not provided in body
     if not vpn_password or not lib_password:
-        client, db = get_db()
-        cfg = db.user_config_info.find_one({"pid": pid, "web_uid": uid})
-        client.close()
+        cfg = _get_decrypted_cfg(pid, uid) if uid else None
         if cfg:
             vpn_password = vpn_password or cfg.get("vpn_password")
             lib_password = lib_password or cfg.get("lib_password")
@@ -434,9 +466,7 @@ def get_account_result(pid):
 def reserve_now(pid):
     """立即执行预约（非定时任务）"""
     uid = session["web_uid"]
-    client, db = get_db()
-    cfg = db.user_config_info.find_one({"pid": pid, "web_uid": uid})
-    client.close()
+    cfg = _get_decrypted_cfg(pid, uid)
 
     if not cfg:
         return jsonify({"error": "未找到该账号配置"}), 404

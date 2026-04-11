@@ -3,6 +3,7 @@ from pymongo import MongoClient, DESCENDING
 from datetime import datetime
 from utils import config
 from utils.library_system import LibrarySystem
+from utils.crypto import encrypt as _enc, decrypt as _dec
 
 # Blueprint and database setup
 database_bp = Blueprint("database_bp", __name__)
@@ -105,6 +106,10 @@ def insert_full_reservation():
         for key, value in data.items():
             if value is not None:  # 只更新非None的字段
                 existing_data[key] = value
+        # 加密敏感字段
+        for field in ("vpn_password", "lib_password"):
+            if field in existing_data and existing_data[field]:
+                existing_data[field] = _enc(existing_data[field])
         # 更新更新时间
         existing_data['updated_at'] = datetime.utcnow()
         # 使用更新后的数据
@@ -115,6 +120,10 @@ def insert_full_reservation():
         # 如果是新用户且没有priority字段，设置为0
         if "priority" not in rec:
             rec["priority"] = 0
+        # 加密敏感字段
+        for field in ("vpn_password", "lib_password"):
+            if field in rec and rec[field]:
+                rec[field] = _enc(rec[field])
         rec['updated_at'] = datetime.utcnow()
 
     # 更新数据库
@@ -148,8 +157,8 @@ def insert_or_update_reservation():
 
     rec = {
         "pid": data["pid"],
-        "vpn_password": data["vpn_password"],
-        "lib_password": data["lib_password"],
+        "vpn_password": _enc(data["vpn_password"]),
+        "lib_password": _enc(data["lib_password"]),
         "seat_list": data["seat_list"],
     }
     result, code = upsert_collection(user_cfg, {"pid": rec["pid"]}, rec)
@@ -347,8 +356,8 @@ def query_reservation_info():
         # 初始化图书馆系统
         library = LibrarySystem(
             username=data["pid"],
-            password=data["lib_password"],
-            vpn_password=data["vpn_password"]
+            password=_dec(data["lib_password"]),
+            vpn_password=_dec(data["vpn_password"])
         )
 
         # 获取查询参数
@@ -407,11 +416,11 @@ def delete_reservation():
         return jsonify({"error": f"缺少必要字段: {', '.join(missing)}"}), 400
 
     try:
-        # 初始化图书馆系统
+        # 初始化图书馆系统（解密密码）
         library = LibrarySystem(
             username=data["pid"],
-            password=data["lib_password"],
-            vpn_password=data["vpn_password"]
+            password=_dec(data["lib_password"]),
+            vpn_password=_dec(data["vpn_password"])
         )
 
         # 删除预约

@@ -11,8 +11,7 @@ services:
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASS:-autolib123}
     volumes:
       - mongo_data:/data/db
-    ports:
-      - "${MONGO_PORT:-27017}:27017"
+    # 不暴露端口，仅容器内网访问
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 10s
@@ -38,7 +37,9 @@ services:
       - FOLDER_PATH=座位信息
       - TZ=Asia/Shanghai
       - SECRET_KEY=${SECRET_KEY:-change-me-to-a-random-string}
+      - FLASK_ENV=${FLASK_ENV:-production}
       - ADMIN_TOTP_SECRET=${ADMIN_TOTP_SECRET:-}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
     ports:
       - "${API_PORT:-5003}:5003"
     volumes:

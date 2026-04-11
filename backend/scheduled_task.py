@@ -45,6 +45,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from utils.vpn_system import VPNSystem
 from utils.library_system import LibrarySystem
 from utils.notify import notify_user
+from utils.crypto import decrypt as _dec
 from utils import config
 
 # 日志配置
@@ -266,8 +267,8 @@ def reservation(res_item: Dict[str, Any]) -> None:
     """
     # 加载账号信息
     pid = res_item["pid"]
-    vpn_password = res_item["vpn_password"]
-    lib_password = res_item["lib_password"].replace('！', '!')
+    vpn_password = _dec(res_item["vpn_password"])
+    lib_password = _dec(res_item["lib_password"]).replace('！', '!')
     seat_list = res_item["seat_list"]
 
     try:
@@ -384,8 +385,8 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
             log_with_user(logger, 'info', pid, '迟到保护', f"开始处理座位 {dev_name} 的迟到保护")
             library = LibrarySystem(
                 username=user["pid"],
-                password=user["lib_password"],
-                vpn_password=user["vpn_password"]
+                password=_dec(user["lib_password"]),
+                vpn_password=_dec(user["vpn_password"])
             )
 
             # 删除原预约
