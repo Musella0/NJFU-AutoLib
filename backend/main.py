@@ -20,7 +20,8 @@ app.permanent_session_lifetime = timedelta(days=30)
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SECURE"] = os.environ.get("FLASK_ENV") == "production"
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-CORS(app)
+_cors_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
+CORS(app, origins=_cors_origins if _cors_origins else [])
 
 limiter = Limiter(
     get_remote_address,
@@ -161,12 +162,9 @@ def login():
     client, db = get_db()
     user = db.web_users.find_one({"uid": uid})
 
-    if not user:
+    if not user or not check_password_hash(user.get("password", ""), password):
         client.close()
-        return jsonify({"error": "用户不存在"}), 404
-    if not check_password_hash(user["password"], password):
-        client.close()
-        return jsonify({"error": "密码错误"}), 401
+        return jsonify({"error": "用户名或密码错误"}), 401
 
     session.permanent = True
     session["web_uid"] = uid
@@ -213,6 +211,7 @@ def admin_login():
 
 
 @app.route("/api/admin/totp_setup", methods=["GET"])
+@admin_required
 def admin_totp_setup():
     """Generate TOTP QR code for first-time setup"""
     if not ADMIN_TOTP_SECRET:

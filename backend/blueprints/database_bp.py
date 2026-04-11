@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, session
 from pymongo import MongoClient, DESCENDING
 from datetime import datetime
 from utils import config
@@ -7,6 +7,12 @@ from utils.crypto import encrypt as _enc, decrypt as _dec
 
 # Blueprint and database setup
 database_bp = Blueprint("database_bp", __name__)
+
+
+@database_bp.before_request
+def require_admin():
+    if not session.get("is_admin"):
+        return jsonify({"error": "需要管理员权限"}), 403
 
 # 构建 MongoDB 连接字符串，暂时去掉密码验证
 # WARNING: 这会禁用应用层面的数据库认证，带来安全风险，仅用于调试！
