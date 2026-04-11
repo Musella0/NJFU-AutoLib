@@ -320,6 +320,10 @@ def save_my_account(pid):
     if not existing:
         if "priority" not in update:
             update["priority"] = 0
+        if "is_reserved" not in update:
+            update["is_reserved"] = "True"
+        if "late_protection" not in update:
+            update["late_protection"] = "False"
         if not explicit_verified:
             update["verified"] = False
     else:
