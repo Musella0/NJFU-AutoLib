@@ -38,8 +38,6 @@ services:
       - FOLDER_PATH=座位信息
       - TZ=Asia/Shanghai
       - SECRET_KEY=${SECRET_KEY:-change-me-to-a-random-string}
-      - ADMIN_USER=${ADMIN_USER:-admin}
-      - ADMIN_PASS=${ADMIN_PASS:-admin123}
       - ADMIN_TOTP_SECRET=${ADMIN_TOTP_SECRET:-}
     ports:
       - "${API_PORT:-5003}:5003"

@@ -19,9 +19,7 @@ CORS(app)
 from blueprints.database_bp import database_bp
 app.register_blueprint(database_bp, url_prefix="/db")
 
-# Admin credentials from env
-ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
-ADMIN_PASS = os.environ.get("ADMIN_PASS", "admin123")
+# Admin TOTP secret from env
 ADMIN_TOTP_SECRET = os.environ.get("ADMIN_TOTP_SECRET", "")
 
 
@@ -133,22 +131,16 @@ def auth_me():
 @app.route("/api/admin/login", methods=["POST"])
 def admin_login():
     data = request.get_json()
-    username = data.get("username", "")
-    password = data.get("password", "")
     totp_code = data.get("totp_code", "")
 
-    if username != ADMIN_USER or password != ADMIN_PASS:
-        return jsonify({"error": "用户名或密码错误"}), 401
+    # TOTP verification (required)
+    if not ADMIN_TOTP_SECRET:
+        return jsonify({"error": "请先在 .env 中配置 ADMIN_TOTP_SECRET"}), 400
 
-    # TOTP verification
-    if ADMIN_TOTP_SECRET:
-        import pyotp
-        totp = pyotp.TOTP(ADMIN_TOTP_SECRET)
-        if not totp.verify(totp_code, valid_window=1):
-            return jsonify({"error": "动态验证码错误"}), 401
-    else:
-        # TOTP not configured yet — first time setup
-        pass
+    import pyotp
+    totp = pyotp.TOTP(ADMIN_TOTP_SECRET)
+    if not totp.verify(totp_code, valid_window=1):
+        return jsonify({"error": "动态验证码错误"}), 401
 
     session["is_admin"] = True
     return jsonify({"message": "管理员登录成功"}), 200
@@ -164,7 +156,7 @@ def admin_totp_setup():
     import qrcode
 
     totp = pyotp.TOTP(ADMIN_TOTP_SECRET)
-    uri = totp.provisioning_uri(name=ADMIN_USER, issuer_name="AutoLib Admin")
+    uri = totp.provisioning_uri(name="admin", issuer_name="AutoLib Admin")
 
     # Generate QR code as base64 image
     img = qrcode.make(uri)

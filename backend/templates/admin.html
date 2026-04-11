@@ -156,9 +156,7 @@
     <div class="admin-login-wrap">
       <div class="admin-login-card">
         <div class="al-title">管理员登录</div>
-        <div class="al-field"><label>用户名</label><input type="text" id="adm-user"></div>
-        <div class="al-field"><label>密码</label><input type="password" id="adm-pass"></div>
-        <div class="al-field"><label>动态验证码 (TOTP)</label><input type="text" id="adm-totp" placeholder="6位数字" maxlength="6"></div>
+        <div class="al-field"><label>动态验证码 (TOTP)</label><input type="text" id="adm-totp" placeholder="6位数字" maxlength="6" autofocus></div>
         <button class="al-btn" onclick="adminLogin()">登录</button>
         <div class="al-hint">使用 Google Authenticator / 微软验证器</div>
       </div>
@@ -267,8 +265,8 @@ function esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace
 // ===== Admin Auth =====
 async function checkAdmin(){try{const r=await fetch('/api/admin/me'),d=await r.json();if(d.is_admin){showAdminMain();}else{document.getElementById('admin-login').style.display='';}}catch(e){document.getElementById('admin-login').style.display='';}}
 async function adminLogin(){
-  const u=document.getElementById('adm-user').value,p=document.getElementById('adm-pass').value,t=document.getElementById('adm-totp').value;
-  try{const r=await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p,totp_code:t})});const d=await r.json();if(r.ok){toast('登录成功','success');showAdminMain();}else toast(d.error,'error');}catch(e){toast('网络错误','error')}
+  const t=document.getElementById('adm-totp').value;
+  try{const r=await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({totp_code:t})});const d=await r.json();if(r.ok){toast('登录成功','success');showAdminMain();}else toast(d.error,'error');}catch(e){toast('网络错误','error')}
 }
 async function adminLogout(){await fetch('/api/admin/logout',{method:'POST'});location.reload();}
 function showAdminMain(){document.getElementById('admin-login').style.display='none';document.getElementById('totp-setup').style.display='none';document.getElementById('admin-main').style.display='';document.getElementById('admin-nav').style.display='flex';loadUsers();loadAnnouncements();}
