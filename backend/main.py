@@ -41,13 +41,43 @@ def get_db():
     return client, client.AutoLib
 
 
+def _ensure_uid():
+    """确保 session 中有 uid：已登录返回真实 uid，否则分配游客 uid。"""
+    uid = session.get("web_uid")
+    if uid:
+        return uid
+    guest_uid = session.get("guest_uid")
+    if not guest_uid:
+        import uuid as _uuid
+        guest_uid = f"guest_{_uuid.uuid4().hex[:12]}"
+        session["guest_uid"] = guest_uid
+        session.permanent = True
+    return guest_uid
+
+
+def _is_guest():
+    return "web_uid" not in session
+
+
+def _migrate_guest_data(db, real_uid: str):
+    """将游客 session 期间创建的数据迁移到真实 uid。"""
+    guest_uid = session.get("guest_uid")
+    if not guest_uid:
+        return
+    db.user_config_info.update_many(
+        {"web_uid": guest_uid},
+        {"$set": {"web_uid": real_uid}}
+    )
+    session.pop("guest_uid", None)
+
+
 # ==================== Decorators ====================
 
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if "web_uid" not in session:
-            return jsonify({"error": "请先登录", "need_login": True}), 401
+        # 不再强制登录，自动分配游客 uid
+        _ensure_uid()
         return f(*args, **kwargs)
     return decorated
 
@@ -110,10 +140,12 @@ def register():
         "password": generate_password_hash(password),
         "created_at": datetime.now()
     })
-    client.close()
 
     session.permanent = True
     session["web_uid"] = uid
+    # 迁移游客数据到真实 uid
+    _migrate_guest_data(db, uid)
+    client.close()
     return jsonify({"message": "注册成功", "uid": uid}), 200
 
 
@@ -128,15 +160,19 @@ def login():
 
     client, db = get_db()
     user = db.web_users.find_one({"uid": uid})
-    client.close()
 
     if not user:
+        client.close()
         return jsonify({"error": "用户不存在"}), 404
     if not check_password_hash(user["password"], password):
+        client.close()
         return jsonify({"error": "密码错误"}), 401
 
     session.permanent = True
     session["web_uid"] = uid
+    # 迁移游客数据到真实 uid
+    _migrate_guest_data(db, uid)
+    client.close()
     return jsonify({"message": "登录成功", "uid": uid}), 200
 
 
@@ -149,8 +185,10 @@ def logout():
 @app.route("/api/auth/me", methods=["GET"])
 def auth_me():
     if "web_uid" in session:
-        return jsonify({"logged_in": True, "uid": session["web_uid"]}), 200
-    return jsonify({"logged_in": False}), 200
+        return jsonify({"logged_in": True, "uid": session["web_uid"], "is_guest": False}), 200
+    if "guest_uid" in session:
+        return jsonify({"logged_in": False, "uid": session["guest_uid"], "is_guest": True}), 200
+    return jsonify({"logged_in": False, "is_guest": True}), 200
 
 
 # ==================== Admin Auth (2FA) ====================

@@ -177,7 +177,7 @@
   <div id="main-page" style="display:none">
     <!-- Guest banner -->
     <div id="guest-banner" class="guest-banner" style="display:none">
-      <div class="guest-banner-text">您正在使用 <strong>游客模式</strong>。登录后可添加图书馆账号、配置定时预约、接收通知推送。</div>
+      <div class="guest-banner-text">您正在使用 <strong>游客模式</strong>，数据仅保存在当前浏览器。登录后可跨设备管理配置和接收通知。</div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0">
         <label class="chk" style="margin:0"><input type="checkbox" id="guest-no-remind-banner">不再提示</label>
         <button class="btn btn-primary btn-sm" onclick="showAuthFromGuest()">登录 / 注册</button>
@@ -385,7 +385,7 @@ async function doLogout(){
 }
 async function checkAuth(){
   try{const r=await fetch('/api/auth/me'),d=await r.json();if(d.logged_in){showMain(d.uid);return;}}catch(e){}
-  showGuestMain();
+  showGuestMain();isGuest=true;
 }
 function showMain(uid){
   isGuest=false;localStorage.removeItem('autolib_guest');
@@ -410,7 +410,7 @@ function showGuestMain(){
   const noRemind=localStorage.getItem('autolib_guest')==='no-remind';
   document.getElementById('guest-banner').style.display=noRemind?'none':'';
   if(noRemind)document.getElementById('guest-no-remind-banner').checked=true;
-  const addBtn=document.querySelector('#tab-accounts .btn-group .btn-green');if(addBtn)addBtn.style.display='none';
+  const addBtn=document.querySelector('#tab-accounts .btn-group .btn-green');if(addBtn)addBtn.style.display='';
   loadSeats();loadAccounts();loadNotices();
 }
 function dismissGuestBanner(){
@@ -430,12 +430,7 @@ document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>
 
 // ===== Accounts =====
 async function loadAccounts(){
-  if(isGuest){
-    accounts=[];
-    document.getElementById('acct-list').innerHTML='<div style="color:var(--text3);font-size:13px;text-align:center;padding:12px 0">游客模式下无法加载账号列表，请登录后使用</div>';
-    return;
-  }
-  try{const r=await fetch('/api/my/accounts'),d=await r.json();accounts=d;renderAccounts();loadNotices();}catch(e){toast('加载失败','error')}
+  try{const r=await fetch('/api/my/accounts'),d=await r.json();if(r.ok){accounts=d;renderAccounts();}else{accounts=[];renderAccounts();}loadNotices();}catch(e){toast('加载失败','error')}
 }
 function renderAccounts(){
   const el=document.getElementById('acct-list');
@@ -455,7 +450,7 @@ function renderAccounts(){
   sel.innerHTML=accounts.map(a=>`<option value="${a.pid}" ${a.pid===currentPid?'selected':''}>${a.pid}</option>`).join('');
 }
 function selectAccount(pid){currentPid=pid;renderAccounts();loadAccountConfig(pid);updateStatusView();updateNotifyView();switchTab('config');}
-function showAddAccount(){if(isGuest)return toast('请先登录后再添加账号','error');document.getElementById('add-acct-card').style.display='';}
+function showAddAccount(){document.getElementById('add-acct-card').style.display='';}
 function hideAddAccount(){document.getElementById('add-acct-card').style.display='none';}
 async function addAccount(){
   const pid=document.getElementById('new-pid').value.trim();
@@ -524,7 +519,6 @@ async function saveConfig(){
   catch(e){toast('网络错误','error')}finally{btn.disabled=false;btn.innerHTML='保存配置'}
 }
 async function reserveNow(){
-  if(isGuest)return toast('请先登录后使用','error');
   if(!currentPid)return toast('请先选择一个学号','error');
   if(!confirm('立即执行一次预约？\n\n将使用当前已保存的配置（VPN/图书馆密码、座位列表、时间）立刻预约，可能需要几秒钟。建议先保存最新配置。'))return;
   const btn=document.getElementById('btn-reserve-now');
