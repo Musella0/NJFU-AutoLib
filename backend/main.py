@@ -255,7 +255,7 @@ def admin_me():
 @login_required
 def get_my_accounts():
     """Get all library accounts under current web user"""
-    uid = session["web_uid"]
+    uid = _ensure_uid()
     client, db = get_db()
     accounts = list(db.user_config_info.find(
         {"web_uid": uid},
@@ -272,7 +272,7 @@ def get_my_accounts():
 @login_required
 def get_my_account(pid):
     """Get single account config (with passwords, for editing)"""
-    uid = session["web_uid"]
+    uid = _ensure_uid()
     client, db = get_db()
     cfg = db.user_config_info.find_one(
         {"web_uid": uid, "pid": pid},
@@ -294,7 +294,7 @@ def get_my_account(pid):
 @login_required
 def save_my_account(pid):
     """Save/update a library account config"""
-    uid = session["web_uid"]
+    uid = _ensure_uid()
     data = request.get_json()
     allowed = ["vpn_password", "lib_password", "seat_list", "mode", "time",
                "is_reserved", "late_protection",
@@ -345,7 +345,7 @@ def save_my_account(pid):
 @login_required
 def delete_my_account(pid):
     """Delete a library account from current web user"""
-    uid = session["web_uid"]
+    uid = _ensure_uid()
     client, db = get_db()
     result = db.user_config_info.delete_one({"pid": pid, "web_uid": uid})
     client.close()
@@ -358,7 +358,7 @@ def delete_my_account(pid):
 @login_required
 def get_account_reservations(pid):
     """Live query reservations for a specific library account"""
-    uid = session["web_uid"]
+    uid = _ensure_uid()
     cfg = _get_decrypted_cfg(pid, uid)
 
     if not cfg or not cfg.get("vpn_password") or not cfg.get("lib_password"):
@@ -381,7 +381,7 @@ def get_account_reservations(pid):
 @login_required
 def cancel_account_reservation(pid):
     """Cancel a reservation for a specific library account"""
-    uid = session["web_uid"]
+    uid = _ensure_uid()
     data = request.get_json()
     uuid = data.get("uuid")
     if not uuid:
@@ -414,7 +414,7 @@ def verify_account(pid):
     in addAccount flow) or falls back to the saved account config in DB.
     Returns `failed_at` to tell the frontend which step failed.
     """
-    uid = session["web_uid"]
+    uid = _ensure_uid()
     data = request.get_json(silent=True) or {}
 
     vpn_password = data.get("vpn_password")
@@ -490,7 +490,7 @@ def verify_account(pid):
 @app.route("/api/my/accounts/<pid>/result", methods=["GET"])
 @login_required
 def get_account_result(pid):
-    uid = session["web_uid"]
+    uid = _ensure_uid()
     client, db = get_db()
     cfg = db.user_config_info.find_one(
         {"pid": pid, "web_uid": uid}, {"result": 1, "_id": 0}
@@ -503,7 +503,7 @@ def get_account_result(pid):
 @login_required
 def reserve_now(pid):
     """立即执行预约（非定时任务）"""
-    uid = session["web_uid"]
+    uid = _ensure_uid()
     cfg = _get_decrypted_cfg(pid, uid)
 
     if not cfg:
@@ -790,7 +790,7 @@ def my_reservation_results():
     if "web_uid" not in session:
         return jsonify({"error": "请先登录", "need_login": True}), 401
     
-    uid = session["web_uid"]
+    uid = _ensure_uid()
     client, db = get_db()
     rows = list(db.user_config_info.find(
         {"web_uid": uid, "result": {"$exists": True, "$ne": ""}},
