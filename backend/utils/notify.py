@@ -47,7 +47,12 @@ def send_email(to_addr: str, subject: str, content: str) -> bool:
         msg["Subject"] = subject
         msg.attach(MIMEText(content, "plain", "utf-8"))
 
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
+        if SMTP_PORT == 465:
+            context = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT)
+        else:
+            context = smtplib.SMTP(SMTP_HOST, SMTP_PORT)
+            context.starttls()
+        with context as server:
             server.login(SMTP_USER, SMTP_PASS)
             server.send_message(msg)
 

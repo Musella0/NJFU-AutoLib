@@ -282,7 +282,7 @@ async function setupTotp(){
 async function loadUsers(){
   try{
     document.getElementById('grid').innerHTML='<div style="color:var(--text3);text-align:center;padding:40px">加载中…</div>';
-    const r=await fetch('/api/users');if(r.status===403){location.reload();return;}
+    const r=await fetch('/api/users',{cache:'no-store'});if(r.status===403){document.getElementById('admin-main').style.display='none';document.getElementById('admin-nav').style.display='none';document.getElementById('admin-login').style.display='';toast('登录已失效，请重新验证','error');return;}
     if(!r.ok){const d=await r.json().catch(()=>({}));document.getElementById('grid').innerHTML=`<div style="color:var(--red);text-align:center;padding:40px">加载失败：${d.error||r.statusText}</div>`;return;}
     users=await r.json();
     if(!Array.isArray(users)){document.getElementById('grid').innerHTML='<div style="color:var(--red);text-align:center;padding:40px">加载失败：数据格式异常</div>';return;}
@@ -327,7 +327,7 @@ function card(u){
     ${res?`<div class="uc-footer"><div class="uc-result ${rc}">结果: ${esc(res)}</div></div>`:''}
   </div>`;}
 
-async function tog(pid,field,on){try{await fetch(`/api/users/${pid}/toggle`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({field,value:on?'True':'False'})});const u=users.find(x=>x.pid===pid);if(u)u[field]=on?'True':'False';const onc=users.filter(u=>u.is_reserved==='True').length;document.getElementById('s-on').textContent=onc;document.getElementById('s-off').textContent=users.length-onc;document.getElementById('s-lp').textContent=users.filter(u=>u.late_protection==='True').length;toast(`${pid} 已更新`,'success');}catch(e){toast('失败','error')}}
+async function tog(pid,field,on){try{const r=await fetch(`/api/users/${pid}/toggle`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({field,value:on?'True':'False'})});if(!r.ok){const d=await r.json().catch(()=>({}));toast(d.error||'更新失败','error');loadUsers();return;}const u=users.find(x=>x.pid===pid);if(u){u[field]=on?'True':'False';renderAll();}const onc=users.filter(u=>u.is_reserved==='True').length;document.getElementById('s-on').textContent=onc;document.getElementById('s-off').textContent=users.length-onc;document.getElementById('s-lp').textContent=users.filter(u=>u.late_protection==='True').length;toast(`${pid} 已更新`,'success');}catch(e){toast('失败','error');loadUsers();}}
 
 function editPri(pid,cur){editPid=pid;document.getElementById('ed-title').textContent='优先级: '+pid;document.getElementById('ed-priority').value=cur;openM('m-edit');}
 async function savePriority(){if(!editPid)return;const p=parseInt(document.getElementById('ed-priority').value)||0;try{const r=await fetch(`/api/users/${editPid}/update`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({priority:p})});if(r.ok){toast('已更新','success');closeM('m-edit');loadUsers();}else toast('失败','error');}catch(e){toast('失败','error')}}

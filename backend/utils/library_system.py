@@ -625,7 +625,7 @@ class LibrarySystem(BaseSystem):
             params = {
                 "beginDate": begin_date,
                 "endDate": end_date,
-                "needStatus": 6,  # 所有状态
+                "needStatus": 7,  # 待签到(1)+使用中(2)+暂离(4)
                 "page": page,
                 "pageNum": page_num,
                 "orderKey": "gmt_create",
