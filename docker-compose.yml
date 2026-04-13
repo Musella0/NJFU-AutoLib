@@ -38,6 +38,7 @@ services:
       - TZ=Asia/Shanghai
       - SECRET_KEY=${SECRET_KEY:-change-me-to-a-random-string}
       - FLASK_ENV=${FLASK_ENV:-production}
+      - SESSION_COOKIE_SECURE=${SESSION_COOKIE_SECURE:-false}
       - ADMIN_TOTP_SECRET=${ADMIN_TOTP_SECRET:-}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
     ports:
@@ -70,6 +71,7 @@ services:
       - SMTP_PORT=${SMTP_PORT:-465}
       - SMTP_USER=${SMTP_USER:-}
       - SMTP_PASS=${SMTP_PASS:-}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
     entrypoint: ["python", "scheduler_runner.py"]
     volumes:
       - scheduler_logs:/app/logs
