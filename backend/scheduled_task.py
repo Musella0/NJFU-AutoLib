@@ -200,13 +200,12 @@ def calculate_reservation_time(res_item: Dict[str, Any]) -> Tuple[str, str]:
         # 预约明天的时间
         res_time = res_item["time"]["tomorrow"]
         begin_time, end_time = res_time.split("-")
-        date_str = now.strftime("%Y-%m-%d")
+        date_str = (now + timedelta(days=1)).strftime("%Y-%m-%d")
     elif mode == "after_tomorrow":
         # 预约后天的时间
         res_time = res_item["time"]["tomorrow"]
         begin_time, end_time = res_time.split("-")
-        tomorrow = now + timedelta(days=1)
-        date_str = tomorrow.strftime("%Y-%m-%d")
+        date_str = (now + timedelta(days=2)).strftime("%Y-%m-%d")
     else:
         raise ValueError(f"不支持的预约模式: {mode}")
 
