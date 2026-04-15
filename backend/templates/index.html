@@ -298,13 +298,6 @@
           <button class="btn btn-primary" id="btn-save" onclick="saveConfig()">保存配置</button>
           <button class="btn btn-green" id="btn-reserve-now" onclick="reserveNow()">立即预约</button>
         </div>
-        <div class="card" id="cfg-resv-card" style="display:none">
-          <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
-            <span>当前预约</span>
-            <button class="btn btn-outline btn-sm" onclick="loadCfgResv()">刷新</button>
-          </div>
-          <div class="resv-list" id="cfg-resv-list"><div style="color:var(--text3);font-size:13px">加载中...</div></div>
-        </div>
       </div>
     </div>
 
@@ -436,7 +429,7 @@ document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>
 
 // ===== Accounts =====
 async function loadAccounts(){
-  try{const r=await fetch('/api/my/accounts'),d=await r.json();if(r.ok){accounts=d;renderAccounts();}else{accounts=[];renderAccounts();}loadNotices();}catch(e){toast('加载失败','error')}
+  try{const r=await fetch('/api/my/accounts'),d=await r.json();if(r.ok){accounts=d;renderAccounts();if(!currentPid&&accounts.length){currentPid=accounts[0].pid;renderAccounts();loadAccountConfig(accounts[0].pid);updateStatusView();updateNotifyView();}}else{accounts=[];renderAccounts();}loadNotices();}catch(e){toast('加载失败','error')}
 }
 function renderAccounts(){
   const el=document.getElementById('acct-list');
@@ -512,9 +505,6 @@ async function loadAccountConfig(pid){
     if(cfg.mode==='week_time'&&cfg.time&&cfg.time.week_time){for(let i=1;i<=7;i++){const v=cfg.time.week_time[String(i)];if(v){const[b,e]=v.split('-');const bE=document.getElementById(`week-begin-${i}`),eE=document.getElementById(`week-end-${i}`);if(bE)bE.value=b;if(eE)eE.value=e;}}}
     else if(cfg.time&&cfg.time.tomorrow){const[b,e]=cfg.time.tomorrow.split('-');document.getElementById('simple-begin').value=b;document.getElementById('simple-end').value=e;}
   }catch(e){}
-  // 显示当前预约区域并加载
-  document.getElementById('cfg-resv-card').style.display='';
-  loadCfgResv();
 }
 async function saveConfig(){
   if(!currentPid)return toast('请先选择一个学号','error');
@@ -565,16 +555,7 @@ async function queryLive(){
   finally{btn.disabled=false;btn.innerHTML='刷新实时预约'}
 }
 function fmtSt(s){return{1:'待签到',2:'使用中',3:'暂离',4:'已结束',5:'已取消',1093:'已违约'}[s]||`未知(${s})`;}
-async function cancelResv(uuid,fromCfg){if(!confirm('确定取消？'))return;try{const r=await fetch(`/api/my/accounts/${currentPid}/cancel`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uuid})});const d=await r.json();toast(d.message||'完成',d.success?'success':'error');if(d.success){if(fromCfg)loadCfgResv();else queryLive();}}catch(e){toast('失败','error')}}
-async function loadCfgResv(){
-  const list=document.getElementById('cfg-resv-list');list.innerHTML='<div style="color:var(--text3);font-size:13px">正在查询...</div>';
-  try{const r=await fetch(`/api/my/accounts/${currentPid}/reservations`),d=await r.json();
-    if(d.error){list.innerHTML=`<div style="color:var(--red);font-size:13px">${d.error}</div>`;return;}
-    if(!d.reservations||!d.reservations.length){list.innerHTML='<div style="color:var(--text3);font-size:13px">当前没有预约</div>';return;}
-    list.innerHTML=d.reservations.map(rv=>{const seat=rv.devInfo?.devName||'未知';const st=fmtSt(rv.resvStatus);const sc=rv.resvStatus<=2?'active':(rv.resvStatus===1093?'violation':'ended');const cc=rv.resvStatus<=3;
-      return `<div class="resv-item"><div class="resv-info"><div class="resv-seat">${seat}</div><div class="resv-time">${rv.resvBeginTime} ~ ${rv.resvEndTime}</div></div><div style="display:flex;align-items:center;gap:8px"><span class="resv-status ${sc}">${st}</span>${cc?`<button class="btn btn-danger btn-sm" onclick="cancelResv('${rv.uuid}',true)">取消</button>`:''}</div></div>`;}).join('');
-  }catch(e){list.innerHTML=`<div style="color:var(--red);font-size:13px">失败: ${e.message}</div>`;}
-}
+async function cancelResv(uuid){if(!confirm('确定取消？'))return;try{const r=await fetch(`/api/my/accounts/${currentPid}/cancel`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uuid})});const d=await r.json();toast(d.message||'完成',d.success?'success':'error');if(d.success)queryLive();}catch(e){toast('失败','error')}}
 
 // ===== Notify =====
 function updateNotifyView(){
