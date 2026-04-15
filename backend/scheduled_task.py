@@ -373,21 +373,42 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
     执行迟到保护动作
 
     迟到保护流程：
+    0. 检查用户是否已在馆内（已签到则跳过）
     1. 取消原预约
     2. 计算新的预约时间（延后1小时）
     3. 重新预约座位（最多重试3次）
     """
     pid = user["pid"]
     try:
+        log_with_user(logger, 'info', pid, '迟到保护', f"开始处理座位 {dev_name} 的迟到保护")
+        library = LibrarySystem(
+            username=user["pid"],
+            password=_dec(user["lib_password"]),
+            vpn_password=_dec(user["vpn_password"])
+        )
+
+        # 检查用户当前签到状态，若已在馆则无需保护
+        # 2/1093=使用中，3141=暂离，均表示用户已完成签到入馆
+        IN_LIBRARY_STATUSES = {2, 1093, 3141}
+        try:
+            res_list, _ = library.get_reservation_info()
+            if res_list:
+                for res in res_list:
+                    if res.get('uuid') == seat_dict['uuid']:
+                        current_status = res.get('resvStatus')
+                        if current_status in IN_LIBRARY_STATUSES:
+                            log_with_user(logger, 'info', pid, '迟到保护',
+                                f"用户已在馆内（状态码: {current_status}），跳过迟到保护")
+                            return
+                        log_with_user(logger, 'info', pid, '迟到保护',
+                            f"用户未签到（状态码: {current_status}），继续执行迟到保护")
+                        break
+        except Exception as e:
+            log_with_user(logger, 'warning', pid, '迟到保护',
+                f"检查签到状态失败，继续执行迟到保护: {str(e)}")
+
         # 取消原预约
         try:
-            log_with_user(logger, 'info', pid, '迟到保护', f"开始处理座位 {dev_name} 的迟到保护")
-            library = LibrarySystem(
-                username=user["pid"],
-                password=_dec(user["lib_password"]),
-                vpn_password=_dec(user["vpn_password"])
-            )
-
             # 删除原预约
             success, message = library.delete_seat(seat_dict["uuid"])
             if not success:
