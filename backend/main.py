@@ -408,6 +408,27 @@ def cancel_account_reservation(pid):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/my/accounts/<pid>/arrived", methods=["POST"])
+@login_required
+def toggle_arrived(pid):
+    """Toggle the 'arrived at library today' flag for late-protection bypass."""
+    uid = _ensure_uid()
+    today = datetime.now().strftime("%Y-%m-%d")
+    client, db = get_db()
+    cfg = db.user_config_info.find_one({"pid": pid, "web_uid": uid}, {"arrived_date": 1})
+    if not cfg:
+        client.close()
+        return jsonify({"error": "账号不存在"}), 404
+    already = cfg.get("arrived_date") == today
+    new_val = "" if already else today
+    db.user_config_info.update_one(
+        {"pid": pid, "web_uid": uid},
+        {"$set": {"arrived_date": new_val}}
+    )
+    client.close()
+    return jsonify({"arrived": not already}), 200
+
+
 @app.route("/api/my/accounts/<pid>/verify", methods=["POST"])
 @login_required
 def verify_account(pid):

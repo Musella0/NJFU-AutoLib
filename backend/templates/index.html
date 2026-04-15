@@ -319,6 +319,7 @@
           <div class="card-title">当前预约</div>
           <div class="btn-group" style="margin-top:0;margin-bottom:16px">
             <button class="btn btn-outline btn-sm" id="btn-query-live" onclick="queryLive()">刷新实时预约</button>
+            <button class="btn btn-outline btn-sm" id="btn-arrived" onclick="toggleArrived()">我已到馆</button>
           </div>
           <div class="resv-list" id="resv-list">
             <div style="color:var(--text3);font-size:13px">点击上方按钮查询</div>
@@ -539,9 +540,9 @@ async function reserveNow(){
 function updateStatusView(){
   if(!currentPid){document.getElementById('no-acct-status').style.display='';document.getElementById('status-content').style.display='none';return;}
   document.getElementById('no-acct-status').style.display='none';document.getElementById('status-content').style.display='';
-  document.getElementById('status-pid-label').textContent='学号: '+currentPid;loadResult();
+  document.getElementById('status-pid-label').textContent='学号: '+currentPid;loadResult();loadArrivedState();
 }
-function switchStatusAccount(){currentPid=document.getElementById('status-acct-select').value;document.getElementById('status-pid-label').textContent='学号: '+currentPid;loadResult();document.getElementById('resv-list').innerHTML='<div style="color:var(--text3);font-size:13px">点击刷新按钮查询</div>';}
+function switchStatusAccount(){currentPid=document.getElementById('status-acct-select').value;document.getElementById('status-pid-label').textContent='学号: '+currentPid;loadResult();loadArrivedState();document.getElementById('resv-list').innerHTML='<div style="color:var(--text3);font-size:13px">点击刷新按钮查询</div>';}
 async function loadResult(){try{const r=await fetch(`/api/my/accounts/${currentPid}/result`),d=await r.json();document.getElementById('last-result').textContent=d.result||'暂无预约结果';}catch(e){}}
 async function queryLive(){
   const btn=document.getElementById('btn-query-live');btn.disabled=true;btn.innerHTML='<span class="spinner"></span> 查询中...';
@@ -555,6 +556,28 @@ async function queryLive(){
   finally{btn.disabled=false;btn.innerHTML='刷新实时预约'}
 }
 function fmtSt(s){return{1:'待签到',2:'使用中',3:'暂离',4:'已结束',5:'已取消',1027:'未开始',1093:'使用中',3141:'暂离'}[s]||`未知(${s})`;}
+async function loadArrivedState(){
+  if(!currentPid)return;
+  try{const r=await fetch(`/api/my/accounts/${currentPid}`),d=await r.json();
+    const today=new Date().toISOString().slice(0,10);
+    setArrivedBtn(d.arrived_date===today);
+  }catch(e){}
+}
+function setArrivedBtn(arrived){
+  const btn=document.getElementById('btn-arrived');
+  if(!btn)return;
+  if(arrived){btn.className='btn btn-green btn-sm';btn.textContent='已到馆 · 点击取消';}
+  else{btn.className='btn btn-outline btn-sm';btn.textContent='我已到馆';}
+}
+async function toggleArrived(){
+  if(!currentPid)return;
+  const btn=document.getElementById('btn-arrived');btn.disabled=true;
+  try{const r=await fetch(`/api/my/accounts/${currentPid}/arrived`,{method:'POST'});
+    const d=await r.json();setArrivedBtn(d.arrived);
+    toast(d.arrived?'已标记到馆，迟到保护今日不触发':'已取消到馆标记','success');
+  }catch(e){toast('操作失败','error');}
+  finally{btn.disabled=false;}
+}
 async function cancelResv(uuid){if(!confirm('确定取消？'))return;try{const r=await fetch(`/api/my/accounts/${currentPid}/cancel`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uuid})});const d=await r.json();toast(d.message||'完成',d.success?'success':'error');if(d.success)queryLive();}catch(e){toast('失败','error')}}
 
 // ===== Notify =====

@@ -380,6 +380,13 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
     """
     pid = user["pid"]
     try:
+        # 优先检查"我已到馆"手动标志（当天有效，实时读库避免缓存问题）
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        fresh = user_config_info.find_one({"pid": pid}, {"arrived_date": 1})
+        if fresh and fresh.get("arrived_date") == today_str:
+            log_with_user(logger, 'info', pid, '迟到保护', "用户已标记到馆，跳过迟到保护")
+            return
+
         log_with_user(logger, 'info', pid, '迟到保护', f"开始处理座位 {dev_name} 的迟到保护")
         library = LibrarySystem(
             username=user["pid"],
