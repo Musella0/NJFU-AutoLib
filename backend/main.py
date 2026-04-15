@@ -296,7 +296,7 @@ def save_my_account(pid):
     uid = _ensure_uid()
     data = request.get_json()
     allowed = ["vpn_password", "lib_password", "seat_list", "mode", "time",
-               "is_reserved", "late_protection",
+               "is_reserved",
                "notify_email", "notify_serverchan_key", "verified"]
     update = {k: v for k, v in data.items() if k in allowed and v is not None}
 

@@ -292,12 +292,18 @@
           <div class="card-title">功能开关</div>
           <div class="form-row">
             <div class="form-group"><label>自动预约</label><select id="is_reserved"><option value="True">开启</option><option value="False">关闭</option></select></div>
-            <div class="form-group"><label>迟到保护（测试）</label><select id="late_protection"><option value="True">开启</option><option value="False">关闭</option></select></div>
           </div>
         </div>
         <div class="btn-group">
           <button class="btn btn-primary" id="btn-save" onclick="saveConfig()">保存配置</button>
           <button class="btn btn-green" id="btn-reserve-now" onclick="reserveNow()">立即预约</button>
+        </div>
+        <div class="card" id="cfg-resv-card" style="display:none">
+          <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+            <span>当前预约</span>
+            <button class="btn btn-outline btn-sm" onclick="loadCfgResv()">刷新</button>
+          </div>
+          <div class="resv-list" id="cfg-resv-list"><div style="color:var(--text3);font-size:13px">加载中...</div></div>
         </div>
       </div>
     </div>
@@ -469,7 +475,7 @@ async function addAccount(){
 
   // Step 2: 验证通过 → 保存账号并直接标记 verified:true
   try{
-    const r=await fetch(`/api/my/accounts/${pid}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vpn_password:vpn,lib_password:lib,is_reserved:'False',late_protection:'True',mode:'week_time',verified:true})});
+    const r=await fetch(`/api/my/accounts/${pid}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vpn_password:vpn,lib_password:lib,is_reserved:'False',mode:'week_time',verified:true})});
     if(r.ok){
       hideAddAccount();
       document.getElementById('new-pid').value='';
@@ -499,7 +505,6 @@ async function loadAccountConfig(pid){
     document.getElementById('vpn_password').value=cfg.vpn_password||'';
     document.getElementById('lib_password').value=cfg.lib_password||'';
     document.getElementById('is_reserved').value=cfg.is_reserved||'True';
-    document.getElementById('late_protection').value=cfg.late_protection||'True';
     document.getElementById('mode').value=cfg.mode||'week_time';
     document.getElementById('notify_email').value=cfg.notify_email||'';
     document.getElementById('notify_serverchan_key').value=cfg.notify_serverchan_key||'';
@@ -507,13 +512,16 @@ async function loadAccountConfig(pid){
     if(cfg.mode==='week_time'&&cfg.time&&cfg.time.week_time){for(let i=1;i<=7;i++){const v=cfg.time.week_time[String(i)];if(v){const[b,e]=v.split('-');const bE=document.getElementById(`week-begin-${i}`),eE=document.getElementById(`week-end-${i}`);if(bE)bE.value=b;if(eE)eE.value=e;}}}
     else if(cfg.time&&cfg.time.tomorrow){const[b,e]=cfg.time.tomorrow.split('-');document.getElementById('simple-begin').value=b;document.getElementById('simple-end').value=e;}
   }catch(e){}
+  // 显示当前预约区域并加载
+  document.getElementById('cfg-resv-card').style.display='';
+  loadCfgResv();
 }
 async function saveConfig(){
   if(!currentPid)return toast('请先选择一个学号','error');
   const mode=document.getElementById('mode').value;let timeConfig={};
   if(mode==='week_time'){const wt={};for(let i=1;i<=7;i++){const b=document.getElementById(`week-begin-${i}`).value,e=document.getElementById(`week-end-${i}`).value;wt[String(i)]=`${b}-${e}`;}timeConfig={week_time:wt};}
   else{const b=document.getElementById('simple-begin').value,e=document.getElementById('simple-end').value;timeConfig={tomorrow:`${b}-${e}`};}
-  const body={vpn_password:document.getElementById('vpn_password').value,lib_password:document.getElementById('lib_password').value,seat_list:selectedSeats,mode,time:timeConfig,is_reserved:document.getElementById('is_reserved').value,late_protection:document.getElementById('late_protection').value,notify_email:document.getElementById('notify_email').value.trim(),notify_serverchan_key:document.getElementById('notify_serverchan_key').value.trim()};
+  const body={vpn_password:document.getElementById('vpn_password').value,lib_password:document.getElementById('lib_password').value,seat_list:selectedSeats,mode,time:timeConfig,is_reserved:document.getElementById('is_reserved').value,notify_email:document.getElementById('notify_email').value.trim(),notify_serverchan_key:document.getElementById('notify_serverchan_key').value.trim()};
   const btn=document.getElementById('btn-save');btn.disabled=true;btn.innerHTML='<span class="spinner"></span> 保存中...';
   try{const r=await fetch(`/api/my/accounts/${currentPid}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(r.ok){toast('配置已保存','success');await loadAccounts();const acct=accounts.find(a=>a.pid===currentPid);if(acct&&acct.verified===false){toast('密码已变更，正在重新验证...','info');await verifyAccount(currentPid);await loadAccounts();}}else{const d=await r.json();toast(d.error||'失败','error');}}
   catch(e){toast('网络错误','error')}finally{btn.disabled=false;btn.innerHTML='保存配置'}
@@ -557,7 +565,16 @@ async function queryLive(){
   finally{btn.disabled=false;btn.innerHTML='刷新实时预约'}
 }
 function fmtSt(s){return{1:'待签到',2:'使用中',3:'暂离',4:'已结束',5:'已取消',1093:'已违约'}[s]||`未知(${s})`;}
-async function cancelResv(uuid){if(!confirm('确定取消？'))return;try{const r=await fetch(`/api/my/accounts/${currentPid}/cancel`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uuid})});const d=await r.json();toast(d.message||'完成',d.success?'success':'error');if(d.success)queryLive();}catch(e){toast('失败','error')}}
+async function cancelResv(uuid,fromCfg){if(!confirm('确定取消？'))return;try{const r=await fetch(`/api/my/accounts/${currentPid}/cancel`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uuid})});const d=await r.json();toast(d.message||'完成',d.success?'success':'error');if(d.success){if(fromCfg)loadCfgResv();else queryLive();}}catch(e){toast('失败','error')}}
+async function loadCfgResv(){
+  const list=document.getElementById('cfg-resv-list');list.innerHTML='<div style="color:var(--text3);font-size:13px">正在查询...</div>';
+  try{const r=await fetch(`/api/my/accounts/${currentPid}/reservations`),d=await r.json();
+    if(d.error){list.innerHTML=`<div style="color:var(--red);font-size:13px">${d.error}</div>`;return;}
+    if(!d.reservations||!d.reservations.length){list.innerHTML='<div style="color:var(--text3);font-size:13px">当前没有预约</div>';return;}
+    list.innerHTML=d.reservations.map(rv=>{const seat=rv.devInfo?.devName||'未知';const st=fmtSt(rv.resvStatus);const sc=rv.resvStatus<=2?'active':(rv.resvStatus===1093?'violation':'ended');const cc=rv.resvStatus<=3;
+      return `<div class="resv-item"><div class="resv-info"><div class="resv-seat">${seat}</div><div class="resv-time">${rv.resvBeginTime} ~ ${rv.resvEndTime}</div></div><div style="display:flex;align-items:center;gap:8px"><span class="resv-status ${sc}">${st}</span>${cc?`<button class="btn btn-danger btn-sm" onclick="cancelResv('${rv.uuid}',true)">取消</button>`:''}</div></div>`;}).join('');
+  }catch(e){list.innerHTML=`<div style="color:var(--red);font-size:13px">失败: ${e.message}</div>`;}
+}
 
 // ===== Notify =====
 function updateNotifyView(){
