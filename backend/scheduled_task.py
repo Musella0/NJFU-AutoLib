@@ -200,12 +200,20 @@ def calculate_reservation_time(res_item: Dict[str, Any]) -> Tuple[str, str]:
         # 预约明天的时间
         res_time = res_item["time"]["tomorrow"]
         begin_time, end_time = res_time.split("-")
-        date_str = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+        target_date = now + timedelta(days=1)
+        date_str = target_date.strftime("%Y-%m-%d")
+        # 周五图书馆20点关闭，结束时间不超过20:00
+        if target_date.isoweekday() == 5 and end_time > "20:00":
+            end_time = "20:00"
     elif mode == "after_tomorrow":
         # 预约后天的时间
         res_time = res_item["time"]["tomorrow"]
         begin_time, end_time = res_time.split("-")
-        date_str = (now + timedelta(days=2)).strftime("%Y-%m-%d")
+        target_date = now + timedelta(days=2)
+        date_str = target_date.strftime("%Y-%m-%d")
+        # 周五图书馆20点关闭，结束时间不超过20:00
+        if target_date.isoweekday() == 5 and end_time > "20:00":
+            end_time = "20:00"
     else:
         raise ValueError(f"不支持的预约模式: {mode}")
 
