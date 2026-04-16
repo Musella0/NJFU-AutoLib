@@ -292,6 +292,13 @@
           <div class="card-title">功能开关</div>
           <div class="form-row">
             <div class="form-group"><label>自动预约</label><select id="is_reserved"><option value="True">开启</option><option value="False">关闭</option></select></div>
+            <div class="form-group">
+              <label>迟到保护 <span style="font-size:10px;color:var(--text3);font-weight:400">（最多推迟1小时）</span></label>
+              <select id="late_protection" onchange="onLpChange(this.value)">
+                <option value="False">关闭</option>
+                <option value="True">开启</option>
+              </select>
+            </div>
           </div>
         </div>
         <div class="btn-group">
@@ -311,6 +318,18 @@
             <select id="status-acct-select" onchange="switchStatusAccount()" style="font-size:12px;padding:4px 8px"></select>
           </div>
         </div>
+        <!-- 迟到保护：我已到馆（醒目卡片，仅在迟到保护开启时显示） -->
+        <div id="arrived-card" class="card" style="display:none;border-color:var(--green-border);background:var(--green-bg);margin-bottom:16px">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+            <div style="flex:1;min-width:180px">
+              <div style="font-size:15px;font-weight:600;color:var(--green);margin-bottom:4px">迟到保护已开启</div>
+              <div id="arrived-hint" style="font-size:12px;color:var(--text2);line-height:1.6">到馆后请点击右侧按钮，避免系统误判未到馆并释放您的预约</div>
+            </div>
+            <button class="btn btn-green" id="btn-arrived" onclick="toggleArrived()" style="min-width:130px;justify-content:center;padding:10px 20px;font-size:14px">
+              我已到馆
+            </button>
+          </div>
+        </div>
         <div class="card">
           <div class="card-title">最近预约结果</div>
           <div class="result-box" id="last-result">加载中...</div>
@@ -319,7 +338,6 @@
           <div class="card-title">当前预约</div>
           <div class="btn-group" style="margin-top:0;margin-bottom:16px">
             <button class="btn btn-outline btn-sm" id="btn-query-live" onclick="queryLive()">刷新实时预约</button>
-            <button class="btn btn-outline btn-sm" id="btn-arrived" onclick="toggleArrived()">我已到馆</button>
           </div>
           <div class="resv-list" id="resv-list">
             <div style="color:var(--text3);font-size:13px">点击上方按钮查询</div>
@@ -362,8 +380,31 @@
 
 <div class="toast-container" id="toast-container"></div>
 
+<!-- 迟到保护首次使用说明弹窗 -->
+<div id="lp-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9998;align-items:center;justify-content:center;backdrop-filter:blur(4px)">
+  <div style="background:var(--card);border:1px solid var(--border);border-radius:16px;padding:32px;width:460px;max-width:92vw;box-shadow:0 20px 80px rgba(0,0,0,0.5)">
+    <div style="font-size:18px;font-weight:700;margin-bottom:16px;display:flex;align-items:center;gap:8px">
+      <span style="font-size:22px">🛡️</span> 关于迟到保护
+    </div>
+    <div style="font-size:14px;color:var(--text2);line-height:1.9;margin-bottom:20px">
+      开启后，系统将在您预约开始前自动检测是否已到馆。<br><br>
+      <span style="display:flex;align-items:flex-start;gap:8px;margin-bottom:8px"><span style="color:var(--accent);flex-shrink:0">•</span><span><strong style="color:var(--text)">最多保护1小时</strong>：若您未能按时到馆，系统将把预约推迟1小时，为您保留座位。</span></span>
+      <span style="display:flex;align-items:flex-start;gap:8px;margin-bottom:8px"><span style="color:var(--green);flex-shrink:0">•</span><span>到馆后请<strong style="color:var(--green)">手动点击「我已到馆」</strong>，避免系统误操作。</span></span>
+      <span style="display:flex;align-items:flex-start;gap:8px"><span style="color:var(--red);flex-shrink:0">•</span><span>若推迟1小时后<strong style="color:var(--red)">依然未到座位</strong>，系统将<strong style="color:var(--red)">自动释放预约</strong>，以杜绝恶意占座行为。</span></span>
+    </div>
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text3);cursor:pointer;margin-bottom:20px;user-select:none">
+      <input type="checkbox" id="lp-no-remind" style="width:auto;margin:0;accent-color:var(--accent)"> 永久关闭此提示
+    </label>
+    <button class="btn btn-primary" style="width:100%;justify-content:center;padding:12px" onclick="dismissLpModal()">我知道了</button>
+  </div>
+</div>
+
 <script>
 let allSeats={},selectedSeats=[],accounts=[],currentPid='',authMode='login',noticeCollapsed=false,isGuest=false;
+// 迟到保护首次使用弹窗
+function onLpChange(val){if(val==='True'&&localStorage.getItem('lp_intro_v1')!=='dismissed')showLpModal();}
+function showLpModal(){document.getElementById('lp-modal').style.display='flex';}
+function dismissLpModal(){if(document.getElementById('lp-no-remind').checked)localStorage.setItem('lp_intro_v1','dismissed');document.getElementById('lp-modal').style.display='none';}
 function escHtml(s){return(s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
 function toast(m,t='info'){const c=document.getElementById('toast-container'),e=document.createElement('div');e.className='toast toast-'+t;e.textContent=m;c.appendChild(e);setTimeout(()=>{e.style.opacity='0';setTimeout(()=>e.remove(),300)},3500)}
@@ -499,6 +540,7 @@ async function loadAccountConfig(pid){
     document.getElementById('vpn_password').value=cfg.vpn_password||'';
     document.getElementById('lib_password').value=cfg.lib_password||'';
     document.getElementById('is_reserved').value=cfg.is_reserved||'True';
+    document.getElementById('late_protection').value=cfg.late_protection||'False';
     document.getElementById('mode').value=cfg.mode||'week_time';
     document.getElementById('notify_email').value=cfg.notify_email||'';
     document.getElementById('notify_serverchan_key').value=cfg.notify_serverchan_key||'';
@@ -512,7 +554,7 @@ async function saveConfig(){
   const mode=document.getElementById('mode').value;let timeConfig={};
   if(mode==='week_time'){const wt={};for(let i=1;i<=7;i++){const b=document.getElementById(`week-begin-${i}`).value,e=document.getElementById(`week-end-${i}`).value;wt[String(i)]=`${b}-${e}`;}timeConfig={week_time:wt};}
   else{const b=document.getElementById('simple-begin').value,e=document.getElementById('simple-end').value;timeConfig={tomorrow:`${b}-${e}`};}
-  const body={vpn_password:document.getElementById('vpn_password').value,lib_password:document.getElementById('lib_password').value,seat_list:selectedSeats,mode,time:timeConfig,is_reserved:document.getElementById('is_reserved').value,notify_email:document.getElementById('notify_email').value.trim(),notify_serverchan_key:document.getElementById('notify_serverchan_key').value.trim()};
+  const body={vpn_password:document.getElementById('vpn_password').value,lib_password:document.getElementById('lib_password').value,seat_list:selectedSeats,mode,time:timeConfig,is_reserved:document.getElementById('is_reserved').value,late_protection:document.getElementById('late_protection').value,notify_email:document.getElementById('notify_email').value.trim(),notify_serverchan_key:document.getElementById('notify_serverchan_key').value.trim()};
   const btn=document.getElementById('btn-save');btn.disabled=true;btn.innerHTML='<span class="spinner"></span> 保存中...';
   try{const r=await fetch(`/api/my/accounts/${currentPid}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(r.ok){toast('配置已保存','success');await loadAccounts();const acct=accounts.find(a=>a.pid===currentPid);if(acct&&acct.verified===false){toast('密码已变更，正在重新验证...','info');await verifyAccount(currentPid);await loadAccounts();}}else{const d=await r.json();toast(d.error||'失败','error');}}
   catch(e){toast('网络错误','error')}finally{btn.disabled=false;btn.innerHTML='保存配置'}
@@ -540,9 +582,22 @@ async function reserveNow(){
 function updateStatusView(){
   if(!currentPid){document.getElementById('no-acct-status').style.display='';document.getElementById('status-content').style.display='none';return;}
   document.getElementById('no-acct-status').style.display='none';document.getElementById('status-content').style.display='';
-  document.getElementById('status-pid-label').textContent='学号: '+currentPid;loadResult();loadArrivedState();
+  document.getElementById('status-pid-label').textContent='学号: '+currentPid;
+  // 迟到保护卡片：仅在开启时显示
+  const acct=accounts.find(a=>a.pid===currentPid);
+  const lpOn=acct&&acct.late_protection==='True';
+  document.getElementById('arrived-card').style.display=lpOn?'':'none';
+  loadResult();loadArrivedState();
 }
-function switchStatusAccount(){currentPid=document.getElementById('status-acct-select').value;document.getElementById('status-pid-label').textContent='学号: '+currentPid;loadResult();loadArrivedState();document.getElementById('resv-list').innerHTML='<div style="color:var(--text3);font-size:13px">点击刷新按钮查询</div>';}
+function switchStatusAccount(){
+  currentPid=document.getElementById('status-acct-select').value;
+  document.getElementById('status-pid-label').textContent='学号: '+currentPid;
+  const acct=accounts.find(a=>a.pid===currentPid);
+  const lpOn=acct&&acct.late_protection==='True';
+  document.getElementById('arrived-card').style.display=lpOn?'':'none';
+  loadResult();loadArrivedState();
+  document.getElementById('resv-list').innerHTML='<div style="color:var(--text3);font-size:13px">点击刷新按钮查询</div>';
+}
 async function loadResult(){try{const r=await fetch(`/api/my/accounts/${currentPid}/result`),d=await r.json();document.getElementById('last-result').textContent=d.result||'暂无预约结果';}catch(e){}}
 async function queryLive(){
   const btn=document.getElementById('btn-query-live');btn.disabled=true;btn.innerHTML='<span class="spinner"></span> 查询中...';
@@ -565,9 +620,17 @@ async function loadArrivedState(){
 }
 function setArrivedBtn(arrived){
   const btn=document.getElementById('btn-arrived');
+  const hint=document.getElementById('arrived-hint');
   if(!btn)return;
-  if(arrived){btn.className='btn btn-green btn-sm';btn.textContent='已到馆 · 点击取消';}
-  else{btn.className='btn btn-outline btn-sm';btn.textContent='我已到馆';}
+  if(arrived){
+    btn.className='btn btn-outline btn-sm';btn.style.cssText='min-width:130px;justify-content:center;padding:10px 20px;font-size:14px';
+    btn.textContent='已到馆 · 点击取消';
+    if(hint)hint.textContent='已确认到馆，迟到保护今日不会触发';
+  }else{
+    btn.className='btn btn-green';btn.style.cssText='min-width:130px;justify-content:center;padding:10px 20px;font-size:14px';
+    btn.textContent='我已到馆';
+    if(hint)hint.textContent='到馆后请点击右侧按钮，避免系统误判未到馆并释放您的预约';
+  }
 }
 async function toggleArrived(){
   if(!currentPid)return;

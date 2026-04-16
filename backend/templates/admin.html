@@ -182,6 +182,7 @@
       <div class="stat-card"><div class="stat-label">预约中</div><div class="stat-value" style="color:var(--green)" id="s-on">-</div></div>
       <div class="stat-card"><div class="stat-label">已暂停</div><div class="stat-value" style="color:var(--red)" id="s-off">-</div></div>
       <div class="stat-card"><div class="stat-label">迟到保护</div><div class="stat-value" style="color:var(--yellow)" id="s-lp">-</div></div>
+      <div class="stat-card"><div class="stat-label">保护触发次数</div><div class="stat-value" style="color:var(--purple)" id="s-lp-count">-</div></div>
     </div>
     <div class="section-bar">
       <div class="section-title">公告管理</div>
@@ -253,6 +254,47 @@
   </div>
 </div>
 
+<!-- 迟到保护设置 Modal -->
+<div class="modal-overlay" id="m-protect">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title" id="protect-title">迟到保护设置</div>
+      <button class="modal-close" onclick="closeM('m-protect')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="background:rgba(88,166,255,.06);border:1px solid rgba(88,166,255,.15);border-radius:8px;padding:12px 14px;font-size:12px;color:var(--text2);line-height:1.7;margin-bottom:4px">
+        <strong style="color:var(--accent)">保护时长</strong>：系统触发迟到保护后，将原预约推迟的分钟数。推迟后若用户仍未到馆（非永久模式），不再二次保护，预约自动释放。<br>
+        <strong style="color:var(--red)">黑名单</strong>：用户无法使用迟到保护，触发时直接取消预约，不推迟。
+      </div>
+      <div class="modal-field">
+        <label>触发次数（历史累计）</label>
+        <div id="protect-count" style="font-family:var(--mono);font-size:20px;font-weight:700;color:var(--purple);padding:4px 0">-</div>
+      </div>
+      <div class="modal-field">
+        <label>保护时长</label>
+        <select id="protect-duration">
+          <option value="0">0 分钟（触发即取消，不推迟）</option>
+          <option value="30">30 分钟</option>
+          <option value="60">1 小时（默认）</option>
+          <option value="90">1.5 小时</option>
+          <option value="120">2 小时</option>
+          <option value="-1">永久（无限推迟，不自动释放）</option>
+        </select>
+      </div>
+      <div class="modal-field">
+        <label>&nbsp;</label>
+        <div class="checkbox-row">
+          <label><input type="checkbox" id="protect-blacklist"> 加入黑名单（直接取消，忽略上方时长设置）</label>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeM('m-protect')">取消</button>
+      <button class="btn btn-green" onclick="saveProtect()">保存</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast-box" id="tbox"></div>
 
 <script>
@@ -287,15 +329,27 @@ async function loadUsers(){
     users=await r.json();
     if(!Array.isArray(users)){document.getElementById('grid').innerHTML='<div style="color:var(--red);text-align:center;padding:40px">加载失败：数据格式异常</div>';return;}
     const on=users.filter(u=>u.is_reserved==='True').length;
-    document.getElementById('s-total').textContent=users.length;document.getElementById('s-on').textContent=on;
+    const lpOn=users.filter(u=>u.late_protection==='True').length;
+    const lpTotal=users.reduce((s,u)=>s+(u.late_protection_count||0),0);
+    document.getElementById('s-total').textContent=users.length;
+    document.getElementById('s-on').textContent=on;
     document.getElementById('s-off').textContent=users.length-on;
-    document.getElementById('s-lp').textContent=users.filter(u=>u.late_protection==='True').length;
+    document.getElementById('s-lp').textContent=lpOn+(users.filter(u=>u.late_protection_blacklisted).length?` (黑名单${users.filter(u=>u.late_protection_blacklisted).length})`:'' );
+    document.getElementById('s-lp-count').textContent=lpTotal;
     renderAll();}catch(e){document.getElementById('grid').innerHTML=`<div style="color:var(--red);text-align:center;padding:40px">加载失败：${e.message||e}</div>`;}
 }
 function renderAll(){
   const g=document.getElementById('grid');
   if(!users.length){g.innerHTML='<div style="color:var(--text3);text-align:center;padding:60px">暂无用户</div>';return;}
   g.innerHTML=users.map(card).join('');
+}
+function fmtProtect(u){
+  if(u.late_protection_blacklisted)return'<span style="color:var(--red);font-weight:600">黑名单</span>';
+  const m=u.protection_max_minutes;
+  if(m===undefined||m===null||m===60)return'1小时（默认）';
+  if(m===-1)return'永久';
+  if(m===0)return'0分钟（触发即取消）';
+  return m+'分钟';
 }
 function card(u){
   const pid=u.pid||'?',av=pid.slice(-2),isOn=u.is_reserved==='True',lpOn=u.late_protection==='True';
@@ -305,21 +359,25 @@ function card(u){
   else if(u.time&&u.time.tomorrow){timeH=`<span class="uc-field-value">${u.time.tomorrow}</span>`;}
   else{timeH='<span class="uc-field-value empty">未设置</span>';}
   let ownH='';
-  if(u.owned_seat&&Object.keys(u.owned_seat).length){ownH='<div class="owned-info">';for(const[n,list]of Object.entries(u.owned_seat))for(const s of list)ownH+=`<div class="owned-item"><span class="owned-dot"></span>${n} ${s.target_time||''}</div>`;ownH+='</div>';}
+  if(u.owned_seat&&Object.keys(u.owned_seat).length){ownH='<div class="owned-info">';for(const[n,list]of Object.entries(u.owned_seat))for(const s of list)ownH+=`<div class="owned-item"><span class="owned-dot"></span>${n} ${s.target_time||''}${s.by_protection?'<span style="font-size:10px;color:var(--yellow);margin-left:4px">[保护后]</span>':''}</div>`;ownH+='</div>';}
   else{ownH='<span class="uc-field-value empty">无</span>';}
   const res=u.result||'',rc=res.includes('成功')?'success':(res?'fail':'');
+  const lpCount=u.late_protection_count||0;
+  const blBadge=u.late_protection_blacklisted?'<span style="font-size:10px;padding:1px 6px;border-radius:4px;background:rgba(248,81,73,.15);color:var(--red);border:1px solid rgba(248,81,73,.2);margin-left:4px">黑名单</span>':'';
   return `<div class="user-card">
-    <div class="uc-header"><div class="uc-header-left"><div class="uc-avatar">${av}</div><div><div class="uc-pid">${pid}</div><div class="uc-updated">更新于 ${u.updated_at||'-'}</div></div></div>
+    <div class="uc-header"><div class="uc-header-left"><div class="uc-avatar">${av}</div><div><div class="uc-pid">${pid}${blBadge}</div><div class="uc-updated">更新于 ${u.updated_at||'-'}</div></div></div>
     <div class="uc-header-right">
       <div class="toggle-group"><span class="toggle-label">预约</span><label class="toggle"><input type="checkbox" ${isOn?'checked':''} onchange="tog('${pid}','is_reserved',this.checked)"><div class="toggle-track"></div><div class="toggle-thumb"></div></label></div>
       <div class="toggle-group"><span class="toggle-label">保护</span><label class="toggle"><input type="checkbox" ${lpOn?'checked':''} onchange="tog('${pid}','late_protection',this.checked)"><div class="toggle-track"></div><div class="toggle-thumb"></div></label></div>
       <button class="btn btn-blue btn-sm" onclick="editPri('${pid}',${u.priority||0})">优先级</button>
+      <button class="btn btn-ghost btn-sm" onclick="openProtect('${pid}',${u.protection_max_minutes??60},${!!u.late_protection_blacklisted},${lpCount})" style="color:var(--yellow)">保护管理</button>
       <button class="btn btn-red btn-sm" onclick="del('${pid}')">删除</button>
     </div></div>
     <div class="uc-body">
       <div class="uc-field"><div class="uc-field-label">所属用户</div><div class="uc-field-value">${u.web_uid||'-'}</div></div>
       <div class="uc-field"><div class="uc-field-label">模式</div><div class="uc-field-value">${u.mode==='week_time'?'按星期':(u.mode||'-')}</div></div>
       <div class="uc-field"><div class="uc-field-label">优先级</div><div class="uc-field-value">${u.priority??0}</div></div>
+      <div class="uc-field"><div class="uc-field-label">保护设置</div><div class="uc-field-value">${fmtProtect(u)} <span style="color:var(--text3);font-size:11px">/ 触发${lpCount}次</span></div></div>
       <div class="uc-field"><div class="uc-field-label">座位</div><div class="seat-tags">${seats}</div></div>
       <div class="uc-field"><div class="uc-field-label">时间</div>${timeH}</div>
       <div class="uc-field"><div class="uc-field-label">当前持有</div>${ownH}</div>
@@ -331,6 +389,30 @@ async function tog(pid,field,on){try{const r=await fetch(`/api/users/${pid}/togg
 
 function editPri(pid,cur){editPid=pid;document.getElementById('ed-title').textContent='优先级: '+pid;document.getElementById('ed-priority').value=cur;openM('m-edit');}
 async function savePriority(){if(!editPid)return;const p=parseInt(document.getElementById('ed-priority').value)||0;try{const r=await fetch(`/api/users/${editPid}/update`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({priority:p})});if(r.ok){toast('已更新','success');closeM('m-edit');loadUsers();}else toast('失败','error');}catch(e){toast('失败','error')}}
+
+let protectPid=null;
+function openProtect(pid,durMin,blacklisted,count){
+  protectPid=pid;
+  document.getElementById('protect-title').textContent='迟到保护设置 · '+pid;
+  document.getElementById('protect-count').textContent=count+' 次';
+  // 选中最接近的预设，若不在列表则选60
+  const sel=document.getElementById('protect-duration');
+  const opts=[0,30,60,90,120,-1];
+  sel.value=opts.includes(durMin)?String(durMin):'60';
+  document.getElementById('protect-blacklist').checked=blacklisted;
+  openM('m-protect');
+}
+async function saveProtect(){
+  if(!protectPid)return;
+  const dur=parseInt(document.getElementById('protect-duration').value);
+  const bl=document.getElementById('protect-blacklist').checked;
+  try{
+    const r=await fetch(`/api/users/${protectPid}/protection_settings`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({protection_max_minutes:dur,late_protection_blacklisted:bl})});
+    const d=await r.json();
+    if(r.ok){toast('保护设置已更新','success');closeM('m-protect');loadUsers();}
+    else toast(d.error||'更新失败','error');
+  }catch(e){toast('网络错误','error');}
+}
 
 function del(pid){document.getElementById('del-text').innerHTML=`删除 <span class="confirm-pid">${pid}</span> 的所有配置？<br>不可恢复。`;document.getElementById('btn-del').onclick=async()=>{try{const r=await fetch(`/api/users/${pid}`,{method:'DELETE'});if(r.ok){toast('已删除','success');closeM('m-del');loadUsers();}else toast('失败','error');}catch(e){toast('失败','error')}};openM('m-del');}
 

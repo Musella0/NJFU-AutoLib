@@ -296,7 +296,7 @@ def save_my_account(pid):
     uid = _ensure_uid()
     data = request.get_json()
     allowed = ["vpn_password", "lib_password", "seat_list", "mode", "time",
-               "is_reserved",
+               "is_reserved", "late_protection",
                "notify_email", "notify_serverchan_key", "verified"]
     update = {k: v for k, v in data.items() if k in allowed and v is not None}
 
@@ -667,13 +667,39 @@ def toggle_user(pid):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/users/<pid>/protection_settings", methods=["POST"])
+@admin_required
+def update_protection_settings(pid):
+    """Admin: update late-protection duration and blacklist status for a user."""
+    try:
+        data = request.get_json() or {}
+        update = {}
+        if "protection_max_minutes" in data:
+            val = data["protection_max_minutes"]
+            if not isinstance(val, int) or val < -1:
+                return jsonify({"error": "保护时间无效（需为 -1 或 >= 0 的整数）"}), 400
+            update["protection_max_minutes"] = val
+        if "late_protection_blacklisted" in data:
+            update["late_protection_blacklisted"] = bool(data["late_protection_blacklisted"])
+        if not update:
+            return jsonify({"error": "无有效字段"}), 400
+        update["updated_at"] = datetime.now()
+        client, db = get_db()
+        db.user_config_info.update_one({"pid": pid}, {"$set": update})
+        client.close()
+        return jsonify({"message": "已更新"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/users/<pid>/update", methods=["POST"])
 @admin_required
 def update_user(pid):
     try:
         data = request.get_json()
         allowed = ["seat_list", "mode", "time", "priority",
-                    "is_reserved", "late_protection"]
+                    "is_reserved", "late_protection",
+                    "protection_max_minutes", "late_protection_blacklisted"]
         update = {k: v for k, v in data.items() if k in allowed}
         update["updated_at"] = datetime.now()
         client, db = get_db()

@@ -376,26 +376,68 @@ def process_reservations() -> None:
         reservation(item)
     log_with_user(logger, 'info', '系统', '预约处理', "预约处理结束")
 
+def _mark_seat_by_protection(pid: str, dev_name: str) -> None:
+    """
+    将指定用户/座位的当前 owned_seat 条目标记为 by_protection=True，
+    防止保护后重新预约的位置再次触发级联迟到保护。
+    """
+    try:
+        fresh_data = user_config_info.find_one({"pid": pid}, {"owned_seat": 1})
+        if not fresh_data:
+            return
+        owned = fresh_data.get("owned_seat") or {}
+        seats = owned.get(dev_name)
+        if not seats:
+            return
+        updated = [{**s, "by_protection": True} for s in seats]
+        user_config_info.update_one(
+            {"pid": pid},
+            {"$set": {f"owned_seat.{dev_name}": updated}}
+        )
+        log_with_user(logger, 'info', pid, '迟到保护',
+                     f"已标记 {dev_name} 的新预约为 by_protection，防止级联触发")
+    except Exception as e:
+        log_with_user(logger, 'warning', pid, '迟到保护', f"标记 by_protection 失败: {str(e)}")
+
+
 def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str, Any]) -> None:
     """
     执行迟到保护动作
 
     迟到保护流程：
-    0. 检查用户是否已在馆内（已签到则跳过）
+    0. 检查"我已到馆"标志 / 用户是否已在馆（已签到则跳过）
     1. 取消原预约
-    2. 计算新的预约时间（延后1小时）
+    2. 根据 protection_max_minutes 决定行为：
+       - 0 / 黑名单：仅取消，不重新预约
+       - 正数 N：延后 N 分钟后重新预约，并标记 by_protection 防止级联
+       - -1（永久）：延后60分钟重新预约，允许继续保护
     3. 重新预约座位（最多重试3次）
+    4. 累计触发计数 late_protection_count
     """
     pid = user["pid"]
     try:
-        # 优先检查"我已到馆"手动标志（当天有效，实时读库避免缓存问题）
+        # 实时读取最新用户配置，避免缓存
         today_str = datetime.now().strftime("%Y-%m-%d")
-        fresh = user_config_info.find_one({"pid": pid}, {"arrived_date": 1})
+        fresh = user_config_info.find_one({"pid": pid}, {
+            "arrived_date": 1,
+            "protection_max_minutes": 1,
+            "late_protection_blacklisted": 1
+        })
+
+        # 优先检查"我已到馆"手动标志（当天有效）
         if fresh and fresh.get("arrived_date") == today_str:
             log_with_user(logger, 'info', pid, '迟到保护', "用户已标记到馆，跳过迟到保护")
             return
 
-        log_with_user(logger, 'info', pid, '迟到保护', f"开始处理座位 {dev_name} 的迟到保护")
+        # 读取保护配置
+        blacklisted = bool(fresh.get("late_protection_blacklisted")) if fresh else False
+        protection_minutes = fresh.get("protection_max_minutes", 60) if fresh else 60
+        if protection_minutes is None:
+            protection_minutes = 60
+
+        log_with_user(logger, 'info', pid, '迟到保护',
+                     f"开始处理座位 {dev_name} 的迟到保护（配置: {protection_minutes}min, 黑名单: {blacklisted}）")
+
         library = LibrarySystem(
             username=user["pid"],
             password=_dec(user["lib_password"]),
@@ -424,15 +466,22 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
 
         # 取消原预约
         try:
-            # 删除原预约
             success, message = library.delete_seat(seat_dict["uuid"])
             if not success:
                 log_with_user(logger, 'error', pid, '迟到保护', f"取消原预约失败: {message}")
                 return
             log_with_user(logger, 'info', pid, '迟到保护', f"成功取消原预约: {seat_dict['uuid']}")
-
         except Exception as e:
             log_with_user(logger, 'error', pid, '迟到保护', f"取消原预约异常: {str(e)}")
+            return
+
+        # 累计触发计数
+        user_config_info.update_one({"pid": pid}, {"$inc": {"late_protection_count": 1}})
+
+        # 黑名单或保护时长为0：仅取消，不重新预约
+        if blacklisted or protection_minutes == 0:
+            log_with_user(logger, 'info', pid, '迟到保护',
+                         "已列入黑名单或保护时长为0，预约已取消，不重新预约")
             return
 
         # 计算新的预约时间
@@ -443,10 +492,12 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
         begin_time = datetime.strptime(f"{date_str} {begin_time_str}", "%Y-%m-%d %H:%M:%S")
         end_time = datetime.strptime(f"{date_str} {end_time_str}", "%Y-%m-%d %H:%M:%S")
 
-        # 调整时间
-        new_begin = begin_time + timedelta(hours=1)
+        # 确定延迟分钟数：-1(永久)固定推迟60min，否则按配置值
+        shift_minutes = 60 if protection_minutes == -1 else protection_minutes
+
+        new_begin = begin_time + timedelta(minutes=shift_minutes)
         duration = (end_time - new_begin).total_seconds() / 3600
-        new_end = end_time + timedelta(hours=1) if duration < 2 else end_time
+        new_end = end_time + timedelta(minutes=shift_minutes) if duration < 2 else end_time
 
         new_begin_str = f"{date_str} {new_begin.strftime('%H:%M:%S')}"
         new_end_str = f"{date_str} {new_end.strftime('%H:%M:%S')}"
@@ -476,14 +527,15 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
                     resv_end_time=new_end_str
                 )
 
-                # 检查预约结果是否成功
                 if "成功" in res_msg or "预约成功" in res_msg:
                     log_with_user(logger, 'info', pid, '迟到保护',
                                 f"重新预约成功 (第{retry_count + 1}次尝试): {res_msg}")
-                    # 新增：同步 owned_seat，保证多次保护
                     try:
                         library.get_reservation_info()
                         log_with_user(logger, 'info', pid, '迟到保护', "已同步最新预约信息到数据库")
+                        # 非永久保护：标记新预约，防止级联触发
+                        if protection_minutes != -1:
+                            _mark_seat_by_protection(pid, dev_name)
                     except Exception as e:
                         log_with_user(logger, 'warning', pid, '迟到保护', f"同步预约信息失败: {str(e)}")
                     return
@@ -503,10 +555,9 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
                             f"等待5秒后进行第{retry_count + 1}次重试...")
                 time.sleep(5)
 
-        # 所有重试都失败
         log_with_user(logger, 'error', pid, '迟到保护',
                      f"重新预约失败，已重试{max_retries}次，最后一次错误: {last_error}")
-            
+
     except Exception as e:
         log_with_user(logger, 'error', pid, '迟到保护', f"执行失败: {str(e)}")
 
@@ -543,6 +594,11 @@ def schedule_late_protection_jobs() -> None:
                 
                 for dev_name, seat_list in owned_seat.items():
                     for seat_dict in seat_list:
+                        # 跳过已由保护机制创建的预约，防止级联触发
+                        if seat_dict.get('by_protection'):
+                            log_with_user(logger, 'info', pid, '迟到保护',
+                                         f"跳过已受保护的预约 {dev_name}（防止级联）")
+                            continue
                         if seat_dict['target_time'][:10] != today_str:
                             continue
                             
