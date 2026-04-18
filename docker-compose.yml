@@ -1,0 +1,99 @@
+version: "3.8"
+
+services:
+  # ==================== MongoDB ====================
+  mongo:
+    image: mongo:7
+    container_name: autolib-mongo
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-autolib}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASS:-autolib123}
+    volumes:
+      - mongo_data:/data/db
+    ports:
+      - "${MONGO_PORT:-27017}:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==================== Flask API ====================
+  flask-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: autolib-api
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      - DB_IP=mongo:27017
+      - MONGO_USER=${MONGO_USER:-autolib}
+      - MONGO_PASS=${MONGO_PASS:-autolib123}
+      - SERVER_IP=0.0.0.0:5003
+      - LOG_FILE=logs/auto_lib.log
+      - FOLDER_PATH=座位信息
+      - TZ=Asia/Shanghai
+      - SECRET_KEY=${SECRET_KEY:-change-me-to-a-random-string}
+      - ADMIN_USER=${ADMIN_USER:-admin}
+      - ADMIN_PASS=${ADMIN_PASS:-admin123}
+      - ADMIN_TOTP_SECRET=${ADMIN_TOTP_SECRET:-}
+    ports:
+      - "${API_PORT:-5003}:5003"
+    volumes:
+      - api_logs:/app/logs
+
+  # ==================== 定时预约任务 ====================
+  scheduler:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: autolib-scheduler
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      - DB_IP=mongo:27017
+      - MONGO_USER=${MONGO_USER:-autolib}
+      - MONGO_PASS=${MONGO_PASS:-autolib123}
+      - LOG_FILE=logs/auto_lib.log
+      - FOLDER_PATH=座位信息
+      - TZ=Asia/Shanghai
+      # 定时预约时间（24小时制，默认 19:55 预约次日座位）
+      - SCHEDULE_HOUR=${SCHEDULE_HOUR:-19}
+      - SCHEDULE_MINUTE=${SCHEDULE_MINUTE:-55}
+      # 邮件通知配置（可选）
+      - SMTP_HOST=${SMTP_HOST:-smtp.qq.com}
+      - SMTP_PORT=${SMTP_PORT:-465}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+    entrypoint: ["python", "scheduler_runner.py"]
+    volumes:
+      - scheduler_logs:/app/logs
+
+  # ==================== 座位数据初始化 ====================
+  seed:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: autolib-seed
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      - DB_IP=mongo:27017
+      - MONGO_USER=${MONGO_USER:-autolib}
+      - MONGO_PASS=${MONGO_PASS:-autolib123}
+      - FOLDER_PATH=座位信息
+      - TZ=Asia/Shanghai
+    entrypoint: ["python", "seed_devices.py"]
+    restart: "no"
+
+volumes:
+  mongo_data:
+  api_logs:
+  scheduler_logs:
