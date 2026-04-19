@@ -240,10 +240,10 @@ async function verifyAdd(){
     return;
   }
 
-  // Step 2: save
+  // Step 2: save (backend defaults: is_reserved=True, late_protection=False)
   const sres = await api(`/api/my/accounts/${encodeURIComponent(pid)}`, {
     method:'POST',
-    body:{ vpn_password: vpn, lib_password: lib, is_reserved: 'False', mode: 'week_time', verified: true }
+    body:{ vpn_password: vpn, lib_password: lib, mode: 'week_time', verified: true }
   });
   btn.disabled = false;
   btn.textContent = '验证并保存';
@@ -971,6 +971,37 @@ function tToggle(el, e){
   el.classList.toggle('on');
 }
 
+function toggleLP(el, e){
+  if(e) e.stopPropagation();
+  const isOn = el.classList.contains('on');
+  // Turning OFF is always direct
+  if(isOn){
+    el.classList.remove('on');
+    return;
+  }
+  // Turning ON: show warning on first use
+  const ACK_KEY = 'autolib_lp_warning_ack';
+  if(localStorage.getItem(ACK_KEY) === '1'){
+    el.classList.add('on');
+    return;
+  }
+  state.pendingLPToggle = el;
+  openSheet('lp-warning');
+}
+
+function acknowledgeLP(){
+  localStorage.setItem('autolib_lp_warning_ack', '1');
+  const el = state.pendingLPToggle;
+  if(el) el.classList.add('on');
+  state.pendingLPToggle = null;
+  closeSheet();
+}
+
+function cancelLP(){
+  state.pendingLPToggle = null;
+  closeSheet();
+}
+
 // ---------- sheets ----------
 const SHEETS = {
   login: () => `
@@ -1090,6 +1121,29 @@ const SHEETS = {
     </div>
     <button class="btn primary mt-lg" style="width:100%" onclick="closeSheet()">我知道了</button>
   `,
+  'lp-warning': () => `
+    <div class="grab"></div>
+    <h3>🛡 关于迟到保护</h3>
+    <div class="desc">开启后，系统会在你预约开始前检查是否到馆。</div>
+    <div class="col gap-sm">
+      <div class="box tight" style="border-left:4px solid var(--accent)">
+        <div class="sub" style="font-weight:700">✓ 最多保护 1 小时</div>
+        <div class="t">未按时到馆则自动把预约推迟 1 小时为你保留座位</div>
+      </div>
+      <div class="box tight" style="border-left:4px solid var(--ok)">
+        <div class="sub" style="font-weight:700">✓ 到馆后手动确认</div>
+        <div class="t">请点击主页的「我已到馆」按钮避免误操作</div>
+      </div>
+      <div class="box tight" style="border-left:4px solid var(--danger)">
+        <div class="sub" style="font-weight:700">⚠ 1 小时后仍未到</div>
+        <div class="t">系统将自动释放预约，杜绝恶意占座</div>
+      </div>
+    </div>
+    <div class="row-flex mt-lg">
+      <button class="btn ghost grow" onclick="cancelLP()">取消</button>
+      <button class="btn accent grow" onclick="acknowledgeLP()">我已知晓，永久关闭</button>
+    </div>
+  `,
   about: () => `
     <div class="grab"></div>
     <h3>关于 AutoLib</h3>
@@ -1108,7 +1162,7 @@ function openSheet(name){
   const tpl = SHEETS[name];
   content.innerHTML = tpl ? tpl() : '<div class="grab"></div><h3>未实现</h3>';
   sc.classList.add('show');
-  if(name === 'lp-info' || name === 'cancel' || name === 'about') sc.classList.add('center');
+  if(name === 'lp-info' || name === 'lp-warning' || name === 'cancel' || name === 'about') sc.classList.add('center');
   else sc.classList.remove('center');
 }
 function closeSheet(){ $('scrim').classList.remove('show'); }
