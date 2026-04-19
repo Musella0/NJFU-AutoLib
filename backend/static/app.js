@@ -300,6 +300,9 @@ async function verifyAdd(){
     state.currentPid = pid;
     closeSheet();
     await loadAccounts();
+    if(state.isGuest && !localStorage.getItem('autolib_guest_data_notice_ack')){
+      openSheet('guest-data-notice');
+    }
   }else{
     toast(sres.data.error || '保存失败','error');
   }
@@ -1127,8 +1130,27 @@ function cancelLP(){
   closeSheet();
 }
 
+function ackGuestDataNotice(){
+  localStorage.setItem('autolib_guest_data_notice_ack', '1');
+  closeSheet();
+}
+
 // ---------- sheets ----------
 const SHEETS = {
+  'guest-data-notice': () => `
+    <div class="grab"></div>
+    <h3>📦 关于你的数据安全</h3>
+    <div class="desc">你现在是<strong>游客模式</strong>，没有注册网站账号。</div>
+    <div class="box tight" style="margin-top:12px">
+      <div class="t">你的学号和密码<strong>不保存在手机或电脑上</strong>，而是加密存放在服务器里。</div>
+      <div class="t" style="margin-top:8px">但这份数据是和你<strong>当前的浏览器绑定</strong>的——如果你清除了浏览器数据、换了设备，或者很久没打开，这些数据就找不回来了。</div>
+      <div class="t" style="margin-top:8px">👉 建议去「设置」页面注册一个网站账号（不需要手机号），这样数据会永久保存，换手机也能用。</div>
+    </div>
+    <div class="row-flex mt-lg">
+      <button class="btn ghost grow" onclick="ackGuestDataNotice()">我知道了</button>
+      <button class="btn accent grow" onclick="ackGuestDataNotice(); go('settings'); openSheet('login')">去注册账号</button>
+    </div>
+  `,
   login: () => `
     <div class="grab"></div>
     <h3>登录 / 注册</h3>
@@ -1277,7 +1299,7 @@ function openSheet(name){
   const tpl = SHEETS[name];
   content.innerHTML = tpl ? tpl() : '<div class="grab"></div><h3>未实现</h3>';
   sc.classList.add('show');
-  if(name === 'lp-info' || name === 'lp-warning' || name === 'cancel') sc.classList.add('center');
+  if(name === 'lp-info' || name === 'lp-warning' || name === 'cancel' || name === 'guest-data-notice') sc.classList.add('center');
   else sc.classList.remove('center');
 }
 function closeSheet(){ $('scrim').classList.remove('show'); }
