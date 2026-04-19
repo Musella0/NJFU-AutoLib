@@ -222,10 +222,14 @@ body.no-wobble .chip,body.no-wobble .pill{border-radius:999px !important}
 /* ========= Week bar ========= */
 .week{padding:16px}
 .week .rows{margin-top:10px;position:relative}
-.week .hours{
-  display:flex;justify-content:space-between;padding-left:64px;
-  font-family:var(--mono);font-size:9px;color:var(--ink3);margin-bottom:4px;
+.week .hours-row{height:14px;margin-bottom:2px}
+.week .scale .tick{
+  position:absolute;top:0;
+  font-family:var(--mono);font-size:9px;color:var(--ink3);
+  transform:translateX(-50%);line-height:1;
 }
+.week .scale .tick:first-child{transform:translateX(0)}
+.week .scale .tick:last-child{transform:translateX(-100%)}
 .week .row{position:relative;height:18px;margin-bottom:5px;display:flex;align-items:center}
 .week .row .day{
   width:60px;text-align:left;padding-right:8px;

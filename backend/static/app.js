@@ -795,8 +795,9 @@ function renderWeekPreview(){
     const [s, e] = time.split('-');
     const sh = parseInt(s.split(':')[0], 10) + parseInt(s.split(':')[1], 10)/60;
     const eh = parseInt(e.split(':')[0], 10) + parseInt(e.split(':')[1], 10)/60;
-    const left = Math.max(0, (sh - 6) / 16 * 100);
-    const width = Math.max(2, (eh - sh) / 16 * 100);
+    // Scale: track width represents 08:00 – 22:00 (14h)
+    const left = Math.max(0, (sh - 8) / 14 * 100);
+    const width = Math.max(2, (eh - sh) / 14 * 100);
     // Bar coloring:
     //   tomorrow mode → all days solid accent (red)
     //   week mode → today solid accent, tomorrow outlined blue, others soft accent
