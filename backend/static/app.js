@@ -124,7 +124,11 @@ function updateAuthUI(){
   if(state.isGuest){
     hello.textContent = '你好，游客 ☕';
     $('settings-uid').textContent = '游客';
-    $('settings-accounts-meta').textContent = '未登录，数据仅存本会话';
+    const n = state.accounts.length;
+    $('settings-accounts-meta').textContent = n
+      ? `游客模式 · ${n} 个学号 · 数据仅存本会话`
+      : '游客模式 · 数据仅存本会话';
+    $('settings-auth-btn').style.display = '';
     $('settings-auth-btn').textContent = '登录';
     $('settings-auth-btn').onclick = () => openSheet('login');
     $('logout-card').style.display = 'none';
@@ -214,7 +218,7 @@ function renderAllAccountViews(){
   if(state.currentPid){
     chip.textContent = state.currentPid;
   }else{
-    chip.textContent = state.isGuest ? '未登录' : '未添加';
+    chip.textContent = '未添加';
   }
   const dot = $('pid-dot');
   if(dot){
@@ -481,11 +485,6 @@ function setCfgMode(m){
 }
 
 async function saveCfg(){
-  if(state.isGuest){
-    toast('请先登录以保存配置','error');
-    openSheet('login');
-    return;
-  }
   if(!state.currentPid || !state.currentCfg){
     toast('请先添加学号','error');
     openSheet('accounts');
@@ -552,8 +551,7 @@ async function saveCfg(){
 }
 
 async function reserveNow(){
-  if(state.isGuest){ toast('请先登录','error'); openSheet('login'); return; }
-  if(!state.currentPid){ toast('请先选择学号','error'); return; }
+  if(!state.currentPid){ toast('请先添加学号','error'); return; }
   if(!confirm('立即用当前配置抢一次座？')) return;
 
   toast('正在用当前配置抢座...','info');
@@ -575,7 +573,7 @@ function localDateStr(offsetDays){
 }
 
 async function loadReservations(){
-  if(state.isGuest || !state.currentPid || !state.currentCfg || !state.currentCfg.verified){
+  if(!state.currentPid || !state.currentCfg || !state.currentCfg.verified){
     state.todayResv = null;
     state.tomorrowResv = null;
     renderHome();
@@ -603,7 +601,7 @@ async function loadReservations(){
 
 
 async function toggleArrived(){
-  if(state.isGuest || !state.currentPid){ toast('请先登录并选择学号','error'); return; }
+  if(!state.currentPid){ toast('请先添加学号','error'); return; }
   const btn = $('btn-arrived');
   btn.disabled = true;
   const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/arrived`, { method:'POST' });
@@ -660,18 +658,6 @@ function renderTodayCard(opt){
     card.style.display = '';
     empty.style.display = 'none';
     card.innerHTML = `<div class="label">今日座位</div><div class="sub" style="margin-top:8px">加载中...</div>`;
-    return;
-  }
-
-  if(state.isGuest){
-    card.style.display = 'none';
-    empty.style.display = '';
-    empty.innerHTML = `
-      <div class="h2" style="color:var(--ink3)">请先登录</div>
-      <div class="sub" style="margin-top:6px">登录后才能查看今日预约</div>
-      <div class="actions" style="justify-content:center">
-        <button class="btn accent" onclick="openSheet('login')">登录 / 注册</button>
-      </div>`;
     return;
   }
 
@@ -745,7 +731,7 @@ function renderTomorrowCard(opt){
     return;
   }
 
-  if(state.isGuest || !cfg){
+  if(!cfg){
     card.style.display = 'none';
     empty.style.display = 'none';
     return;
@@ -795,8 +781,7 @@ function renderTomorrowStrip(){
   const cfg = state.currentCfg;
   const tt = $('tmr-title');
   const ss = $('tmr-sub');
-  if(state.isGuest){ tt.textContent = '请先登录'; ss.textContent = ''; return; }
-  if(!cfg){ tt.textContent = '添加学号后查看'; ss.textContent = ''; return; }
+  if(!cfg){ tt.textContent = '添加学号后查看'; ss.textContent = state.isGuest ? '游客数据仅存本会话' : ''; return; }
   if(cfg.is_reserved !== 'True'){ tt.textContent = '自动预约已暂停'; ss.textContent = '去配置页开启「自动预约」'; return; }
 
   const seats = cfg.seat_list || [];
@@ -960,8 +945,8 @@ function renderTomorrowBody(){
 }
 
 async function saveTmr(){
-  if(state.isGuest || !state.currentPid || !state.currentCfg){
-    toast('请先登录并选择学号','error'); return;
+  if(!state.currentPid || !state.currentCfg){
+    toast('请先添加学号','error'); return;
   }
   const rawS = $('tmr-start').value, rawE = $('tmr-end').value;
   if(!rawS || !rawE){ toast('时间无效','error'); return; }
@@ -1001,7 +986,7 @@ function toggleNotices(){
 async function loadNotices(){
   try{
     const promises = [fetch('/api/announcements').catch(() => null)];
-    if(!state.isGuest) promises.push(fetch('/api/my/reservation_results').catch(() => null));
+    promises.push(fetch('/api/my/reservation_results').catch(() => null));
     const res = await Promise.all(promises);
     const anns = (res[0] && res[0].ok) ? await res[0].json() : [];
     const results = (res[1] && res[1].ok) ? await res[1].json() : [];
@@ -1091,7 +1076,7 @@ function addSeat(){
 
 // ---------- notify ----------
 async function saveEmail(){
-  if(state.isGuest || !state.currentPid || !state.currentCfg){ toast('请先登录并选择学号','error'); return; }
+  if(!state.currentPid || !state.currentCfg){ toast('请先添加学号','error'); return; }
   const v = $('em-input').value.trim();
   const body = { notify_email: v };
   const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}`, { method:'POST', body });
@@ -1284,16 +1269,6 @@ const SHEETS = {
       <button class="btn accent grow" onclick="acknowledgeLP()">我已知晓，永久关闭</button>
     </div>
   `,
-  about: () => `
-    <div class="grab"></div>
-    <h3>关于 AutoLib</h3>
-    <div class="desc">版本 v2.0 · 开源</div>
-    <div class="box tight">
-      <div class="t">基于 NJFU 图书馆预约系统的自动抢座工具。</div>
-      <div class="t" style="margin-top:6px">每天固定时间点定时预约座位，支持多学号、座位优先级、迟到保护等功能。</div>
-    </div>
-    <button class="btn primary mt-lg" style="width:100%" onclick="closeSheet()">关闭</button>
-  `,
 };
 
 function openSheet(name){
@@ -1302,7 +1277,7 @@ function openSheet(name){
   const tpl = SHEETS[name];
   content.innerHTML = tpl ? tpl() : '<div class="grab"></div><h3>未实现</h3>';
   sc.classList.add('show');
-  if(name === 'lp-info' || name === 'lp-warning' || name === 'cancel' || name === 'about') sc.classList.add('center');
+  if(name === 'lp-info' || name === 'lp-warning' || name === 'cancel') sc.classList.add('center');
   else sc.classList.remove('center');
 }
 function closeSheet(){ $('scrim').classList.remove('show'); }

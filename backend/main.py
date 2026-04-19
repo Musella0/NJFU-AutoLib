@@ -839,12 +839,9 @@ def admin_delete_announcement(ann_id):
 @login_required
 def my_reservation_results():
     """Aggregate latest reservation results across all the user's library accounts.
-    
-    仅在用户有 web_uid session 时返回数据。
+
+    游客使用 guest_uid session。
     """
-    if "web_uid" not in session:
-        return jsonify({"error": "请先登录", "need_login": True}), 401
-    
     uid = _ensure_uid()
     client, db = get_db()
     rows = list(db.user_config_info.find(
