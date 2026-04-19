@@ -10,7 +10,7 @@
 │                                             │
 │  ┌──────────┐  ┌───────────┐  ┌───────────┐ │
 │  │ flask-api │  │ scheduler │  │  MongoDB  │ │
-│  │  :5003    │──│  定时预约  │──│  :27017   │ │
+│  │  :5004    │──│  定时预约  │──│  :27017   │ │
 │  └──────────┘  └───────────┘  └───────────┘ │
 │                                    ▲        │
 │  ┌──────────┐                      │        │
@@ -62,7 +62,7 @@ docker compose logs -f flask-api
 docker compose ps
 
 # 测试 API
-curl http://localhost:5003/
+curl http://localhost:5004/
 
 # 检查座位数据是否导入
 docker compose exec mongo mongosh -u autolib -p autolib123 --eval "db.getSiblingDB('AutoLib').devices.countDocuments()"
@@ -77,7 +77,7 @@ docker compose exec mongo mongosh -u autolib -p autolib123 --eval "db.getSibling
 | `MONGO_USER` | autolib | MongoDB 用户名 |
 | `MONGO_PASS` | autolib123 | MongoDB 密码（**请修改**） |
 | `MONGO_PORT` | 27017 | MongoDB 外部端口 |
-| `API_PORT` | 5003 | Flask API 外部端口 |
+| `API_PORT` | 5004 | Flask API 外部端口 |
 | `SCHEDULE_HOUR` | 19 | 每天几点执行预约 |
 | `SCHEDULE_MINUTE` | 55 | 每天几分执行预约 |
 
@@ -86,7 +86,7 @@ docker compose exec mongo mongosh -u autolib -p autolib123 --eval "db.getSibling
 通过 API 添加预约配置：
 
 ```bash
-curl -X POST http://localhost:5003/db/reservation/all \
+curl -X POST http://localhost:5004/db/reservation/all \
   -H "Content-Type: application/json" \
   -d '{
     "pid": "你的学号",
@@ -117,7 +117,7 @@ curl -X POST http://localhost:5003/db/reservation/all \
 ### 查询预约结果
 
 ```bash
-curl -X POST http://localhost:5003/db/reservation/query \
+curl -X POST http://localhost:5004/db/reservation/query \
   -H "Content-Type: application/json" \
   -d '{"pid": "你的学号"}'
 ```

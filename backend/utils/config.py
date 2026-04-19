@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 load_dotenv(dotenv_path=os.path.join(PROJECT_ROOT, '.env'))
 
 # 服务器配置
-SERVER_IP = os.getenv("SERVER_IP", "0.0.0.0:5003")
+SERVER_IP = os.getenv("SERVER_IP", "0.0.0.0:5004")
 DB_IP = os.getenv("DB_IP", "mongo:27017")
 
 # MongoDB 认证

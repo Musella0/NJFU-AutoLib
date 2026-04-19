@@ -32,7 +32,7 @@ services:
       - DB_IP=mongo:27017
       - MONGO_USER=${MONGO_USER:-autolib}
       - MONGO_PASS=${MONGO_PASS:-autolib123}
-      - SERVER_IP=0.0.0.0:5003
+      - SERVER_IP=0.0.0.0:5004
       - LOG_FILE=logs/auto_lib.log
       - FOLDER_PATH=座位信息
       - TZ=Asia/Shanghai
@@ -42,7 +42,7 @@ services:
       - ADMIN_TOTP_SECRET=${ADMIN_TOTP_SECRET:-}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
     ports:
-      - "${API_PORT:-5003}:5003"
+      - "${API_PORT:-5004}:5004"
     volumes:
       - api_logs:/app/logs
 
