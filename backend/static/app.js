@@ -1050,10 +1050,15 @@ async function loadSeats(){
 }
 
 function sortedZones(){
-  return Object.keys(state.allSeats).sort((a, b) => {
-    const fa = a.match(/\d+/) ? parseInt(a.match(/\d+/)[0], 10) : 99;
-    const fb = b.match(/\d+/) ? parseInt(b.match(/\d+/)[0], 10) : 99;
-    return fa - fb || a.localeCompare(b);
+  const ORDER = ['二楼A区','二楼B区','六楼A区','七楼A区','七楼B区','三楼夹层','三楼A区','三楼B区','三楼C区','四楼夹层','四楼A区','五楼A区'];
+  const keys = Object.keys(state.allSeats);
+  return keys.sort((a, b) => {
+    const ia = ORDER.indexOf(a);
+    const ib = ORDER.indexOf(b);
+    if (ia !== -1 && ib !== -1) return ia - ib;
+    if (ia !== -1) return -1;
+    if (ib !== -1) return 1;
+    return a.localeCompare(b);
   });
 }
 
