@@ -41,6 +41,28 @@ function clampRange(s, e, isoDay){
   return [cs, ce];
 }
 
+// 将 time 配置值规范为段字符串数组 ["HH:MM-HH:MM", ...]
+// - 字符串 "HH:MM-HH:MM" → 单段数组
+// - 数组 → 过滤掉无效/休息项
+// - "休息" / "off" / 空 → []
+function toSegments(raw){
+  if(!raw) return [];
+  if(Array.isArray(raw)){
+    return raw.filter(x => typeof x === 'string' && x !== '休息' && x !== 'off' && /^\d\d:\d\d-\d\d:\d\d$/.test(x));
+  }
+  if(typeof raw === 'string'){
+    if(raw === '休息' || raw === 'off') return [];
+    if(/^\d\d:\d\d-\d\d:\d\d$/.test(raw)) return [raw];
+  }
+  return [];
+}
+// 周五 20:00 关闭
+function friCap(seg){
+  const [s, e] = seg.split('-');
+  if(e && e > '20:00') return `${s}-20:00`;
+  return seg;
+}
+
 // ---------- helpers ----------
 function $(id){ return document.getElementById(id); }
 function escHtml(s){ return (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -301,11 +323,13 @@ function renderConfig(){
   // Week grid
   buildWeekGrid(cfg.time && cfg.time.week_time);
 
-  // Simple mode
-  const tmr = (cfg.time && cfg.time.tomorrow) || '08:00-22:00';
-  const [sStart, sEnd] = tmr.split('-');
-  $('cfg-simple-start').value = sStart;
-  $('cfg-simple-end').value = sEnd;
+  // Simple mode (支持多段)
+  const simpleList = $('simple-seg-list');
+  if(simpleList){
+    let simpleSegs = toSegments(cfg.time && cfg.time.tomorrow);
+    if(!simpleSegs.length) simpleSegs = ['08:00-22:00'];
+    simpleList.innerHTML = simpleSegs.map(simpleSegRowHtml).join('');
+  }
 
   // Seats
   renderCfgSeats();
@@ -325,16 +349,28 @@ function renderConfig(){
   $('email-label').textContent = cfg.notify_email || '未设置';
 }
 
+function segmentRowHtml(seg, isoDay, disabled){
+  const [rs, re] = seg.split('-');
+  const [s, e] = clampRange(rs, re, isoDay);
+  const { min, max } = timeBounds(isoDay);
+  return `
+    <div class="seg-row" data-seg>
+      <input class="time-input" type="time" value="${s}" data-field="start" min="${min}" max="${max}" ${disabled?'disabled':''} style="padding:4px 8px;font-size:13px">
+      <span class="to">→</span>
+      <input class="time-input" type="time" value="${e}" data-field="end" min="${min}" max="${max}" ${disabled?'disabled':''} style="padding:4px 8px;font-size:13px">
+      <button type="button" class="btn sm ghost seg-del" onclick="removeSeg(this)" ${disabled?'disabled':''}>×</button>
+    </div>`;
+}
+
 function buildWeekGrid(weekTime){
   const grid = $('week-grid');
   grid.innerHTML = '';
   for(let i = 1; i <= 7; i++){
     const key = String(i);
-    const raw = (weekTime && weekTime[key]) || WEEK_DEFAULTS[i-1];
-    const isOff = raw === '休息' || raw === 'off';
-    const [rs, re] = (isOff ? WEEK_DEFAULTS[i-1] : raw).split('-');
-    const [s, e] = clampRange(rs, re, i);
-    const { min, max } = timeBounds(i);
+    const rawVal = weekTime && weekTime[key];
+    const isOff = rawVal === '休息' || rawVal === 'off';
+    let segs = toSegments(rawVal);
+    if(!segs.length) segs = [WEEK_DEFAULTS[i-1]];
     const row = document.createElement('div');
     row.className = 'box tight';
     row.dataset.day = i;
@@ -344,22 +380,72 @@ function buildWeekGrid(weekTime){
           <div class="toggle ${isOff?'':'on'}" data-field="day-on" onclick="tToggle(this, event)"></div>
           <div class="sub" style="font-weight:700">周${WEEK_LABELS[i-1]}${i===5?' <span class="tiny" style="color:var(--ink3)">· 最晚 20:00</span>':''}</div>
         </div>
-        <div class="time-pair" style="flex:0 0 auto;max-width:220px">
-          <input class="time-input" type="time" value="${s}" data-field="start" min="${min}" max="${max}" ${isOff?'disabled':''} style="padding:4px 8px;font-size:13px">
-          <span class="to">→</span>
-          <input class="time-input" type="time" value="${e}" data-field="end" min="${min}" max="${max}" ${isOff?'disabled':''} style="padding:4px 8px;font-size:13px">
-        </div>
+        <button type="button" class="btn sm ghost" data-field="seg-add" onclick="addSeg(this)" ${isOff?'disabled':''}>+ 加时段</button>
+      </div>
+      <div class="seg-list mt" data-field="seg-list">
+        ${segs.map(s => segmentRowHtml(s, i, isOff)).join('')}
       </div>`;
     grid.appendChild(row);
   }
-  // Wire day toggles to enable/disable time inputs
+  // 日 toggle 启用/停用时间输入与 + 按钮
   grid.querySelectorAll('[data-field="day-on"]').forEach(tg => {
     tg.addEventListener('click', () => {
       const row = tg.closest('[data-day]');
       const isOn = tg.classList.contains('on');
       row.querySelectorAll('input[type="time"]').forEach(inp => inp.disabled = !isOn);
+      row.querySelectorAll('[data-field="seg-add"], .seg-del').forEach(b => b.disabled = !isOn);
     });
   });
+}
+
+function addSeg(btn){
+  const row = btn.closest('[data-day]');
+  if(!row) return;
+  const isoDay = parseInt(row.dataset.day, 10);
+  const list = row.querySelector('[data-field="seg-list"]');
+  // 新段默认用该天的默认时段
+  list.insertAdjacentHTML('beforeend', segmentRowHtml(WEEK_DEFAULTS[isoDay-1], isoDay, false));
+}
+
+function removeSeg(btn){
+  const row = btn.closest('[data-day]');
+  if(!row) return;
+  const list = row.querySelector('[data-field="seg-list"]');
+  const segs = list.querySelectorAll('[data-seg]');
+  if(segs.length <= 1){
+    toast('至少保留一段，关闭当天请用左侧开关','info');
+    return;
+  }
+  btn.closest('[data-seg]').remove();
+}
+
+function addSimpleSeg(){
+  const list = $('simple-seg-list');
+  if(!list) return;
+  list.insertAdjacentHTML('beforeend', simpleSegRowHtml('08:00-22:00'));
+}
+
+function removeSimpleSeg(btn){
+  const list = $('simple-seg-list');
+  if(!list) return;
+  const segs = list.querySelectorAll('[data-seg]');
+  if(segs.length <= 1){
+    toast('至少保留一段','info');
+    return;
+  }
+  btn.closest('[data-seg]').remove();
+}
+
+function simpleSegRowHtml(seg){
+  const [rs, re] = seg.split('-');
+  const [s, e] = clampRange(rs, re, null);
+  return `
+    <div class="seg-row" data-seg>
+      <input class="time-input" type="time" value="${s}" data-field="start" min="${TIME_MIN}" max="${TIME_MAX_DEFAULT}">
+      <span class="to">→</span>
+      <input class="time-input" type="time" value="${e}" data-field="end" min="${TIME_MIN}" max="${TIME_MAX_DEFAULT}">
+      <button type="button" class="btn sm ghost seg-del" onclick="removeSimpleSeg(this)">×</button>
+    </div>`;
 }
 
 function renderCfgSeats(){
@@ -406,30 +492,39 @@ async function saveCfg(){
     return;
   }
 
-  // Collect week grid (clamped per-day, Friday capped at 20:00)
+  // 收集 week grid（每天为段数组，周五结束时间最晚 20:00）
   const wt = {};
   document.querySelectorAll('#week-grid [data-day]').forEach(row => {
     const day = parseInt(row.dataset.day, 10);
     const on = row.querySelector('[data-field="day-on"]').classList.contains('on');
-    const s = row.querySelector('[data-field="start"]').value;
-    const e = row.querySelector('[data-field="end"]').value;
-    if(on){
-      const [cs, ce] = clampRange(s, e, day);
-      wt[day] = `${cs}-${ce}`;
-    }else{
-      wt[day] = WEEK_DEFAULTS[day-1];
+    if(!on){
+      wt[day] = '休息';
+      return;
     }
+    const segs = [];
+    row.querySelectorAll('[data-seg]').forEach(seg => {
+      const s = seg.querySelector('[data-field="start"]').value;
+      const e = seg.querySelector('[data-field="end"]').value;
+      const [cs, ce] = clampRange(s, e, day);
+      segs.push(`${cs}-${ce}`);
+    });
+    wt[day] = segs.length ? segs : [WEEK_DEFAULTS[day-1]];
   });
 
   const mode = state.cfgMode === 'week' ? 'week_time' : 'tomorrow';
-  let simpleRange = '';
+  let simpleSegs = [];
   if(mode === 'tomorrow'){
-    const [ss, se] = clampRange($('cfg-simple-start').value, $('cfg-simple-end').value, null);
-    simpleRange = `${ss}-${se}`;
+    document.querySelectorAll('#simple-seg-list [data-seg]').forEach(seg => {
+      const s = seg.querySelector('[data-field="start"]').value;
+      const e = seg.querySelector('[data-field="end"]').value;
+      const [cs, ce] = clampRange(s, e, null);
+      simpleSegs.push(`${cs}-${ce}`);
+    });
+    if(!simpleSegs.length) simpleSegs = ['08:00-22:00'];
   }
   const timeCfg = mode === 'week_time'
     ? { week_time: wt }
-    : { tomorrow: simpleRange, week_time: wt };
+    : { tomorrow: simpleSegs, week_time: wt };
 
   const body = {
     vpn_password: $('cfg-vpn').value,
@@ -706,22 +801,20 @@ function renderTomorrowStrip(){
 
   const seats = cfg.seat_list || [];
   const seat = seats[0] || '—';
-  let time = '—';
-  if(cfg.mode === 'tomorrow' && cfg.time && cfg.time.tomorrow){
-    time = cfg.time.tomorrow;
-  }else if(cfg.time && cfg.time.week_time){
-    const tmr = new Date(Date.now() + 86400000);
-    const iso = String(tmr.getDay() === 0 ? 7 : tmr.getDay());
-    time = cfg.time.week_time[iso] || '—';
-  }
-  // Friday hard-cap to 20:00 to match backend behavior
+  let segs = [];
   const tmr = new Date(Date.now() + 86400000);
-  if(tmr.getDay() === 5 && /-(\d{2}:\d{2})$/.test(time)){
-    const [s, e] = time.split('-');
-    if(e > '20:00') time = `${s}-20:00`;
+  const isoNum = tmr.getDay() === 0 ? 7 : tmr.getDay();
+  if(cfg.mode === 'tomorrow' && cfg.time){
+    segs = toSegments(cfg.time.tomorrow);
+  }else if(cfg.time && cfg.time.week_time){
+    segs = toSegments(cfg.time.week_time[String(isoNum)]);
   }
+  if(isoNum === 5) segs = segs.map(friCap);
+  const timeLabel = segs.length
+    ? (segs.length > 1 ? `${segs.length}段: ${segs.join(' · ')}` : segs[0])
+    : '—';
   tt.textContent = '按配置自动预约';
-  ss.textContent = `明早抢 ${seat} · ${time}`;
+  ss.textContent = `明早抢 ${seat} · ${timeLabel}`;
 }
 
 function renderWeekPreview(){
@@ -748,31 +841,19 @@ function renderWeekPreview(){
     else footer.textContent = '💡 每天按配置的时段预约';
   }
 
-  const friCap = (time) => {
-    if(!time) return time;
-    const [s, e] = time.split('-');
-    if(e && e > '20:00') return `${s}-20:00`;
-    return time;
-  };
-
   for(let i = 1; i <= 7; i++){
-    // Determine per-day time + active state
-    let time = null;
-    let active = false;
+    // 计算当天段列表
+    let segs = [];
     if(cfg && reserveOn){
       if(mode === 'tomorrow'){
-        time = (cfg.time && cfg.time.tomorrow) || '08:00-22:00';
-        active = true;
+        segs = toSegments(cfg.time && cfg.time.tomorrow);
+        if(!segs.length) segs = ['08:00-22:00'];
       }else{
-        const t = cfg.time && cfg.time.week_time && cfg.time.week_time[String(i)];
-        if(t && t !== '休息' && t !== 'off' && /^\d\d:\d\d-\d\d:\d\d$/.test(t)){
-          time = t;
-          active = true;
-        }
+        segs = toSegments(cfg.time && cfg.time.week_time && cfg.time.week_time[String(i)]);
       }
     }
-    // Friday 20:00 cap (matches backend behavior)
-    if(active && i === 5) time = friCap(time);
+    if(i === 5) segs = segs.map(friCap);
+    const active = segs.length > 0;
 
     const isToday = i === today;
     const isTmr = i === tmr;
@@ -781,7 +862,7 @@ function renderWeekPreview(){
       : (isTmr ? '<span class="tag dim">明</span>' : '');
     const dayClass = isToday ? 'today' : (active ? '' : 'off');
 
-    if(!active || !time){
+    if(!active){
       host.innerHTML += `
         <div class="row">
           <span class="day ${dayClass}">${tag}周${WEEK_LABELS[i-1]}</span>
@@ -792,29 +873,32 @@ function renderWeekPreview(){
       continue;
     }
 
-    const [s, e] = time.split('-');
-    const sh = parseInt(s.split(':')[0], 10) + parseInt(s.split(':')[1], 10)/60;
-    const eh = parseInt(e.split(':')[0], 10) + parseInt(e.split(':')[1], 10)/60;
-    // Scale: track width represents 08:00 – 22:00 (14h)
-    const left = Math.max(0, (sh - 8) / 14 * 100);
-    const width = Math.max(2, (eh - sh) / 14 * 100);
-    // Bar coloring:
-    //   tomorrow mode → all days solid accent (red)
-    //   week mode → today solid accent, tomorrow outlined blue, others soft accent
     let barClass;
     if(mode === 'tomorrow') barClass = 'today';
     else if(isToday) barClass = 'today';
     else if(isTmr) barClass = 'tomorrow-b';
     else barClass = 'active';
-    const lbl = (isToday || isTmr || mode === 'tomorrow')
-      ? `<span class="lbl">${s.slice(0,5)}-${e.slice(0,5)}</span>`
+    const showLabel = (isToday || isTmr || mode === 'tomorrow');
+
+    const bars = segs.map(seg => {
+      const [s, e] = seg.split('-');
+      const sh = parseInt(s.split(':')[0], 10) + parseInt(s.split(':')[1], 10)/60;
+      const eh = parseInt(e.split(':')[0], 10) + parseInt(e.split(':')[1], 10)/60;
+      const left = Math.max(0, (sh - 8) / 14 * 100);
+      const width = Math.max(2, (eh - sh) / 14 * 100);
+      // 多段时标签可能挤不下，仅在单段时显示
+      const lbl = (showLabel && segs.length === 1)
+        ? `<span class="lbl">${s.slice(0,5)}-${e.slice(0,5)}</span>`
+        : '';
+      return `<div class="bar ${barClass}" style="left:${left}%;width:${width}%">${lbl}</div>`;
+    }).join('');
+    const segCountTip = segs.length > 1
+      ? `<span class="tiny" style="margin-left:4px;color:var(--ink3)">×${segs.length}</span>`
       : '';
     host.innerHTML += `
       <div class="row">
-        <span class="day ${dayClass}">${tag}周${WEEK_LABELS[i-1]}</span>
-        <div class="track">
-          <div class="bar ${barClass}" style="left:${left}%;width:${width}%">${lbl}</div>
-        </div>
+        <span class="day ${dayClass}">${tag}周${WEEK_LABELS[i-1]}${segCountTip}</span>
+        <div class="track">${bars}</div>
       </div>`;
   }
 }
@@ -832,18 +916,30 @@ function renderTomorrowBody(){
   const tmr = new Date(Date.now() + 86400000);
   const isoNum = tmr.getDay() === 0 ? 7 : tmr.getDay();
   const iso = String(isoNum);
-  let raw = '08:00-22:00';
+  let segs = [];
   if(cfg && cfg.time){
-    if(cfg.mode === 'tomorrow' && cfg.time.tomorrow) raw = cfg.time.tomorrow;
-    else if(cfg.time.week_time && cfg.time.week_time[iso]) raw = cfg.time.week_time[iso];
+    if(cfg.mode === 'tomorrow') segs = toSegments(cfg.time.tomorrow);
+    else if(cfg.time.week_time) segs = toSegments(cfg.time.week_time[iso]);
   }
-  const [rs, re] = raw.split('-');
+  if(!segs.length) segs = ['08:00-22:00'];
+  const [rs, re] = segs[0].split('-');
   const [s, e] = clampRange(rs, re, isoNum);
   const { min, max } = timeBounds(isoNum);
   const startEl = $('tmr-start');
   const endEl = $('tmr-end');
   startEl.min = min; startEl.max = max; startEl.value = s;
   endEl.min = min; endEl.max = max; endEl.value = e;
+
+  // 多段提示
+  const hint = $('tmr-multi-hint');
+  if(hint){
+    if(segs.length > 1){
+      hint.textContent = `⚠ 当前有 ${segs.length} 段，快速编辑仅保留首段。多段请在配置中调整`;
+      hint.style.display = '';
+    }else{
+      hint.style.display = 'none';
+    }
+  }
 
   const list = $('tmr-seats');
   list.innerHTML = '';
@@ -875,7 +971,7 @@ async function saveTmr(){
   if(s >= e){ toast('时间无效','error'); return; }
   const body = {
     mode: 'tomorrow',
-    time: Object.assign({}, state.currentCfg.time || {}, { tomorrow: `${s}-${e}` }),
+    time: Object.assign({}, state.currentCfg.time || {}, { tomorrow: [`${s}-${e}`] }),
     seat_list: state.currentCfg.seat_list || [],
   };
   const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}`, { method:'POST', body });

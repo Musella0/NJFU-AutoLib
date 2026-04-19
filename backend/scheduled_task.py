@@ -167,60 +167,74 @@ def get_seat_ids(seat_list: List[str]) -> List[str]:
             log_with_user(logger, 'warning', '系统', '座位ID获取', f"设备号 {device_name} 不存在")
     return seat_ids
 
-def calculate_reservation_time(res_item: Dict[str, Any]) -> Tuple[str, str]:
+def _to_segments(raw: Any) -> List[str]:
     """
-    根据预约模式计算预约时间
+    将时间配置统一规范为段列表。
+
+    - 字符串 "HH:MM-HH:MM" → ["HH:MM-HH:MM"]
+    - 列表 [..] → 过滤掉无效/休息项
+    - "休息" / "off" / 空 → []
+    """
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [s for s in raw if isinstance(s, str) and s not in ('休息', 'off') and '-' in s]
+    if isinstance(raw, str):
+        if raw in ('休息', 'off'):
+            return []
+        if '-' in raw:
+            return [raw]
+    return []
+
+def calculate_reservation_time(res_item: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """
+    根据预约模式计算预约时间段列表（支持一天多段）。
 
     支持三种预约模式：
-    1. week: 根据星期几选择对应的时间段
+    1. week_time: 根据星期几选择对应的时间段
     2. tomorrow: 预约明天的时间段
     3. after_tomorrow: 预约后天的时间段
 
     时间格式为 "YYYY-MM-DD HH:MM:SS"
 
-    Args:
-        res_item: 预约配置项，包含预约模式和时间设置
-
     Returns:
-        Tuple[str, str]: (开始时间, 结束时间)
-
-    Raises:
-        ValueError: 当预约模式不支持时抛出
+        List[Tuple[str, str]]: 每段 (开始时间, 结束时间)；可能为空列表
     """
     mode = res_item["mode"]
     now = datetime.now()
 
     if mode == "week_time":
-        # 根据星期几选择时间
-        tomorrow = now + timedelta(days=1)
-        weekday_iso = str(tomorrow.isoweekday())  # 1-7 表示周一到周日
-        begin_time, end_time = res_item['time']['week_time'][weekday_iso].split("-")
-        date_str = tomorrow.strftime("%Y-%m-%d")
-    elif mode == "tomorrow":
-        # 预约明天的时间
-        res_time = res_item["time"]["tomorrow"]
-        begin_time, end_time = res_time.split("-")
         target_date = now + timedelta(days=1)
-        date_str = target_date.strftime("%Y-%m-%d")
-        # 周五图书馆20点关闭，结束时间不超过20:00
-        if target_date.isoweekday() == 5 and end_time > "20:00":
-            end_time = "20:00"
+        weekday_iso = str(target_date.isoweekday())
+        raw = res_item.get('time', {}).get('week_time', {}).get(weekday_iso)
+    elif mode == "tomorrow":
+        target_date = now + timedelta(days=1)
+        raw = res_item.get("time", {}).get("tomorrow")
     elif mode == "after_tomorrow":
-        # 预约后天的时间
-        res_time = res_item["time"]["tomorrow"]
-        begin_time, end_time = res_time.split("-")
         target_date = now + timedelta(days=2)
-        date_str = target_date.strftime("%Y-%m-%d")
-        # 周五图书馆20点关闭，结束时间不超过20:00
-        if target_date.isoweekday() == 5 and end_time > "20:00":
-            end_time = "20:00"
+        raw = res_item.get("time", {}).get("tomorrow")
     else:
         raise ValueError(f"不支持的预约模式: {mode}")
 
-    return (
-        f"{date_str} {begin_time}:00",
-        f"{date_str} {end_time}:00"
-    )
+    date_str = target_date.strftime("%Y-%m-%d")
+    is_friday = target_date.isoweekday() == 5
+    result: List[Tuple[str, str]] = []
+
+    for seg in _to_segments(raw):
+        try:
+            begin_time, end_time = seg.split("-")
+        except ValueError:
+            continue
+        # 周五 20:00 关闭
+        if is_friday and end_time > "20:00":
+            end_time = "20:00"
+        if begin_time >= end_time:
+            continue
+        result.append((
+            f"{date_str} {begin_time}:00",
+            f"{date_str} {end_time}:00"
+        ))
+    return result
 
 def update_user_config(pid: str, result: str) -> None:
     """
@@ -279,10 +293,14 @@ def reservation(res_item: Dict[str, Any]) -> None:
     seat_list = res_item["seat_list"]
 
     try:
-        # 计算预约时间
-        resv_begin_time, resv_end_time = calculate_reservation_time(res_item)
+        # 计算预约时间段列表（支持多段）
+        segments = calculate_reservation_time(res_item)
+        if not segments:
+            log_with_user(logger, 'error', pid, '预约时间', "未找到有效的预约时间段")
+            handle_reservation_error(pid, "未配置有效的预约时间段")
+            return
         log_with_user(logger, 'info', pid, '预约时间',
-                     f"预约时间: {resv_begin_time} - {resv_end_time}")
+                     f"共 {len(segments)} 段: " + "; ".join([f"{b}~{e}" for b, e in segments]))
 
         # 获取座位ID
         seat_ids = get_seat_ids(seat_list)
@@ -291,7 +309,7 @@ def reservation(res_item: Dict[str, Any]) -> None:
             handle_reservation_error(pid, "未找到有效的座位ID")
             return
 
-        # 初始化图书馆系统
+        # 初始化图书馆系统（多段共享同一会话）
         log_with_user(logger, 'info', pid, '系统初始化', "开始初始化图书馆系统")
         library = LibrarySystem(
             username=pid,
@@ -299,36 +317,44 @@ def reservation(res_item: Dict[str, Any]) -> None:
             vpn_password=vpn_password
         )
 
-        # 执行预约（单次尝试，不重试）
-        try:
-            log_with_user(logger, 'info', pid, '预约执行', "开始执行座位预约")
-            res_message, user_info = library.reserve_seat(
-                seat_list=seat_ids,
-                resv_begin_time=resv_begin_time,
-                resv_end_time=resv_end_time
-            )
+        # 逐段预约
+        any_success = False
+        segment_results: List[str] = []
+        for idx, (resv_begin_time, resv_end_time) in enumerate(segments, 1):
+            seg_label = f"第{idx}段 {resv_begin_time[-8:-3]}-{resv_end_time[-8:-3]}"
+            try:
+                log_with_user(logger, 'info', pid, '预约执行', f"开始预约 {seg_label}")
+                res_message, user_info = library.reserve_seat(
+                    seat_list=seat_ids,
+                    resv_begin_time=resv_begin_time,
+                    resv_end_time=resv_end_time
+                )
 
-            # 检查预约结果
-            if "成功" in res_message or "预约成功" in res_message:
-                log_with_user(logger, 'info', pid, '预约结果', f"预约成功: {res_message}")
+                if "成功" in res_message or "预约成功" in res_message:
+                    log_with_user(logger, 'info', pid, '预约结果', f"{seg_label} 成功: {res_message}")
+                    any_success = True
+                    segment_results.append(f"✅ {seg_label}: {res_message}")
+                    if user_info:
+                        library.insert_or_update_mongo(
+                            collection_name="users",
+                            pid=user_info.get("pid"),
+                            data=user_info,
+                            upsert=True
+                        )
+                else:
+                    log_with_user(logger, 'error', pid, '预约失败', f"{seg_label} 失败: {res_message}")
+                    segment_results.append(f"❌ {seg_label}: {res_message}")
+            except Exception as e:
+                err = f"{seg_label} 异常: {str(e)}"
+                log_with_user(logger, 'error', pid, '预约异常', err)
+                segment_results.append(f"❌ {err}")
 
-                # 更新用户信息
-                if user_info:
-                    library.insert_or_update_mongo(
-                        collection_name="users",
-                        pid=user_info.get("pid"),
-                        data=user_info,
-                        upsert=True
-                    )
-                    log_with_user(logger, 'info', pid, '用户信息', "用户信息已更新")
-
-                # 更新预约结果
-                update_user_config(pid, res_message)
-
-                # 发送成功通知
-                notify_user(res_item, "✅ 预约成功", f"学号 {pid}\n{res_message}")
-
-                # 获取最新的预约信息
+        combined = "\n".join(segment_results)
+        update_user_config(pid, combined)
+        if any_success:
+            notify_user(res_item, "✅ 预约完成" if len(segments) == 1 else f"✅ 多段预约 ({len(segments)}段)",
+                        f"学号 {pid}\n{combined}")
+            try:
                 reservations, message = library.get_reservation_info()
                 if reservations:
                     log_with_user(logger, 'info', pid, '预约状态', f"当前预约状态: {message}")
@@ -337,17 +363,10 @@ def reservation(res_item: Dict[str, Any]) -> None:
                                     f"座位 {res.get('devInfo', {}).get('devName', '未知')} "
                                     f"时间 {res.get('resvBeginTime')} - {res.get('resvEndTime')} "
                                     f"状态 {res.get('resvStatus')}")
-                return  # 预约成功，直接返回
-            else:
-                error_msg = f"预约失败: {res_message}"
-                log_with_user(logger, 'error', pid, '预约失败', error_msg)
-                handle_reservation_error(pid, error_msg)
-                notify_user(res_item, "❌ 预约失败", f"学号 {pid}\n{error_msg}")
-
-        except Exception as e:
-            error_msg = f"预约过程发生异常: {str(e)}"
-            log_with_user(logger, 'error', pid, '预约异常', error_msg)
-            handle_reservation_error(pid, error_msg)
+            except Exception:
+                pass
+        else:
+            notify_user(res_item, "❌ 预约失败", f"学号 {pid}\n{combined}")
 
     except Exception as e:
         error_msg = f"预约过程发生异常: {str(e)}"

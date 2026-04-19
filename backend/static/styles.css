@@ -267,6 +267,10 @@ body.no-wobble .chip,body.no-wobble .pill{border-radius:999px !important}
 /* ========= Time picker (mini) ========= */
 .time-pair{display:flex;align-items:center;gap:10px}
 .time-pair .to{font-family:var(--hand2);font-size:18px;color:var(--ink3)}
+.seg-list{display:flex;flex-direction:column;gap:6px}
+.seg-row{display:flex;align-items:center;gap:8px}
+.seg-row .to{font-family:var(--hand2);font-size:16px;color:var(--ink3)}
+.seg-row .seg-del{padding:2px 8px;font-size:14px;line-height:1}
 .time-input{
   border:2px solid var(--line);background:#fff;
   border-radius:8px;padding:6px 10px;

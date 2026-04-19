@@ -77,6 +77,7 @@
             <span class="to">→</span>
             <input class="time-input" type="time" value="22:00" min="08:00" max="22:00" id="tmr-end">
           </div>
+          <div class="tiny mt" id="tmr-multi-hint" style="display:none;color:var(--warn)"></div>
         </div>
 
         <div class="box tight">
@@ -165,13 +166,12 @@
         </div>
 
         <div id="simple-mode" class="mt-lg" style="display:none">
-          <div class="label">每日固定时段</div>
-          <div class="time-pair mt">
-            <input class="time-input" type="time" value="08:00" min="08:00" max="22:00" id="cfg-simple-start">
-            <span class="to">→</span>
-            <input class="time-input" type="time" value="22:00" min="08:00" max="22:00" id="cfg-simple-end">
+          <div class="row-between">
+            <div class="label">每日固定时段</div>
+            <button type="button" class="btn sm ghost" onclick="addSimpleSeg()">+ 加时段</button>
           </div>
-          <div class="tiny mt" style="color:var(--ink3)">💡 周五实际抢座会自动缩到 20:00</div>
+          <div class="seg-list mt" id="simple-seg-list"></div>
+          <div class="tiny mt" style="color:var(--ink3)">💡 周五实际抢座会自动缩到 20:00 · 支持一天多段</div>
         </div>
       </div>
 
