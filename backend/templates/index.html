@@ -73,9 +73,9 @@
         <div class="box tight">
           <div class="label">时段</div>
           <div class="time-pair mt">
-            <input class="time-input" type="time" value="08:00" id="tmr-start">
+            <input class="time-input" type="time" value="08:00" min="08:00" max="22:00" id="tmr-start">
             <span class="to">→</span>
-            <input class="time-input" type="time" value="22:00" id="tmr-end">
+            <input class="time-input" type="time" value="22:00" min="08:00" max="22:00" id="tmr-end">
           </div>
         </div>
 
@@ -160,10 +160,11 @@
         <div id="simple-mode" class="mt-lg" style="display:none">
           <div class="label">每日固定时段</div>
           <div class="time-pair mt">
-            <input class="time-input" type="time" value="08:00" id="cfg-simple-start">
+            <input class="time-input" type="time" value="08:00" min="08:00" max="22:00" id="cfg-simple-start">
             <span class="to">→</span>
-            <input class="time-input" type="time" value="22:00" id="cfg-simple-end">
+            <input class="time-input" type="time" value="22:00" min="08:00" max="22:00" id="cfg-simple-end">
           </div>
+          <div class="tiny mt" style="color:var(--ink3)">💡 周五实际抢座会自动缩到 20:00</div>
         </div>
       </div>
 

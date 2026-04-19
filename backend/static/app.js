@@ -18,6 +18,28 @@ const state = {
 
 const WEEK_LABELS = ['一','二','三','四','五','六','日']; // iso 1..7
 const WEEK_DEFAULTS = ['08:00-22:00','08:00-22:00','08:00-22:00','08:00-22:00','08:00-20:00','08:00-22:00','08:00-22:00'];
+const TIME_MIN = '08:00';
+const TIME_MAX_DEFAULT = '22:00';
+const TIME_MAX_FRIDAY = '20:00';
+
+// iso weekday 1..7 (Fri=5). Pass null/undefined for generic 08-22 range.
+function timeBounds(isoDay){
+  const max = isoDay === 5 ? TIME_MAX_FRIDAY : TIME_MAX_DEFAULT;
+  return { min: TIME_MIN, max };
+}
+function clampTime(t, min, max){
+  if(!t) return min;
+  if(t < min) return min;
+  if(t > max) return max;
+  return t;
+}
+function clampRange(s, e, isoDay){
+  const { min, max } = timeBounds(isoDay);
+  let cs = clampTime(s, min, max);
+  let ce = clampTime(e, min, max);
+  if(cs >= ce){ cs = min; ce = max; }
+  return [cs, ce];
+}
 
 // ---------- helpers ----------
 function $(id){ return document.getElementById(id); }
@@ -310,7 +332,9 @@ function buildWeekGrid(weekTime){
     const key = String(i);
     const raw = (weekTime && weekTime[key]) || WEEK_DEFAULTS[i-1];
     const isOff = raw === '休息' || raw === 'off';
-    const [s, e] = (isOff ? '08:00-22:00' : raw).split('-');
+    const [rs, re] = (isOff ? WEEK_DEFAULTS[i-1] : raw).split('-');
+    const [s, e] = clampRange(rs, re, i);
+    const { min, max } = timeBounds(i);
     const row = document.createElement('div');
     row.className = 'box tight';
     row.dataset.day = i;
@@ -318,12 +342,12 @@ function buildWeekGrid(weekTime){
       <div class="row-between">
         <div class="row-flex" style="gap:8px">
           <div class="toggle ${isOff?'':'on'}" data-field="day-on" onclick="tToggle(this, event)"></div>
-          <div class="sub" style="font-weight:700">周${WEEK_LABELS[i-1]}</div>
+          <div class="sub" style="font-weight:700">周${WEEK_LABELS[i-1]}${i===5?' <span class="tiny" style="color:var(--ink3)">· 最晚 20:00</span>':''}</div>
         </div>
         <div class="time-pair" style="flex:0 0 auto;max-width:220px">
-          <input class="time-input" type="time" value="${s}" data-field="start" ${isOff?'disabled':''} style="padding:4px 8px;font-size:13px">
+          <input class="time-input" type="time" value="${s}" data-field="start" min="${min}" max="${max}" ${isOff?'disabled':''} style="padding:4px 8px;font-size:13px">
           <span class="to">→</span>
-          <input class="time-input" type="time" value="${e}" data-field="end" ${isOff?'disabled':''} style="padding:4px 8px;font-size:13px">
+          <input class="time-input" type="time" value="${e}" data-field="end" min="${min}" max="${max}" ${isOff?'disabled':''} style="padding:4px 8px;font-size:13px">
         </div>
       </div>`;
     grid.appendChild(row);
@@ -382,20 +406,30 @@ async function saveCfg(){
     return;
   }
 
-  // Collect week grid
+  // Collect week grid (clamped per-day, Friday capped at 20:00)
   const wt = {};
   document.querySelectorAll('#week-grid [data-day]').forEach(row => {
-    const day = row.dataset.day;
+    const day = parseInt(row.dataset.day, 10);
     const on = row.querySelector('[data-field="day-on"]').classList.contains('on');
     const s = row.querySelector('[data-field="start"]').value;
     const e = row.querySelector('[data-field="end"]').value;
-    wt[day] = on ? `${s}-${e}` : WEEK_DEFAULTS[parseInt(day,10)-1];
+    if(on){
+      const [cs, ce] = clampRange(s, e, day);
+      wt[day] = `${cs}-${ce}`;
+    }else{
+      wt[day] = WEEK_DEFAULTS[day-1];
+    }
   });
 
   const mode = state.cfgMode === 'week' ? 'week_time' : 'tomorrow';
+  let simpleRange = '';
+  if(mode === 'tomorrow'){
+    const [ss, se] = clampRange($('cfg-simple-start').value, $('cfg-simple-end').value, null);
+    simpleRange = `${ss}-${se}`;
+  }
   const timeCfg = mode === 'week_time'
     ? { week_time: wt }
-    : { tomorrow: `${$('cfg-simple-start').value}-${$('cfg-simple-end').value}`, week_time: wt };
+    : { tomorrow: simpleRange, week_time: wt };
 
   const body = {
     vpn_password: $('cfg-vpn').value,
@@ -795,15 +829,20 @@ function toggleTmr(){
 function renderTomorrowBody(){
   const cfg = state.currentCfg;
   const tmr = new Date(Date.now() + 86400000);
-  const iso = String(tmr.getDay() === 0 ? 7 : tmr.getDay());
+  const isoNum = tmr.getDay() === 0 ? 7 : tmr.getDay();
+  const iso = String(isoNum);
   let raw = '08:00-22:00';
   if(cfg && cfg.time){
     if(cfg.mode === 'tomorrow' && cfg.time.tomorrow) raw = cfg.time.tomorrow;
     else if(cfg.time.week_time && cfg.time.week_time[iso]) raw = cfg.time.week_time[iso];
   }
-  const [s, e] = raw.split('-');
-  $('tmr-start').value = s;
-  $('tmr-end').value = e;
+  const [rs, re] = raw.split('-');
+  const [s, e] = clampRange(rs, re, isoNum);
+  const { min, max } = timeBounds(isoNum);
+  const startEl = $('tmr-start');
+  const endEl = $('tmr-end');
+  startEl.min = min; startEl.max = max; startEl.value = s;
+  endEl.min = min; endEl.max = max; endEl.value = e;
 
   const list = $('tmr-seats');
   list.innerHTML = '';
@@ -827,8 +866,12 @@ async function saveTmr(){
   if(state.isGuest || !state.currentPid || !state.currentCfg){
     toast('请先登录并选择学号','error'); return;
   }
-  const s = $('tmr-start').value, e = $('tmr-end').value;
-  if(!s || !e || s >= e){ toast('时间无效','error'); return; }
+  const rawS = $('tmr-start').value, rawE = $('tmr-end').value;
+  if(!rawS || !rawE){ toast('时间无效','error'); return; }
+  const tmr = new Date(Date.now() + 86400000);
+  const isoNum = tmr.getDay() === 0 ? 7 : tmr.getDay();
+  const [s, e] = clampRange(rawS, rawE, isoNum);
+  if(s >= e){ toast('时间无效','error'); return; }
   const body = {
     mode: 'tomorrow',
     time: Object.assign({}, state.currentCfg.time || {}, { tomorrow: `${s}-${e}` }),
