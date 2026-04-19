@@ -11,6 +11,7 @@ const state = {
   currentCfg: null,   // full detail for currentPid
   allSeats: {},       // { zone: [seatName, ...] }
   todayResv: null,    // today's live reservation (if any)
+  tomorrowResv: null, // tomorrow's live reservation (if any)
   cfgMode: 'week',    // UI: 'week' or 'simple'
   authMode: 'login',
 };
@@ -193,7 +194,7 @@ async function loadAccountDetail(pid){
   }
   renderConfig();
   renderHome();
-  loadTodayReservation();
+  loadReservations();
 }
 
 function pickAcct(pid){
@@ -430,7 +431,7 @@ async function reserveNow(){
   const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/reserve_now`, { method:'POST' });
   if(ok){
     toast(data.success ? '预约成功 🎉' : '预约已完成', data.success ? 'success' : 'info');
-    loadTodayReservation();
+    loadReservations();
     loadNotices();
     if(data.result) alert('预约结果：\n\n' + data.result);
   }else{
@@ -438,28 +439,39 @@ async function reserveNow(){
   }
 }
 
-// ---------- today reservation ----------
-async function loadTodayReservation(){
+// ---------- reservations (today + tomorrow) ----------
+function localDateStr(offsetDays){
+  const d = new Date(Date.now() + (offsetDays || 0) * 86400000);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+async function loadReservations(){
   if(state.isGuest || !state.currentPid || !state.currentCfg || !state.currentCfg.verified){
     state.todayResv = null;
+    state.tomorrowResv = null;
     renderHome();
     return;
   }
   renderTodayCard({ loading: true });
+  renderTomorrowCard({ loading: true });
   try{
     const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/reservations`);
     if(ok && Array.isArray(data.reservations)){
-      const todayStr = new Date().toISOString().slice(0,10);
-      const today = data.reservations.find(r => (r.resvBeginTime || '').startsWith(todayStr));
-      state.todayResv = today || null;
+      const todayStr = localDateStr(0);
+      const tmrStr = localDateStr(1);
+      state.todayResv = data.reservations.find(r => (r.resvBeginTime || '').startsWith(todayStr)) || null;
+      state.tomorrowResv = data.reservations.find(r => (r.resvBeginTime || '').startsWith(tmrStr)) || null;
     }else{
       state.todayResv = null;
+      state.tomorrowResv = null;
     }
   }catch(e){
     state.todayResv = null;
+    state.tomorrowResv = null;
   }
   renderHome();
 }
+
 
 async function toggleArrived(){
   if(state.isGuest || !state.currentPid){ toast('请先登录并选择学号','error'); return; }
@@ -497,10 +509,15 @@ function renderHome(){
   const d = new Date();
   $('today-date-label').textContent = `周${WEEK_LABELS[d.getDay()===0?6:d.getDay()-1]} · ${d.getMonth()+1}月${d.getDate()}日`;
   const tmr = new Date(d.getTime() + 86400000);
+  const tmrLabelEl = $('tmr-date-label');
+  if(tmrLabelEl){
+    tmrLabelEl.textContent = `周${WEEK_LABELS[tmr.getDay()===0?6:tmr.getDay()-1]} · ${tmr.getMonth()+1}月${tmr.getDate()}日`;
+  }
   $('tmr-n').textContent = tmr.getDate();
   $('tmr-wd').textContent = ['SUN','MON','TUE','WED','THU','FRI','SAT'][tmr.getDay()];
 
   renderTodayCard({});
+  renderTomorrowCard({});
   renderTomorrowStrip();
   renderWeekPreview();
 }
@@ -586,6 +603,61 @@ function renderTodayCard(opt){
     </div>`;
 }
 
+function renderTomorrowCard(opt){
+  const card = $('tmr-card');
+  const empty = $('tmr-empty');
+  if(!card || !empty) return;
+  const cfg = state.currentCfg;
+
+  if(opt.loading){
+    card.style.display = '';
+    empty.style.display = 'none';
+    card.innerHTML = `<div class="label">明日座位</div><div class="sub" style="margin-top:8px">加载中...</div>`;
+    return;
+  }
+
+  if(state.isGuest || !cfg){
+    card.style.display = 'none';
+    empty.style.display = 'none';
+    return;
+  }
+
+  const resv = state.tomorrowResv;
+  if(!resv){
+    card.style.display = 'none';
+    empty.style.display = '';
+    const reserveOn = cfg.is_reserved === 'True';
+    const msg = reserveOn
+      ? '将按配置自动预约，结果会在抢座后可见'
+      : '自动预约已暂停，去配置页开启';
+    empty.innerHTML = `
+      <div class="h2" style="color:var(--ink3)">明日暂无预约</div>
+      <div class="sub" style="margin-top:6px">${msg}</div>`;
+    return;
+  }
+
+  const seat = (resv.devInfo && resv.devInfo.devName) || '未知';
+  const m = seat.match(/^(\d+F)[-·]?(.*)$/);
+  const zone = m ? m[1] : '';
+  const num = m ? m[2] : seat;
+  const bt = (resv.resvBeginTime || '').split(' ')[1] || '';
+  const et = (resv.resvEndTime || '').split(' ')[1] || '';
+  const bhm = bt.slice(0,5), ehm = et.slice(0,5);
+  const hours = (bhm && ehm) ? (parseInt(ehm,10) - parseInt(bhm,10)) : '';
+  const status = fmtResvStatus(resv.resvStatus);
+
+  card.style.display = '';
+  empty.style.display = 'none';
+  card.innerHTML = `
+    <div class="stamp">TMR</div>
+    <div class="label">明日座位</div>
+    <div class="seat">${zone ? `<span class="zone">${escHtml(zone)}</span>` : ''}${escHtml(num)}</div>
+    <div class="time">${bhm} — ${ehm}${hours ? ` · ${hours}小时` : ''}</div>
+    <div class="meta-row">
+      <span class="pill ok"><span class="dot"></span>${escHtml(status)}</span>
+    </div>`;
+}
+
 function fmtResvStatus(s){
   return { 1:'待签到', 2:'使用中', 3:'暂离', 4:'已结束', 5:'已取消', 1027:'未开始', 1093:'使用中', 3141:'暂离' }[s] || `状态(${s})`;
 }
@@ -624,27 +696,84 @@ function renderWeekPreview(){
   const cfg = state.currentCfg;
   const today = new Date().getDay() === 0 ? 7 : new Date().getDay();
   const tmr = today === 7 ? 1 : today + 1;
+  const mode = (cfg && cfg.mode) || 'week_time';
+  const reserveOn = cfg && cfg.is_reserved === 'True';
+
+  // Update mode hint
+  const hint = $('week-mode-hint');
+  if(hint){
+    if(!cfg) hint.textContent = '06 — 22 时';
+    else if(!reserveOn) hint.textContent = '自动预约已暂停';
+    else hint.textContent = mode === 'tomorrow' ? '统一时段模式' : '按星期模式';
+  }
+  const footer = $('week-footer-hint');
+  if(footer){
+    if(!cfg) footer.textContent = '💡 添加学号后查看配置预览';
+    else if(!reserveOn) footer.textContent = '💡 开启自动预约后这里会亮起';
+    else if(mode === 'tomorrow') footer.textContent = '💡 每天都按同一时段预约';
+    else footer.textContent = '💡 每天按配置的时段预约';
+  }
+
+  const friCap = (time) => {
+    if(!time) return time;
+    const [s, e] = time.split('-');
+    if(e && e > '20:00') return `${s}-20:00`;
+    return time;
+  };
 
   for(let i = 1; i <= 7; i++){
-    let raw = WEEK_DEFAULTS[i-1];
-    if(cfg && cfg.time){
-      if(cfg.mode === 'tomorrow' && i === tmr && cfg.time.tomorrow){
-        raw = cfg.time.tomorrow;
-      }else if(cfg.time.week_time && cfg.time.week_time[String(i)]){
-        raw = cfg.time.week_time[String(i)];
+    // Determine per-day time + active state
+    let time = null;
+    let active = false;
+    if(cfg && reserveOn){
+      if(mode === 'tomorrow'){
+        time = (cfg.time && cfg.time.tomorrow) || '08:00-22:00';
+        active = true;
+      }else{
+        const t = cfg.time && cfg.time.week_time && cfg.time.week_time[String(i)];
+        if(t && t !== '休息' && t !== 'off' && /^\d\d:\d\d-\d\d:\d\d$/.test(t)){
+          time = t;
+          active = true;
+        }
       }
     }
-    const [s, e] = raw.split('-');
-    const sh = parseInt(s.split(':')[0], 10) + parseInt(s.split(':')[1], 10)/60;
-    const eh = parseInt(e.split(':')[0], 10) + parseInt(e.split(':')[1], 10)/60;
-    const left = (sh - 6) / 16 * 100;
-    const width = (eh - sh) / 16 * 100;
+    // Friday 20:00 cap (matches backend behavior)
+    if(active && i === 5) time = friCap(time);
+
     const isToday = i === today;
     const isTmr = i === tmr;
-    const barClass = isToday ? 'today' : (isTmr ? 'tomorrow-b' : '');
-    const tag = isToday ? '<span class="tag">今</span>' : (isTmr ? '<span class="tag dim">明</span>' : '');
-    const dayClass = isToday ? 'today' : '';
-    const lbl = isTmr ? `<span class="lbl">${s.slice(0,5)}-${e.slice(0,5)}</span>` : '';
+    const tag = isToday
+      ? '<span class="tag">今</span>'
+      : (isTmr ? '<span class="tag dim">明</span>' : '');
+    const dayClass = isToday ? 'today' : (active ? '' : 'off');
+
+    if(!active || !time){
+      host.innerHTML += `
+        <div class="row">
+          <span class="day ${dayClass}">${tag}周${WEEK_LABELS[i-1]}</span>
+          <div class="track">
+            <div class="bar empty" style="left:0%;width:100%"></div>
+          </div>
+        </div>`;
+      continue;
+    }
+
+    const [s, e] = time.split('-');
+    const sh = parseInt(s.split(':')[0], 10) + parseInt(s.split(':')[1], 10)/60;
+    const eh = parseInt(e.split(':')[0], 10) + parseInt(e.split(':')[1], 10)/60;
+    const left = Math.max(0, (sh - 6) / 16 * 100);
+    const width = Math.max(2, (eh - sh) / 16 * 100);
+    // Bar coloring:
+    //   tomorrow mode → all days solid accent (red)
+    //   week mode → today solid accent, tomorrow outlined blue, others soft accent
+    let barClass;
+    if(mode === 'tomorrow') barClass = 'today';
+    else if(isToday) barClass = 'today';
+    else if(isTmr) barClass = 'tomorrow-b';
+    else barClass = 'active';
+    const lbl = (isToday || isTmr || mode === 'tomorrow')
+      ? `<span class="lbl">${s.slice(0,5)}-${e.slice(0,5)}</span>`
+      : '';
     host.innerHTML += `
       <div class="row">
         <span class="day ${dayClass}">${tag}周${WEEK_LABELS[i-1]}</span>

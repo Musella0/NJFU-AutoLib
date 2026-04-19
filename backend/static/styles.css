@@ -130,6 +130,11 @@ body.no-wobble .chip,body.no-wobble .pill{border-radius:999px !important}
 
 .today-card .actions{display:flex;gap:8px;margin-top:16px}
 
+.today-card.tmr-variant{background:rgba(59,130,246,.07);border-color:#3b82f6}
+.today-card.tmr-variant .stamp{color:#3b82f6;border-color:#3b82f6}
+.today-card.tmr-variant .seat .zone{color:#3b82f6}
+.today-card.tmr-variant .pill.ok{border-color:#3b82f6;color:#3b82f6;background:rgba(59,130,246,.08)}
+
 /* ========= Buttons ========= */
 .btn{
   display:inline-flex;align-items:center;justify-content:center;gap:6px;
@@ -242,8 +247,10 @@ body.no-wobble .chip,body.no-wobble .pill{border-radius:999px !important}
   background:#fff;
 }
 .week .bar.today{background:var(--accent);border-color:var(--accent)}
-.week .bar.tomorrow-b{background:#fff;border-style:dashed;border-color:var(--ink2)}
+.week .bar.tomorrow-b{background:rgba(59,130,246,.15);border-style:dashed;border-color:#3b82f6}
+.week .bar.active{background:var(--accent-soft);border-color:var(--accent)}
 .week .bar.empty{background:repeating-linear-gradient(45deg,transparent 0 3px,var(--ink4) 3px 4px);opacity:.4;border-style:dashed;border-color:var(--ink4)}
+.week .row .day .tag.dim{background:#3b82f6;color:#fff}
 .week .bar .lbl{
   position:absolute;right:4px;top:-14px;
   font-family:var(--hand2);font-size:10px;color:var(--accent);

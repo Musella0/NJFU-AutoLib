@@ -40,6 +40,16 @@
     <!-- TOMORROW -->
     <div class="sec-head">
       <div class="t">TOMORROW</div>
+      <div class="act" id="tmr-date-label"></div>
+    </div>
+
+    <div class="box today-card tmr-variant" id="tmr-card" style="display:none"></div>
+
+    <div class="box today-card ghost" id="tmr-empty" style="display:none;text-align:center"></div>
+
+    <!-- TOMORROW adjuster -->
+    <div class="sec-head">
+      <div class="t">调整明日</div>
     </div>
 
     <div class="box tomorrow" id="tmr-strip" onclick="toggleTmr()">
@@ -90,7 +100,7 @@
     <div class="box week">
       <div class="row-between">
         <div class="sub">我的每周节奏</div>
-        <div class="tiny">06 — 22 时</div>
+        <div class="tiny" id="week-mode-hint">06 — 22 时</div>
       </div>
       <div class="rows">
         <div class="hours">
@@ -98,7 +108,7 @@
         </div>
         <div id="week-rows"></div>
       </div>
-      <div class="tiny mt">💡 只有今日/明日会真正预约，其他日仅显示配置</div>
+      <div class="tiny mt" id="week-footer-hint">💡 实时反映当前配置</div>
     </div>
 
     <!-- NOTICES -->
