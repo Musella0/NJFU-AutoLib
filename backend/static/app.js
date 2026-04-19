@@ -122,7 +122,7 @@ function updateAuthUI(){
   $('date').textContent = `${wd} · ${mo} ${dt.getDate()} · ${dt.getFullYear()}`;
 
   if(state.isGuest){
-    hello.textContent = '你好，游客 ☕';
+    hello.textContent = '你好，同学 ☕';
     $('settings-uid').textContent = '游客';
     const n = state.accounts.length;
     $('settings-accounts-meta').textContent = n
