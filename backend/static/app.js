@@ -14,6 +14,7 @@ const state = {
   tomorrowResv: null, // tomorrow's live reservation (if any)
   cfgMode: 'week',    // UI: 'week' or 'simple'
   authMode: 'login',
+  napConfig: { start_time: '14:00', end_time: '', seat: '', auto_daily: false, trigger_time: '12:05' },
 };
 
 const WEEK_LABELS = ['一','二','三','四','五','六','日']; // iso 1..7
@@ -264,6 +265,7 @@ async function loadAccountDetail(pid){
   }catch(e){
     state.currentCfg = null;
   }
+  loadNapConfig();
   renderConfig();
   renderHome();
   loadReservations();
@@ -776,6 +778,7 @@ function renderTodayCard(opt){
     </div>
     <div class="actions">
       ${canArrive ? `<button class="btn ${showArrived?'primary':'accent'} lg grow" id="btn-arrived" onclick="toggleArrived()">${showArrived ? '✓ 已到馆' : '✓ 我已到馆'}</button>` : ''}
+      ${canCancel ? `<button class="btn sm" onclick="openNap()">😴 午休</button>` : ''}
       ${canCancel ? `<button class="btn sm" onclick="openSheet('cancel')">取消</button>` : ''}
     </div>`;
 }
@@ -1387,7 +1390,296 @@ const SHEETS = {
       <button class="btn accent grow" id="btn-rt-confirm" onclick="doReserveToday()">确认预约</button>
     </div>`;
   },
+
+  'nap-info': () => `
+    <div class="grab"></div>
+    <h3>😴 一键午休</h3>
+    <div class="desc">专为 2 小时午休设计的快捷功能。</div>
+    <div class="col gap-sm">
+      <div class="box tight" style="border-left:4px solid var(--accent)">
+        <div class="sub" style="font-weight:700">✓ 自动续约下午</div>
+        <div class="t">点击后系统立即取消当前预约，并以相同座位重新预约下午时段（默认 14:00 起）</div>
+      </div>
+      <div class="box tight" style="border-left:4px solid var(--ok)">
+        <div class="sub" style="font-weight:700">✓ 可自由配置</div>
+        <div class="t">在设置页可修改默认下午时间、座位，以及开启每日自动触发</div>
+      </div>
+      <div class="box tight" style="border-left:4px solid var(--danger)">
+        <div class="sub" style="font-weight:700">⚠ 极小占座风险</div>
+        <div class="t">取消到重新预约约需 1 秒，极低概率被他人抢占。请知悉后再使用</div>
+      </div>
+    </div>
+    <div class="row-flex mt-lg">
+      <button class="btn ghost grow" onclick="closeSheet()">取消</button>
+      <button class="btn accent grow" onclick="acknowledgeNap()">我知道了，继续</button>
+    </div>
+  `,
+
+  'nap-confirm': () => {
+    const resv = state.todayResv;
+    const currentSeat = (resv && resv.devInfo && resv.devInfo.devName) || '';
+    const currentEnd = resv ? ((resv.resvEndTime || '').split(' ')[1] || '').slice(0,5) : '';
+    const nc = state.napConfig || {};
+    const defStart = nc.start_time || '14:00';
+    const defEnd = nc.end_time || currentEnd || '18:00';
+    const defSeat = nc.seat || '';
+    const isoDay = new Date().getDay() || 7;
+    const { min, max } = timeBounds(isoDay);
+    const zones = sortedZones();
+    return `
+    <div class="grab"></div>
+    <h3>😴 午休设置</h3>
+    <div class="desc">当前座位：<strong>${escHtml(currentSeat || '未知')}</strong></div>
+    <div class="col gap-sm">
+      <div class="time-pair" style="display:flex;gap:8px">
+        <div class="field" style="flex:1"><label>下午开始</label>
+          <select id="nap-start" class="time-input">${timeOptionsHtml('08:00', max, defStart)}</select>
+        </div>
+        <div class="field" style="flex:1"><label>下午结束</label>
+          <select id="nap-end" class="time-input">${timeOptionsHtml('08:00', max, defEnd)}</select>
+        </div>
+      </div>
+      <div class="field">
+        <label>座位</label>
+        <select id="nap-seat-mode" onchange="onNapSeatMode(this.value)">
+          <option value="same"${!defSeat ? ' selected' : ''}>当前座位（${escHtml(currentSeat || '自动')}）</option>
+          <option value="custom"${defSeat ? ' selected' : ''}>自定义座位</option>
+        </select>
+      </div>
+      <div id="nap-custom-seat" style="display:${defSeat ? 'block' : 'none'}">
+        <div class="col gap-sm">
+          <div class="field"><label>楼层 / 区域</label>
+            <select id="nap-zone" onchange="onZone(this.value,'nap-seat-pick')">
+              <option value="">选择...</option>
+              ${zones.map(z => `<option value="${escHtml(z)}">${escHtml(z)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field"><label>座位号</label>
+            <select id="nap-seat-pick"><option value="">先选楼层</option></select>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="row-flex mt-lg" style="gap:8px">
+      <button class="btn ghost grow" onclick="closeSheet()">取消</button>
+      <button class="btn primary grow" onclick="saveNapConfig(false)">仅保存</button>
+      <button class="btn accent grow" id="btn-nap-confirm" onclick="doNap()">确认午休</button>
+    </div>`;
+  },
+
+  'nap-settings': () => {
+    const nc = state.napConfig || {};
+    const defStart = nc.start_time || '14:00';
+    const defEnd = nc.end_time || '';
+    const defSeat = nc.seat || '';
+    const autoDaily = nc.auto_daily || false;
+    const triggerTime = nc.trigger_time || '12:05';
+    const isoDay = new Date().getDay() || 7;
+    const { max } = timeBounds(isoDay);
+    const zones = sortedZones();
+    return `
+    <div class="grab"></div>
+    <h3>😴 午休配置</h3>
+    <div class="desc">配置每次午休的默认时段和座位。</div>
+    <div class="col gap-sm">
+      <div class="time-pair" style="display:flex;gap:8px">
+        <div class="field" style="flex:1"><label>下午开始</label>
+          <select id="ns-start" class="time-input">${timeOptionsHtml('08:00', max, defStart)}</select>
+        </div>
+        <div class="field" style="flex:1"><label>下午结束（空=同当前）</label>
+          <select id="ns-end" class="time-input">
+            <option value="">同当前预约结束时间</option>
+            ${buildTimeOptions('08:00', max).map(o => `<option value="${o}"${o===defEnd?' selected':''}>${o}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label>默认座位</label>
+        <select id="ns-seat-mode" onchange="onNapSettingsSeatMode(this.value)">
+          <option value="same"${!defSeat ? ' selected' : ''}>当前预约的座位（自动）</option>
+          <option value="custom"${defSeat ? ' selected' : ''}>固定自定义座位</option>
+        </select>
+      </div>
+      <div id="ns-custom-seat" style="display:${defSeat ? 'block' : 'none'}">
+        <div class="col gap-sm">
+          <div class="field"><label>楼层 / 区域</label>
+            <select id="ns-zone" onchange="onZone(this.value,'ns-seat-pick')">
+              <option value="">选择...</option>
+              ${zones.map(z => `<option value="${escHtml(z)}">${escHtml(z)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field"><label>座位号</label>
+            <select id="ns-seat-pick"><option value="">先选楼层</option></select>
+          </div>
+        </div>
+      </div>
+      <div class="toggle-row" style="border:0;padding:4px 0">
+        <div class="info">
+          <div class="t1">每日自动午休</div>
+          <div class="t2">每天到达触发时间后自动执行</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="ns-auto-daily" onchange="onNapAutoDaily(this.checked)" ${autoDaily ? 'checked' : ''}><span class="slider"></span></label>
+      </div>
+      <div id="ns-trigger-row" style="display:${autoDaily ? 'block' : 'none'}">
+        <div class="field"><label>每日触发时间</label>
+          <select id="ns-trigger">${timeOptionsHtml('08:00', '22:00', triggerTime)}</select>
+        </div>
+      </div>
+    </div>
+    <div class="row-flex mt-lg">
+      <button class="btn ghost grow" onclick="closeSheet()">取消</button>
+      <button class="btn accent grow" onclick="saveNapSettings()">保存</button>
+    </div>`;
+  },
 };
+
+// ========== 一键午休 ==========
+
+async function loadNapConfig(){
+  if(!state.currentPid) return;
+  try{
+    const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/nap_config`);
+    if(ok) state.napConfig = data;
+  }catch(e){}
+  updateNapSettingsLabel();
+}
+
+function updateNapSettingsLabel(){
+  const el = $('nap-settings-label');
+  if(!el) return;
+  const nc = state.napConfig || {};
+  const seat = nc.seat ? nc.seat : '同座位';
+  const start = nc.start_time || '14:00';
+  const end = nc.end_time ? `–${nc.end_time}` : '';
+  const auto = nc.auto_daily ? `，每日 ${nc.trigger_time || '12:05'} 自动` : '';
+  el.textContent = `下午 ${start}${end}，${seat}${auto}`;
+}
+
+function openNap(){
+  if(!state.todayResv){ toast('今日无预约','info'); return; }
+  if(!localStorage.getItem('autolib_nap_ack')){
+    openSheet('nap-info');
+  }else{
+    openSheet('nap-confirm');
+  }
+}
+
+function acknowledgeNap(){
+  localStorage.setItem('autolib_nap_ack','1');
+  closeSheet();
+  setTimeout(() => openSheet('nap-confirm'), 100);
+}
+
+function onNapSeatMode(val){
+  const el = $('nap-custom-seat');
+  if(el) el.style.display = val === 'custom' ? 'block' : 'none';
+}
+
+function onNapSettingsSeatMode(val){
+  const el = $('ns-custom-seat');
+  if(el) el.style.display = val === 'custom' ? 'block' : 'none';
+}
+
+function onNapAutoDaily(checked){
+  const el = $('ns-trigger-row');
+  if(el) el.style.display = checked ? 'block' : 'none';
+}
+
+async function saveNapConfig(closeAfter=true){
+  const start = ($('nap-start') || {}).value;
+  const end = ($('nap-end') || {}).value;
+  const seatMode = ($('nap-seat-mode') || {}).value;
+  let seat = '';
+  if(seatMode === 'custom'){
+    const seatEl = $('nap-seat-pick');
+    seat = seatEl ? (seatEl.options[seatEl.selectedIndex]?.value || '') : '';
+    if(!seat || seat === '先选楼层'){ toast('请先选择自定义座位','error'); return; }
+  }
+  const cfg = { ...state.napConfig, start_time: start, end_time: end, seat };
+  const { ok } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/nap_config`,
+    { method:'POST', body: cfg });
+  if(ok){
+    state.napConfig = cfg;
+    updateNapSettingsLabel();
+    toast('午休配置已保存','success');
+    if(closeAfter) closeSheet();
+  }else{
+    toast('保存失败','error');
+  }
+}
+
+async function saveNapSettings(){
+  const start = ($('ns-start') || {}).value;
+  const end = ($('ns-end') || {}).value || '';
+  const seatMode = ($('ns-seat-mode') || {}).value;
+  let seat = '';
+  if(seatMode === 'custom'){
+    const seatEl = $('ns-seat-pick');
+    seat = seatEl ? (seatEl.options[seatEl.selectedIndex]?.value || '') : '';
+    if(!seat || seat === '先选楼层'){ toast('请先选择自定义座位','error'); return; }
+  }
+  const autoDaily = ($('ns-auto-daily') || {}).checked || false;
+  const triggerTime = ($('ns-trigger') || {}).value || '12:05';
+  const cfg = { start_time: start, end_time: end, seat, auto_daily: autoDaily, trigger_time: triggerTime };
+  const { ok } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/nap_config`,
+    { method:'POST', body: cfg });
+  if(ok){
+    state.napConfig = cfg;
+    updateNapSettingsLabel();
+    toast('午休配置已保存','success');
+    closeSheet();
+  }else{
+    toast('保存失败','error');
+  }
+}
+
+async function doNap(){
+  if(!state.todayResv){ toast('今日无预约','info'); return; }
+  const start = ($('nap-start') || {}).value;
+  const end = ($('nap-end') || {}).value;
+  if(!start || !end || start >= end){ toast('请检查时间段','error'); return; }
+
+  const seatMode = ($('nap-seat-mode') || {}).value;
+  let seat = '';
+  if(seatMode === 'custom'){
+    const seatEl = $('nap-seat-pick');
+    seat = seatEl ? (seatEl.options[seatEl.selectedIndex]?.value || '') : '';
+    if(!seat || seat === '先选楼层'){ toast('请先选择自定义座位','error'); return; }
+  }else{
+    seat = (state.todayResv.devInfo && state.todayResv.devInfo.devName) || '';
+  }
+  if(!seat){ toast('无法获取座位信息','error'); return; }
+
+  const btn = $('btn-nap-confirm');
+  if(btn) btn.disabled = true;
+  closeSheet();
+
+  toast('取消中…','info');
+  const { ok, data } = await api(
+    `/api/my/accounts/${encodeURIComponent(state.currentPid)}/nap`,
+    { method:'POST', body: { uuid: state.todayResv.uuid, seat, start_time: start, end_time: end } }
+  );
+  if(btn) btn.disabled = false;
+
+  if(!ok){
+    toast(data.error || '午休失败','error');
+    return;
+  }
+  if(!data.cancel_success){
+    toast(data.error || '取消失败','error');
+    return;
+  }
+  if(data.success){
+    toast('午休成功 😴 下午见！','success');
+  }else{
+    toast('取消成功，但重新预约失败，请手动预约下午时段','error');
+    if(data.result) alert('重新预约结果：\n\n' + data.result);
+  }
+  state.todayResv = null;
+  loadReservations();
+}
+
+// ========== end 一键午休 ==========
 
 async function doReserveToday(){
   const zone = ($('rt-zone') || {}).value;
@@ -1426,7 +1718,7 @@ function openSheet(name){
   const tpl = SHEETS[name];
   content.innerHTML = tpl ? tpl() : '<div class="grab"></div><h3>未实现</h3>';
   sc.classList.add('show');
-  if(name === 'lp-info' || name === 'lp-warning' || name === 'cancel' || name === 'guest-data-notice') sc.classList.add('center');
+  if(name === 'lp-info' || name === 'lp-warning' || name === 'cancel' || name === 'guest-data-notice' || name === 'nap-info') sc.classList.add('center');
   else sc.classList.remove('center');
 }
 function closeSheet(){ $('scrim').classList.remove('show'); }

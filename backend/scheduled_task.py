@@ -677,6 +677,107 @@ def schedule_late_protection_jobs() -> None:
     finally:
         log_with_user(logger, 'info', '系统', '迟到保护', "迟到保护服务已停止")
 
+
+def auto_nap_action(pid: str) -> None:
+    """对单个用户执行自动午休：取消今日当前预约，立即重新预约下午时段。"""
+    try:
+        cfg = user_config_info.find_one({"pid": pid})
+        if not cfg:
+            log_with_user(logger, 'warning', pid, '自动午休', "未找到用户配置")
+            return
+
+        nap_cfg = cfg.get("nap_config") or {}
+        nap_start = nap_cfg.get("start_time") or "14:00"
+        nap_end = nap_cfg.get("end_time") or ""
+        nap_seat_name = (nap_cfg.get("seat") or "").strip()
+
+        vpn_password = _dec(cfg["vpn_password"])
+        lib_password = _dec(cfg["lib_password"]).replace('！', '!')
+
+        library = LibrarySystem(
+            username=pid,
+            password=lib_password,
+            vpn_password=vpn_password,
+        )
+
+        reservations, _ = library.get_reservation_info()
+        if not reservations:
+            log_with_user(logger, 'info', pid, '自动午休', "今日无预约，跳过")
+            return
+
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        active_statuses = {1027, 1093, 3141}
+        target = None
+        for r in reservations:
+            if (r.get("resvBeginTime", "")[:10] == today_str
+                    and r.get("resvStatus") in active_statuses):
+                target = r
+                break
+
+        if not target:
+            log_with_user(logger, 'info', pid, '自动午休', "今日无可取消的活跃预约，跳过")
+            return
+
+        uuid = target.get("uuid") or target.get("resvId", "")
+        current_seat = (target.get("devInfo") or {}).get("devName", "")
+        seat_name = nap_seat_name or current_seat
+        if not nap_end:
+            nap_end = (target.get("resvEndTime") or "")[-8:-3] or "18:00"
+
+        log_with_user(logger, 'info', pid, '自动午休', f"取消预约 {uuid}，将重约 {seat_name} {nap_start}-{nap_end}")
+
+        cancel_ok, cancel_msg = library.delete_seat(uuid)
+        if not cancel_ok:
+            log_with_user(logger, 'error', pid, '自动午休', f"取消失败：{cancel_msg}")
+            notify_user(cfg, "❌ 自动午休失败", f"学号 {pid}\n取消原预约失败：{cancel_msg}")
+            return
+
+        time.sleep(0.5)
+
+        seat_ids = get_seat_ids([seat_name])
+        if not seat_ids:
+            msg = f"取消成功，但未找到座位「{seat_name}」，请手动预约下午时段"
+            log_with_user(logger, 'error', pid, '自动午休', msg)
+            notify_user(cfg, "⚠ 自动午休部分失败", f"学号 {pid}\n{msg}")
+            return
+
+        resv_msg, _ = library.reserve_seat(
+            seat_list=seat_ids,
+            resv_begin_time=f"{today_str} {nap_start}:00",
+            resv_end_time=f"{today_str} {nap_end}:00",
+        )
+        if "成功" in resv_msg:
+            log_with_user(logger, 'info', pid, '自动午休', f"重新预约成功：{resv_msg}")
+            notify_user(cfg, "✅ 自动午休完成", f"学号 {pid}\n已重新预约 {seat_name} {nap_start}-{nap_end}")
+        else:
+            log_with_user(logger, 'error', pid, '自动午休', f"重新预约失败：{resv_msg}")
+            notify_user(cfg, "⚠ 自动午休部分失败", f"学号 {pid}\n取消成功，但重新预约失败：{resv_msg}\n请手动预约下午时段")
+
+    except Exception as e:
+        log_with_user(logger, 'error', pid, '自动午休', f"异常：{str(e)}")
+
+
+def process_auto_naps() -> None:
+    """遍历所有开启每日自动午休的用户，按其配置的触发时间调度执行。"""
+    now = datetime.now()
+    users = list(user_config_info.find({"nap_config.auto_daily": True}))
+    if not users:
+        return
+    log_with_user(logger, 'info', '系统', '自动午休', f"共 {len(users)} 个用户开启自动午休")
+    for u in users:
+        pid = u["pid"]
+        trigger = (u.get("nap_config") or {}).get("trigger_time") or "12:05"
+        try:
+            h, m = map(int, trigger.split(":"))
+        except Exception:
+            h, m = 12, 5
+        trigger_dt = now.replace(hour=h, minute=m, second=0, microsecond=0)
+        if abs((now - trigger_dt).total_seconds()) <= 90:
+            log_with_user(logger, 'info', pid, '自动午休', f"触发时间 {trigger}，开始执行")
+            auto_nap_action(pid)
+        else:
+            log_with_user(logger, 'debug', pid, '自动午休', f"当前时间 {now.strftime('%H:%M')} 不匹配触发时间 {trigger}，跳过")
+
 if __name__ == "__main__":
     """
     主程序入口

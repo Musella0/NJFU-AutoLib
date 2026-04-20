@@ -22,6 +22,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger("scheduler_runner")
 
+def run_auto_nap_check():
+    """每分钟扫描一次，对到达触发时间的用户执行自动午休"""
+    try:
+        from scheduled_task import process_auto_naps
+        process_auto_naps()
+    except Exception as e:
+        logger.error(f"自动午休检查异常: {e}", exc_info=True)
+
 def run_reservation_task():
     """执行一次完整的预约 + 迟到保护流程"""
     logger.info("========== 开始执行预约任务 ==========")
@@ -55,6 +63,13 @@ def main():
         hour=hour,
         minute=minute,
         id='daily_reservation',
+        replace_existing=True
+    )
+    scheduler.add_job(
+        run_auto_nap_check,
+        'interval',
+        minutes=1,
+        id='auto_nap_check',
         replace_existing=True
     )
 

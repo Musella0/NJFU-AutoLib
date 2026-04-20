@@ -408,6 +408,96 @@ def cancel_account_reservation(pid):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/my/accounts/<pid>/nap_config", methods=["GET", "POST"])
+@login_required
+def nap_config(pid):
+    uid = _ensure_uid()
+    client, db = get_db()
+    cfg = db.user_config_info.find_one({"pid": pid, "web_uid": uid}, {"nap_config": 1})
+    if not cfg:
+        client.close()
+        return jsonify({"error": "账号不存在"}), 404
+
+    if request.method == "GET":
+        defaults = {"start_time": "14:00", "end_time": "", "seat": "", "auto_daily": False, "trigger_time": "12:05"}
+        result = {**defaults, **(cfg.get("nap_config") or {})}
+        client.close()
+        return jsonify(result), 200
+
+    body = request.get_json(silent=True) or {}
+    allowed = {"start_time", "end_time", "seat", "auto_daily", "trigger_time"}
+    update = {k: v for k, v in body.items() if k in allowed}
+    db.user_config_info.update_one(
+        {"pid": pid, "web_uid": uid},
+        {"$set": {"nap_config": update}}
+    )
+    client.close()
+    return jsonify({"ok": True}), 200
+
+
+@app.route("/api/my/accounts/<pid>/nap", methods=["POST"])
+@login_required
+def do_nap(pid):
+    """取消当前预约并立即重新预约下午时段（一键午休）"""
+    uid = _ensure_uid()
+    cfg = _get_decrypted_cfg(pid, uid)
+    if not cfg:
+        return jsonify({"error": "未找到该账号配置"}), 404
+    if not cfg.get("vpn_password") or not cfg.get("lib_password"):
+        return jsonify({"error": "请先保存 VPN 和图书馆密码"}), 400
+
+    body = request.get_json(silent=True) or {}
+    uuid = (body.get("uuid") or "").strip()
+    seat_name = (body.get("seat") or "").strip()
+    start_time = (body.get("start_time") or "").strip()
+    end_time = (body.get("end_time") or "").strip()
+
+    if not uuid or not seat_name or not start_time or not end_time:
+        return jsonify({"error": "缺少必要参数 uuid / seat / start_time / end_time"}), 400
+    if start_time >= end_time:
+        return jsonify({"error": "结束时间必须晚于开始时间"}), 400
+
+    try:
+        from scheduled_task import get_seat_ids
+        from utils.library_system import LibrarySystem
+        import time as _time
+
+        library = LibrarySystem(
+            username=pid,
+            password=cfg["lib_password"].replace("！", "!"),
+            vpn_password=cfg["vpn_password"],
+        )
+
+        cancel_ok, cancel_msg = library.delete_seat(uuid)
+        if not cancel_ok:
+            return jsonify({"error": f"取消失败：{cancel_msg}"}), 200
+
+        _time.sleep(0.5)
+
+        seat_ids = get_seat_ids([seat_name])
+        if not seat_ids:
+            return jsonify({
+                "cancel_success": True,
+                "success": False,
+                "result": f"取消成功，但未找到座位「{seat_name}」，请手动预约"
+            }), 200
+
+        today = __import__("datetime").date.today().strftime("%Y-%m-%d")
+        msg, _ = library.reserve_seat(
+            seat_list=seat_ids,
+            resv_begin_time=f"{today} {start_time}:00",
+            resv_end_time=f"{today} {end_time}:00",
+        )
+        success = "成功" in msg
+        return jsonify({
+            "cancel_success": True,
+            "success": success,
+            "result": msg
+        }), 200
+    except Exception as e:
+        return jsonify({"error": f"午休操作失败: {str(e)}"}), 500
+
+
 @app.route("/api/my/accounts/<pid>/arrived", methods=["POST"])
 @login_required
 def toggle_arrived(pid):
