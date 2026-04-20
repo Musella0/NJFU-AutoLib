@@ -41,6 +41,30 @@ function clampRange(s, e, isoDay){
   return [cs, ce];
 }
 
+// 30 分钟档位，返回 [min, max] 闭区间内所有 "HH:MM"
+function buildTimeOptions(min, max){
+  const toMin = t => {
+    const [h, m] = t.split(':').map(Number);
+    return h * 60 + m;
+  };
+  const fmt = n => `${String(Math.floor(n/60)).padStart(2,'0')}:${String(n%60).padStart(2,'0')}`;
+  const lo = toMin(min), hi = toMin(max);
+  const opts = [];
+  for(let m = lo; m <= hi; m += 30) opts.push(fmt(m));
+  return opts;
+}
+
+// 生成 <option> HTML；selected 不在列表里时向下对齐到 ≤ selected 的最大档位
+function timeOptionsHtml(min, max, selected){
+  const opts = buildTimeOptions(min, max);
+  let pick = selected;
+  if(!opts.includes(pick)){
+    pick = opts[0];
+    for(const o of opts){ if(o <= selected) pick = o; else break; }
+  }
+  return opts.map(o => `<option value="${o}"${o===pick?' selected':''}>${o}</option>`).join('');
+}
+
 // 将 time 配置值规范为段字符串数组 ["HH:MM-HH:MM", ...]
 // - 字符串 "HH:MM-HH:MM" → 单段数组
 // - 数组 → 过滤掉无效/休息项
@@ -362,9 +386,9 @@ function segmentRowHtml(seg, isoDay, disabled){
   const { min, max } = timeBounds(isoDay);
   return `
     <div class="seg-row" data-seg>
-      <input class="time-input" type="time" value="${s}" data-field="start" min="${min}" max="${max}" ${disabled?'disabled':''} style="padding:4px 8px;font-size:13px">
+      <select class="time-input" data-field="start" ${disabled?'disabled':''} style="padding:4px 8px;font-size:13px">${timeOptionsHtml(min, max, s)}</select>
       <span class="to">→</span>
-      <input class="time-input" type="time" value="${e}" data-field="end" min="${min}" max="${max}" ${disabled?'disabled':''} style="padding:4px 8px;font-size:13px">
+      <select class="time-input" data-field="end" ${disabled?'disabled':''} style="padding:4px 8px;font-size:13px">${timeOptionsHtml(min, max, e)}</select>
       <button type="button" class="btn sm ghost seg-del" onclick="removeSeg(this)" ${disabled?'disabled':''}>×</button>
     </div>`;
 }
@@ -448,9 +472,9 @@ function simpleSegRowHtml(seg){
   const [s, e] = clampRange(rs, re, null);
   return `
     <div class="seg-row" data-seg>
-      <input class="time-input" type="time" value="${s}" data-field="start" min="${TIME_MIN}" max="${TIME_MAX_DEFAULT}">
+      <select class="time-input" data-field="start">${timeOptionsHtml(TIME_MIN, TIME_MAX_DEFAULT, s)}</select>
       <span class="to">→</span>
-      <input class="time-input" type="time" value="${e}" data-field="end" min="${TIME_MIN}" max="${TIME_MAX_DEFAULT}">
+      <select class="time-input" data-field="end">${timeOptionsHtml(TIME_MIN, TIME_MAX_DEFAULT, e)}</select>
       <button type="button" class="btn sm ghost seg-del" onclick="removeSimpleSeg(this)">×</button>
     </div>`;
 }
@@ -918,8 +942,8 @@ function renderTomorrowBody(){
   const { min, max } = timeBounds(isoNum);
   const startEl = $('tmr-start');
   const endEl = $('tmr-end');
-  startEl.min = min; startEl.max = max; startEl.value = s;
-  endEl.min = min; endEl.max = max; endEl.value = e;
+  startEl.innerHTML = timeOptionsHtml(min, max, s);
+  endEl.innerHTML = timeOptionsHtml(min, max, e);
 
   // 多段提示
   const hint = $('tmr-multi-hint');
@@ -1317,6 +1341,25 @@ async function loadHome(){
   renderHome();
   loadNotices();
 }
+
+// 起止联动：开始时间变化时，重建结束下拉，只保留 > 开始 的档位
+document.addEventListener('change', (e) => {
+  const el = e.target;
+  if(!el || !el.matches) return;
+  const isStart = el.matches('select.time-input[data-field="start"]') || el.id === 'tmr-start';
+  if(!isStart) return;
+  const container = el.closest('.seg-row, .time-pair');
+  if(!container) return;
+  const endEl = container.querySelector('select.time-input[data-field="end"], #tmr-end');
+  if(!endEl) return;
+  const startVal = el.value;
+  const allOpts = Array.from(el.options).map(o => o.value);
+  const endOpts = allOpts.filter(v => v > startVal);
+  if(!endOpts.length) return;
+  const currentEnd = endEl.value;
+  const newEnd = endOpts.includes(currentEnd) && currentEnd > startVal ? currentEnd : endOpts[0];
+  endEl.innerHTML = endOpts.map(o => `<option value="${o}"${o===newEnd?' selected':''}>${o}</option>`).join('');
+});
 
 // ---------- init ----------
 async function init(){

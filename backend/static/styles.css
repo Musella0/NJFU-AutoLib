@@ -278,6 +278,13 @@ body.no-wobble .chip,body.no-wobble .pill{border-radius:999px !important}
   flex:1;min-width:0;width:100%;
 }
 .time-input:focus{outline:none;border-color:var(--accent);box-shadow:var(--shadow-sm)}
+select.time-input{
+  appearance:none;-webkit-appearance:none;-moz-appearance:none;
+  padding-right:26px;cursor:pointer;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23666' stroke-width='3'><path d='M6 9l6 6 6-6'/></svg>");
+  background-repeat:no-repeat;background-position:right 8px center;background-size:12px;
+}
+select.time-input:disabled{opacity:.5;cursor:not-allowed}
 
 /* ========= Toggle ========= */
 .toggle-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0}
