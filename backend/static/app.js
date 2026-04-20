@@ -660,7 +660,7 @@ function renderTodayCard(opt){
   if(opt.loading){
     card.style.display = '';
     empty.style.display = 'none';
-    card.innerHTML = `<div class="label">今日座位</div><div class="sub" style="margin-top:8px">加载中...</div>`;
+    card.innerHTML = `<div class="label">今日座位</div><div class="sub" style="margin-top:8px">查询中，请稍等…</div>`;
     return;
   }
 
@@ -733,7 +733,7 @@ function renderTomorrowCard(opt){
   if(opt.loading){
     card.style.display = '';
     empty.style.display = 'none';
-    card.innerHTML = `<div class="label">明日座位</div><div class="sub" style="margin-top:8px">加载中...</div>`;
+    card.innerHTML = `<div class="label">明日座位</div><div class="sub" style="margin-top:8px">查询中，请稍等…</div>`;
     return;
   }
 
@@ -1326,7 +1326,6 @@ async function init(){
   await checkAuth();
   await loadSeats();
   await loadAccounts();
-  renderHome();
   loadNotices();
 }
 
