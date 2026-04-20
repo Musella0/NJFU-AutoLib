@@ -723,11 +723,12 @@ function renderTodayCard(opt){
   const bhm = bt.slice(0,5), ehm = et.slice(0,5);
   const hours = (bhm && ehm) ? (parseInt(ehm,10) - parseInt(bhm,10)) : '';
   const status = fmtResvStatus(resv.resvStatus);
-  const canCancel = resv.resvStatus <= 3 || resv.resvStatus === 1027 || resv.resvStatus === 3141;
+  const ACTIVE_STATUSES = [1027, 1093, 3141];
+  const canCancel = ACTIVE_STATUSES.includes(resv.resvStatus);
   const lpOn = cfg.late_protection === 'True';
   const arrived = cfg.arrived_date === new Date().toISOString().slice(0,10);
   const impliedArrived = resv.resvStatus === 1093 || resv.resvStatus === 3141;
-  const canArrive = resv.resvStatus !== 4 && resv.resvStatus !== 5;
+  const canArrive = ACTIVE_STATUSES.includes(resv.resvStatus);
   const showArrived = arrived || impliedArrived;
 
   card.style.display = '';
@@ -804,7 +805,7 @@ function renderTomorrowCard(opt){
 }
 
 function fmtResvStatus(s){
-  return { 1:'待签到', 2:'使用中', 3:'暂离', 4:'已结束', 5:'已取消', 1027:'已预约', 1093:'使用中', 3141:'暂离' }[s] || `状态(${s})`;
+  return { 1027:'已预约', 1093:'使用中', 3141:'暂离', 3265:'已结束', 3281:'已违约' }[s] || `状态(${s})`;
 }
 
 function renderTomorrowStrip(){

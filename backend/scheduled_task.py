@@ -464,8 +464,8 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
         )
 
         # 检查用户当前签到状态，若已在馆则无需保护
-        # 2/1093=使用中，3141=暂离，均表示用户已完成签到入馆
-        IN_LIBRARY_STATUSES = {2, 1093, 3141}
+        # 1093=使用中，3141=暂离，均表示用户已完成签到入馆
+        IN_LIBRARY_STATUSES = {1093, 3141}
         try:
             res_list, _ = library.get_reservation_info()
             if res_list:
