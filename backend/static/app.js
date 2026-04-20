@@ -702,6 +702,9 @@ function renderTodayCard(opt){
   const canCancel = resv.resvStatus <= 3 || resv.resvStatus === 1027 || resv.resvStatus === 3141;
   const lpOn = cfg.late_protection === 'True';
   const arrived = cfg.arrived_date === new Date().toISOString().slice(0,10);
+  const impliedArrived = resv.resvStatus === 1093 || resv.resvStatus === 3141;
+  const canArrive = resv.resvStatus !== 4 && resv.resvStatus !== 5;
+  const showArrived = arrived || impliedArrived;
 
   card.style.display = '';
   empty.style.display = 'none';
@@ -713,10 +716,10 @@ function renderTodayCard(opt){
     <div class="meta-row">
       <span class="pill ok"><span class="dot"></span>${escHtml(status)}</span>
       ${lpOn ? '<span class="pill accent">🛡 迟到保护</span>' : ''}
-      ${arrived ? '<span class="pill ok">✓ 已到馆</span>' : ''}
+      ${showArrived ? '<span class="pill ok">✓ 已到馆</span>' : ''}
     </div>
     <div class="actions">
-      ${lpOn ? `<button class="btn ${arrived?'primary':'accent'} lg grow" id="btn-arrived" onclick="toggleArrived()">${arrived ? '✓ 已到馆' : '✓ 我已到馆'}</button>` : ''}
+      ${canArrive ? `<button class="btn ${showArrived?'primary':'accent'} lg grow" id="btn-arrived" onclick="toggleArrived()">${showArrived ? '✓ 已到馆' : '✓ 我已到馆'}</button>` : ''}
       ${canCancel ? `<button class="btn sm" onclick="openSheet('cancel')">取消</button>` : ''}
     </div>`;
 }
@@ -777,7 +780,7 @@ function renderTomorrowCard(opt){
 }
 
 function fmtResvStatus(s){
-  return { 1:'待签到', 2:'使用中', 3:'暂离', 4:'已结束', 5:'已取消', 1027:'未开始', 1093:'使用中', 3141:'暂离' }[s] || `状态(${s})`;
+  return { 1:'待签到', 2:'使用中', 3:'暂离', 4:'已结束', 5:'已取消', 1027:'已预约', 1093:'使用中', 3141:'暂离' }[s] || `状态(${s})`;
 }
 
 function renderTomorrowStrip(){
