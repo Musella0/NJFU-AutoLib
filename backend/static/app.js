@@ -707,9 +707,14 @@ function renderTodayCard(opt){
     card.style.display = 'none';
     empty.style.display = '';
     const reserveOn = cfg.is_reserved === 'True';
+    const nc = state.napConfig || {};
+    const napHint = nc.auto_daily
+      ? `<div class="meta-row" style="justify-content:center;margin-top:8px"><span class="pill accent">😴 自动午休已开启 · ${escHtml(nc.trigger_time || '12:05')} 触发</span></div>`
+      : '';
     empty.innerHTML = `
       <div class="h2" style="color:var(--ink3)">今日暂无预约</div>
       <div class="sub" style="margin-top:6px">${reserveOn ? '按当前配置今日无座位，或抢座进行中' : '自动预约已暂停'}</div>
+      ${napHint}
       <div class="actions" style="justify-content:center">
         <button class="btn accent" onclick="reserveNow()">⚡ 立即预约</button>
       </div>`;
@@ -774,6 +779,7 @@ function renderTodayCard(opt){
     <div class="meta-row">
       <span class="pill ok"><span class="dot"></span>${escHtml(status)}</span>
       ${lpOn ? '<span class="pill accent">🛡 迟到保护</span>' : ''}
+      ${(state.napConfig || {}).auto_daily ? `<span class="pill accent" style="cursor:pointer" onclick="openNap()">😴 午休 ${escHtml((state.napConfig||{}).trigger_time||'12:05')}</span>` : ''}
       ${showArrived ? '<span class="pill ok">✓ 已到馆</span>' : ''}
     </div>
     <div class="actions">
