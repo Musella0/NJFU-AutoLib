@@ -722,6 +722,37 @@ function renderTodayCard(opt){
   const et = (resv.resvEndTime || '').split(' ')[1] || '';
   const bhm = bt.slice(0,5), ehm = et.slice(0,5);
   const hours = (bhm && ehm) ? (parseInt(ehm,10) - parseInt(bhm,10)) : '';
+  const seatHtml = `${zone ? `<span class="zone">${escHtml(zone)}</span>` : ''}${escHtml(num)}`;
+  const timeHtml = `${bhm} — ${ehm}${hours ? ` · ${hours}小时` : ''}`;
+
+  if (resv.resvStatus === 3265) {
+    card.style.display = '';
+    empty.style.display = 'none';
+    card.innerHTML = `
+      <div class="stamp">TODAY</div>
+      <div class="label">今日座位</div>
+      <div class="seat">${seatHtml}</div>
+      <div class="time">${timeHtml}</div>
+      <div class="h2" style="margin-top:12px">任务完成，该休息了 ☕</div>
+      <div class="sub" style="margin-top:4px">今日学习已结束</div>
+      <div class="actions" style="justify-content:center;margin-top:12px">
+        <button class="btn accent" onclick="reserveNow()">我还能学！</button>
+      </div>`;
+    return;
+  }
+
+  if (resv.resvStatus === 3281) {
+    card.style.display = '';
+    empty.style.display = 'none';
+    card.innerHTML = `
+      <div class="stamp">TODAY</div>
+      <div class="label">今日座位</div>
+      <div class="seat">${seatHtml}</div>
+      <div class="time">${timeHtml}</div>
+      <div class="meta-row"><span class="pill warn">⚠ 今日预约已违约</span></div>`;
+    return;
+  }
+
   const status = fmtResvStatus(resv.resvStatus);
   const ACTIVE_STATUSES = [1027, 1093, 3141];
   const canCancel = ACTIVE_STATUSES.includes(resv.resvStatus);
