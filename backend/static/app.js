@@ -736,7 +736,7 @@ function renderTodayCard(opt){
       <div class="h2" style="margin-top:12px">任务完成，该休息了 ☕</div>
       <div class="sub" style="margin-top:4px">今日学习已结束</div>
       <div class="actions" style="justify-content:center;margin-top:12px">
-        <button class="btn accent" onclick="reserveNow()">我还能学！</button>
+        <button class="btn accent" onclick="openSheet('reserve-today')">我还能学！</button>
       </div>`;
     return;
   }
@@ -1121,8 +1121,8 @@ function sortedZones(){
   });
 }
 
-function onZone(v){
-  const sel = $('sp-seat');
+function onZone(v, targetId){
+  const sel = $(targetId || 'sp-seat');
   const seats = state.allSeats[v] || [];
   sel.innerHTML = seats.length ? seats.map(s => `<option value="${escHtml(s)}">${escHtml(s)}</option>`).join('') : '<option>无座位</option>';
 }
@@ -1355,7 +1355,70 @@ const SHEETS = {
       <button class="btn accent grow" onclick="acknowledgeLP()">我已知晓，永久关闭</button>
     </div>
   `,
+  'reserve-today': () => {
+    const zones = sortedZones();
+    const isoDay = new Date().getDay() || 7;
+    const { min, max } = timeBounds(isoDay);
+    return `
+    <div class="grab"></div>
+    <h3>再约一场 📚</h3>
+    <div class="desc">选好座位和时间，直接预约今天。</div>
+    <div class="col gap-sm">
+      <div class="field"><label>楼层 / 区域</label>
+        <select id="rt-zone" onchange="onZone(this.value,'rt-seat')">
+          <option value="">选择...</option>
+          ${zones.map(z => `<option value="${escHtml(z)}">${escHtml(z)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label>座位号</label>
+        <select id="rt-seat"><option>先选楼层</option></select>
+      </div>
+      <div class="time-pair" style="display:flex;gap:8px">
+        <div class="field" style="flex:1"><label>开始时间</label>
+          <select id="rt-start" class="time-input" data-field="start">${timeOptionsHtml(min, max, min)}</select>
+        </div>
+        <div class="field" style="flex:1"><label>结束时间</label>
+          <select id="rt-end" class="time-input" data-field="end">${timeOptionsHtml(min, max, max)}</select>
+        </div>
+      </div>
+    </div>
+    <div class="row-flex mt-lg">
+      <button class="btn ghost grow" onclick="closeSheet()">取消</button>
+      <button class="btn accent grow" id="btn-rt-confirm" onclick="doReserveToday()">确认预约</button>
+    </div>`;
+  },
 };
+
+async function doReserveToday(){
+  const zone = ($('rt-zone') || {}).value;
+  const seatEl = $('rt-seat');
+  const seat = seatEl ? seatEl.options[seatEl.selectedIndex]?.value : '';
+  const start = ($('rt-start') || {}).value;
+  const end = ($('rt-end') || {}).value;
+
+  if(!zone || !seat || seat === '先选楼层') { toast('请先选择座位','error'); return; }
+  if(!start || !end || start >= end) { toast('请检查时间段','error'); return; }
+
+  const fullSeat = seat;
+  const btn = $('btn-rt-confirm');
+  if(btn) btn.disabled = true;
+
+  const { ok, data } = await api(
+    `/api/my/accounts/${encodeURIComponent(state.currentPid)}/reserve_custom`,
+    { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ seat: fullSeat, start_time: start, end_time: end }) }
+  );
+
+  if(btn) btn.disabled = false;
+
+  if(ok){
+    closeSheet();
+    toast(data.success ? '预约成功 🎉' : (data.result || '预约完成'), data.success ? 'success' : 'info');
+    loadReservations();
+    if(data.result && !data.success) alert('预约结果：\n\n' + data.result);
+  } else {
+    toast(data.error || '预约失败','error');
+  }
+}
 
 function openSheet(name){
   const sc = $('scrim');

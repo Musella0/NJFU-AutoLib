@@ -564,6 +564,55 @@ def reserve_now(pid):
         return jsonify({"error": f"预约执行失败: {str(e)}"}), 500
 
 
+@app.route("/api/my/accounts/<pid>/reserve_custom", methods=["POST"])
+@login_required
+def reserve_custom(pid):
+    """用指定座位和时间段预约今天"""
+    uid = _ensure_uid()
+    cfg = _get_decrypted_cfg(pid, uid)
+    if not cfg:
+        return jsonify({"error": "未找到该账号配置"}), 404
+    if not cfg.get("vpn_password") or not cfg.get("lib_password"):
+        return jsonify({"error": "请先保存 VPN 和图书馆密码"}), 400
+
+    body = request.get_json(silent=True) or {}
+    seat_name = (body.get("seat") or "").strip()
+    start_time = (body.get("start_time") or "").strip()  # "HH:MM"
+    end_time = (body.get("end_time") or "").strip()      # "HH:MM"
+
+    if not seat_name or not start_time or not end_time:
+        return jsonify({"error": "缺少 seat / start_time / end_time"}), 400
+    if start_time >= end_time:
+        return jsonify({"error": "结束时间必须晚于开始时间"}), 400
+
+    try:
+        from scheduled_task import get_seat_ids
+        from utils.library_system import LibrarySystem
+
+        seat_ids = get_seat_ids([seat_name])
+        if not seat_ids:
+            return jsonify({"error": f"未找到座位「{seat_name}」"}), 400
+
+        today = __import__("datetime").date.today().strftime("%Y-%m-%d")
+        resv_begin = f"{today} {start_time}:00"
+        resv_end   = f"{today} {end_time}:00"
+
+        library = LibrarySystem(
+            username=pid,
+            password=cfg["lib_password"].replace("！", "!"),
+            vpn_password=cfg["vpn_password"],
+        )
+        msg, _ = library.reserve_seat(
+            seat_list=seat_ids,
+            resv_begin_time=resv_begin,
+            resv_end_time=resv_end,
+        )
+        success = "成功" in msg
+        return jsonify({"success": success, "result": msg}), 200
+    except Exception as e:
+        return jsonify({"error": f"预约失败: {str(e)}"}), 500
+
+
 # ==================== Public API (游客模式) ====================
 
 @app.route("/api/public/seats", methods=["GET"])
