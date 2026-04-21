@@ -32,6 +32,7 @@ docker compose up -d --build
 # 3. 打开浏览器
 # 用户端：http://localhost:5004/
 # 管理后台：http://localhost:5004/admin
+```
 
 ---
 
@@ -98,10 +99,10 @@ docker compose up -d --build
 │                   Docker Compose                    │
 │                                                     │
 │  flask-api   ←→   MongoDB   ←→   scheduler          │
-│  （网页+接口）     （数据库）      （定时任务）          │
+│  （网页+接口）     （数据库）      （定时任务）        │
 │                     ↑                               │
 │                   seed                              │
-│              （一次性导入座位数据）                    │
+│              （一次性导入座位数据）                   │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -185,9 +186,6 @@ docker compose up -d --build
 | 管理员认证 | TOTP 动态验证码（pyotp）|
 | 通知推送 | SMTP 邮件 + Server 酱（微信）|
 | 部署 | Docker + Docker Compose |
-
-
-```
 
 ---
 
