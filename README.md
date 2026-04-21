@@ -1,6 +1,6 @@
 # AutoLib — 南京林业大学图书馆自动抢座系统
 
-> 原作：[lnk137/NJFU-AutomaticLibrary](https://github.com/lnk137/NJFU-AutomaticLibrary)，基于此二创的 Web 版本。
+> 原作：[lnk137/NJFU-AutomaticLibrary](https://github.com/lnk137/NJFU-AutomaticLibrary)，通过勤奋的肘击Claude做出的二创的 Web 版本。
 
 ---
 
@@ -44,7 +44,7 @@
 
 - 预约成功或失败后，可以通过以下方式收到通知：
   - **邮件**：发到你填写的邮箱
-  - **微信**：通过 Server 酱推送到微信
+  - **微信**：通过 Server 酱推送到微信（在建中...）
 
 ### 手动操作
 
