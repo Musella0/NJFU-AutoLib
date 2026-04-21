@@ -1,6 +1,7 @@
 # AutoLib Docker 部署说明
 
-本家： [lnk137/NJFU-AutomaticLibrary](https://github.com/lnk137/NJFU-AutomaticLibrary) 通过肘击Claude二创出来的预约小服务器
+原作： [lnk137/NJFU-AutomaticLibrary](https://github.com/lnk137/NJFU-AutomaticLibrary) 
+通过肘击Claude二创出来的预约小服务器
 
 - 用户端 Web 页面：配置多个学号、设置预约规则、立即抢座、查看结果
 - 管理后台：TOTP 二步验证登录、公告管理、用户开关与保护策略管理
