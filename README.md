@@ -14,7 +14,7 @@
 
 ## 快速开始
 ### 方法1 直接使用
-直接登陆网址：南林图书馆.中国
+直接登陆网址：[南林图书馆.中国](http://xn--fiqs8siq5dxhbpv.xn--fiqs8s)
 
 ### 方法2 自己部署
 详细部署步骤见 [quickstart.md](quickstart.md)。
