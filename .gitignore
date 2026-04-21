@@ -1,4 +1,7 @@
 .env
+# AI/agent local config
+CLAUDE.md
+.codex
 .claude/
 __pycache__/
 *.pyc
