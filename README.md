@@ -11,6 +11,30 @@
 你只需要在网页上配置一次：学号、密码、想坐哪、几点到几点。之后每天到了预约时间，系统会自动登录你的账号，帮你抢好座位，抢完还能发通知告诉你结果。
 
 ---
+---
+
+## 快速开始
+### 方法1 直接使用
+直接登陆网址：南林图书馆.中国
+
+### 方法2 自己部署
+详细部署步骤见 [quickstart.md](quickstart.md)。
+
+简要流程：
+
+```bash
+# 1. 复制并填写环境变量
+cp .env.example .env
+# 编辑 .env，填写 MONGO_PASS、SECRET_KEY、ENCRYPTION_KEY、ADMIN_TOTP_SECRET
+
+# 2. 启动所有服务
+docker compose up -d --build
+
+# 3. 打开浏览器
+# 用户端：http://localhost:5004/
+# 管理后台：http://localhost:5004/admin
+
+---
 
 ## 主要功能
 
@@ -163,25 +187,7 @@
 | 通知推送 | SMTP 邮件 + Server 酱（微信）|
 | 部署 | Docker + Docker Compose |
 
----
 
-## 快速开始
-
-详细部署步骤见 [quickstart.md](quickstart.md)。
-
-简要流程：
-
-```bash
-# 1. 复制并填写环境变量
-cp .env.example .env
-# 编辑 .env，填写 MONGO_PASS、SECRET_KEY、ENCRYPTION_KEY、ADMIN_TOTP_SECRET
-
-# 2. 启动所有服务
-docker compose up -d --build
-
-# 3. 打开浏览器
-# 用户端：http://localhost:5004/
-# 管理后台：http://localhost:5004/admin
 ```
 
 ---
