@@ -1,6 +1,6 @@
 # AutoLib Docker 部署指南
 
-> 本指南适用于 **Ubuntu / Debian** 系统。其他 Linux 发行版可参考本教程，自行调整包管理器命令。
+> 本指南适用于 **Ubuntu / Debian** 系统。其他 Linux 发行版可参考本教程，自行肘击AI。
 
 ---
 
