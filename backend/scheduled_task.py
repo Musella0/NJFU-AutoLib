@@ -138,12 +138,16 @@ def get_all_active_reservations() -> List[Dict[str, Any]]:
     获取所有正在预约的记录
 
     从数据库中查询所有标记为活动的预约记录，并按优先级降序排序。
-    活动记录的条件是 is_reserved 字段为 "True"。
+    活动记录条件：is_reserved == "True" 且 verified == True，
+    避免对未通过凭据验证的账号重复尝试预约并产生失败通知。
 
     Returns:
         List[Dict[str, Any]]: 按优先级排序的预约记录列表，每条记录包含完整的预约配置
     """
-    return list(user_config_info.find({"is_reserved": "True"}).sort("priority", DESCENDING))
+    return list(
+        user_config_info.find({"is_reserved": "True", "verified": True})
+        .sort("priority", DESCENDING)
+    )
 
 def get_seat_ids(seat_list: List[str]) -> List[str]:
     """
@@ -212,7 +216,9 @@ def calculate_reservation_time(res_item: Dict[str, Any]) -> List[Tuple[str, str]
         raw = res_item.get("time", {}).get("tomorrow")
     elif mode == "after_tomorrow":
         target_date = now + timedelta(days=2)
-        raw = res_item.get("time", {}).get("tomorrow")
+        # 优先读 after_tomorrow 字段，缺省回退到 tomorrow（兼容旧配置）
+        raw = (res_item.get("time", {}).get("after_tomorrow")
+               or res_item.get("time", {}).get("tomorrow"))
     else:
         raise ValueError(f"不支持的预约模式: {mode}")
 
