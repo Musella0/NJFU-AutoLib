@@ -5,8 +5,8 @@
 预约完成后自动启动迟到保护服务。
 
 环境变量:
-  SCHEDULE_HOUR   - 预约执行的小时 (默认 19)
-  SCHEDULE_MINUTE - 预约执行的分钟 (默认 55)
+  SCHEDULE_HOUR   - 预约执行的小时 (默认 7)
+  SCHEDULE_MINUTE - 预约执行的分钟 (默认 0)
 """
 
 import os
@@ -51,8 +51,8 @@ def run_reservation_task():
         logger.info("========== 预约任务结束 ==========")
 
 def main():
-    hour = int(os.getenv("SCHEDULE_HOUR", "19"))
-    minute = int(os.getenv("SCHEDULE_MINUTE", "55"))
+    hour = int(os.getenv("SCHEDULE_HOUR", "7"))
+    minute = int(os.getenv("SCHEDULE_MINUTE", "0"))
 
     logger.info(f"定时预约调度器启动，每天 {hour:02d}:{minute:02d} 执行预约")
 

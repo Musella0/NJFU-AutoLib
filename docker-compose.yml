@@ -63,12 +63,12 @@ services:
       - LOG_FILE=logs/auto_lib.log
       - FOLDER_PATH=座位信息
       - TZ=Asia/Shanghai
-      # 定时预约时间（24小时制，默认 19:55 预约次日座位）
-      - SCHEDULE_HOUR=${SCHEDULE_HOUR:-19}
-      - SCHEDULE_MINUTE=${SCHEDULE_MINUTE:-55}
-      # 邮件通知配置（可选）
-      - SMTP_HOST=${SMTP_HOST:-smtp.qq.com}
-      - SMTP_PORT=${SMTP_PORT:-465}
+      # 定时预约时间（24小时制，默认每天早晨 7:00 预约次日座位）
+      - SCHEDULE_HOUR=${SCHEDULE_HOUR:-7}
+      - SCHEDULE_MINUTE=${SCHEDULE_MINUTE:-0}
+      # 邮件通知配置（可选，默认走 Outlook 587/STARTTLS）
+      - SMTP_HOST=${SMTP_HOST:-smtp-mail.outlook.com}
+      - SMTP_PORT=${SMTP_PORT:-587}
       - SMTP_USER=${SMTP_USER:-}
       - SMTP_PASS=${SMTP_PASS:-}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
