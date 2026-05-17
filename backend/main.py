@@ -419,7 +419,7 @@ def nap_config(pid):
         return jsonify({"error": "账号不存在"}), 404
 
     if request.method == "GET":
-        defaults = {"start_time": "14:00", "end_time": "", "seat": "", "auto_daily": False, "trigger_time": "12:05"}
+        defaults = {"start_time": "14:00", "end_time": "", "seat": "", "auto_daily": False, "trigger_time": "12:00"}
         result = {**defaults, **(cfg.get("nap_config") or {})}
         client.close()
         return jsonify(result), 200

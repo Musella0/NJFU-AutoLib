@@ -14,7 +14,7 @@ const state = {
   tomorrowResv: null, // tomorrow's live reservation (if any)
   cfgMode: 'week',    // UI: 'week' or 'simple'
   authMode: 'login',
-  napConfig: { start_time: '14:00', end_time: '', seat: '', auto_daily: false, trigger_time: '12:05' },
+  napConfig: { start_time: '14:00', end_time: '', seat: '', auto_daily: false, trigger_time: '12:00' },
 };
 
 const WEEK_LABELS = ['一','二','三','四','五','六','日']; // iso 1..7
@@ -265,7 +265,7 @@ async function loadAccountDetail(pid){
   }catch(e){
     state.currentCfg = null;
   }
-  loadNapConfig();
+  await loadNapConfig();
   renderConfig();
   renderHome();
   loadReservations();
@@ -370,6 +370,7 @@ function renderConfig(){
   // Toggles
   $('cfg-toggle-reserve').classList.toggle('on', cfg.is_reserved === 'True');
   $('cfg-toggle-lp').classList.toggle('on', cfg.late_protection === 'True');
+  $('cfg-toggle-nap').classList.toggle('on', !!(state.napConfig && state.napConfig.auto_daily));
 
   // Passwords
   $('cfg-vpn').value = cfg.vpn_password || '';
@@ -568,6 +569,15 @@ async function saveCfg(){
   btn.disabled = true;
   btn.textContent = '保存中...';
   const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}`, { method:'POST', body });
+  if(ok){
+    const napAuto = $('cfg-toggle-nap').classList.contains('on');
+    if(!state.napConfig || state.napConfig.auto_daily !== napAuto){
+      const newNap = { ...(state.napConfig || {}), auto_daily: napAuto };
+      await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/nap_config`,
+        { method:'POST', body: newNap });
+      state.napConfig = newNap;
+    }
+  }
   btn.disabled = false;
   btn.textContent = '保存配置';
   if(ok){
@@ -813,7 +823,7 @@ function renderTodayCard(opt){
     const reserveOn = cfg.is_reserved === 'True';
     const nc = state.napConfig || {};
     const napHint = nc.auto_daily
-      ? `<div class="meta-row" style="justify-content:center;margin-top:8px"><span class="pill accent">😴 自动午休已开启 · ${escHtml(nc.trigger_time || '12:05')} 触发</span></div>`
+      ? `<div class="meta-row" style="justify-content:center;margin-top:8px"><span class="pill accent">😴 自动午休已开启 · ${escHtml(nc.trigger_time || '12:00')} 触发</span></div>`
       : '';
     empty.innerHTML = `
       <div class="h2" style="color:var(--ink3)">今日暂无预约</div>
@@ -883,7 +893,7 @@ function renderTodayCard(opt){
     <div class="meta-row">
       <span class="pill ok"><span class="dot"></span>${escHtml(status)}</span>
       ${lpOn ? '<span class="pill accent">🛡 迟到保护</span>' : ''}
-      ${(state.napConfig || {}).auto_daily ? `<span class="pill accent" style="cursor:pointer" onclick="openNap()">😴 午休 ${escHtml((state.napConfig||{}).trigger_time||'12:05')}</span>` : ''}
+      ${(state.napConfig || {}).auto_daily ? `<span class="pill accent" style="cursor:pointer" onclick="openNap()">😴 午休 ${escHtml((state.napConfig||{}).trigger_time||'12:00')}</span>` : ''}
       ${showArrived ? '<span class="pill ok">✓ 已到馆</span>' : ''}
     </div>
     <div class="actions">
@@ -1536,7 +1546,7 @@ const SHEETS = {
       </div>
       <div class="box tight" style="border-left:4px solid var(--ok)">
         <div class="sub" style="font-weight:700">✓ 每日自动触发</div>
-        <div class="t">在设置页开启后，每天到触发时刻（默认 12:05）自动执行，无需手动操作</div>
+        <div class="t">在设置页开启后，每天到触发时刻（默认 12:00）自动执行，无需手动操作</div>
       </div>
       <div class="box tight" style="border-left:4px solid var(--danger)">
         <div class="sub" style="font-weight:700">⚠ 极小占座风险</div>
@@ -1604,7 +1614,7 @@ const SHEETS = {
     const defEnd = nc.end_time || '';
     const defSeat = nc.seat || '';
     const autoDaily = nc.auto_daily || false;
-    const triggerTime = nc.trigger_time || '12:05';
+    const triggerTime = nc.trigger_time || '12:00';
     const isoDay = new Date().getDay() || 7;
     const { max } = timeBounds(isoDay);
     const zones = sortedZones();
@@ -1682,7 +1692,7 @@ function updateNapSettingsLabel(){
   const seat = nc.seat ? nc.seat : '同座位';
   const start = nc.start_time || '14:00';
   const end = nc.end_time ? `–${nc.end_time}` : '';
-  const auto = nc.auto_daily ? `，每日 ${nc.trigger_time || '12:05'} 自动` : '';
+  const auto = nc.auto_daily ? `，每日 ${nc.trigger_time || '12:00'} 自动` : '';
   el.textContent = `下午 ${start}${end}，${seat}${auto}`;
 }
 
@@ -1750,7 +1760,7 @@ async function saveNapSettings(){
     if(!seat || seat === '先选楼层'){ toast('请先选择自定义座位','error'); return; }
   }
   const autoDaily = ($('ns-auto-daily') || {}).checked || false;
-  const triggerTime = ($('ns-trigger') || {}).value || '12:05';
+  const triggerTime = ($('ns-trigger') || {}).value || '12:00';
   const cfg = { start_time: start, end_time: end, seat, auto_daily: autoDaily, trigger_time: triggerTime };
   const { ok } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/nap_config`,
     { method:'POST', body: cfg });

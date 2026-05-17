@@ -777,7 +777,7 @@ def process_auto_naps() -> None:
     log_with_user(logger, 'info', '系统', '自动午休', f"共 {len(users)} 个用户开启自动午休")
     for u in users:
         pid = u["pid"]
-        trigger = (u.get("nap_config") or {}).get("trigger_time") or "12:05"
+        trigger = (u.get("nap_config") or {}).get("trigger_time") or "12:00"
         try:
             h, m = map(int, trigger.split(":"))
         except Exception:
