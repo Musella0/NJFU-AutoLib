@@ -1559,26 +1559,19 @@ const SHEETS = {
   'nap-confirm': () => {
     const resv = state.todayResv;
     const currentSeat = (resv && resv.devInfo && resv.devInfo.devName) || '';
-    const currentEnd = resv ? ((resv.resvEndTime || '').split(' ')[1] || '').slice(0,5) : '';
     const nc = state.napConfig || {};
     const defStart = nc.start_time || '14:00';
-    const defEnd = nc.end_time || currentEnd || '18:00';
     const defSeat = nc.seat || '';
     const isoDay = new Date().getDay() || 7;
-    const { min, max } = timeBounds(isoDay);
+    const { max } = timeBounds(isoDay);
     const zones = sortedZones();
     return `
     <div class="grab"></div>
     <h3>😴 午休设置</h3>
     <div class="desc">当前座位：<strong>${escHtml(currentSeat || '未知')}</strong></div>
     <div class="col gap-sm">
-      <div class="time-pair" style="display:flex;gap:8px">
-        <div class="field" style="flex:1"><label>下午开始</label>
-          <select id="nap-start" class="time-input">${timeOptionsHtml('08:00', max, defStart)}</select>
-        </div>
-        <div class="field" style="flex:1"><label>下午结束</label>
-          <select id="nap-end" class="time-input">${timeOptionsHtml('08:00', max, defEnd)}</select>
-        </div>
+      <div class="field"><label>午休结束（回来时间）</label>
+        <select id="nap-start" class="time-input">${timeOptionsHtml('08:00', max, defStart)}</select>
       </div>
       <div class="field">
         <label>座位</label>
@@ -1611,7 +1604,6 @@ const SHEETS = {
   'nap-settings': () => {
     const nc = state.napConfig || {};
     const defStart = nc.start_time || '14:00';
-    const defEnd = nc.end_time || '';
     const defSeat = nc.seat || '';
     const autoDaily = nc.auto_daily || false;
     const triggerTime = nc.trigger_time || '12:00';
@@ -1621,17 +1613,14 @@ const SHEETS = {
     return `
     <div class="grab"></div>
     <h3>😴 午休配置</h3>
-    <div class="desc">配置每次午休的默认时段和座位。</div>
+    <div class="desc">默认 12:00 出门，14:00 回来。下午时段自动续约到原预约结束。</div>
     <div class="col gap-sm">
       <div class="time-pair" style="display:flex;gap:8px">
-        <div class="field" style="flex:1"><label>下午开始</label>
-          <select id="ns-start" class="time-input">${timeOptionsHtml('08:00', max, defStart)}</select>
+        <div class="field" style="flex:1"><label>午休开始</label>
+          <select id="ns-trigger" class="time-input">${timeOptionsHtml('08:00', '22:00', triggerTime)}</select>
         </div>
-        <div class="field" style="flex:1"><label>下午结束（空=同当前）</label>
-          <select id="ns-end" class="time-input">
-            <option value="">同当前预约结束时间</option>
-            ${buildTimeOptions('08:00', max).map(o => `<option value="${o}"${o===defEnd?' selected':''}>${o}</option>`).join('')}
-          </select>
+        <div class="field" style="flex:1"><label>午休结束</label>
+          <select id="ns-start" class="time-input">${timeOptionsHtml('08:00', max, defStart)}</select>
         </div>
       </div>
       <div class="field">
@@ -1657,14 +1646,9 @@ const SHEETS = {
       <div class="toggle-row" style="border:0;padding:4px 0">
         <div class="info">
           <div class="t1">每日自动午休</div>
-          <div class="t2">每天到达触发时间后自动执行</div>
+          <div class="t2">每天到「午休开始」时刻自动执行</div>
         </div>
-        <label class="switch"><input type="checkbox" id="ns-auto-daily" onchange="onNapAutoDaily(this.checked)" ${autoDaily ? 'checked' : ''}><span class="slider"></span></label>
-      </div>
-      <div id="ns-trigger-row" style="display:${autoDaily ? 'block' : 'none'}">
-        <div class="field"><label>每日触发时间</label>
-          <select id="ns-trigger">${timeOptionsHtml('08:00', '22:00', triggerTime)}</select>
-        </div>
+        <label class="switch"><input type="checkbox" id="ns-auto-daily" ${autoDaily ? 'checked' : ''}><span class="slider"></span></label>
       </div>
     </div>
     <div class="row-flex mt-lg">
@@ -1690,10 +1674,10 @@ function updateNapSettingsLabel(){
   if(!el) return;
   const nc = state.napConfig || {};
   const seat = nc.seat ? nc.seat : '同座位';
+  const trigger = nc.trigger_time || '12:00';
   const start = nc.start_time || '14:00';
-  const end = nc.end_time ? `–${nc.end_time}` : '';
-  const auto = nc.auto_daily ? `，每日 ${nc.trigger_time || '12:00'} 自动` : '';
-  el.textContent = `下午 ${start}${end}，${seat}${auto}`;
+  const auto = nc.auto_daily ? '，每日自动' : '';
+  el.textContent = `午休 ${trigger}–${start}，${seat}${auto}`;
 }
 
 function openNap(){
@@ -1721,14 +1705,8 @@ function onNapSettingsSeatMode(val){
   if(el) el.style.display = val === 'custom' ? 'block' : 'none';
 }
 
-function onNapAutoDaily(checked){
-  const el = $('ns-trigger-row');
-  if(el) el.style.display = checked ? 'block' : 'none';
-}
-
 async function saveNapConfig(closeAfter=true){
   const start = ($('nap-start') || {}).value;
-  const end = ($('nap-end') || {}).value;
   const seatMode = ($('nap-seat-mode') || {}).value;
   let seat = '';
   if(seatMode === 'custom'){
@@ -1736,7 +1714,7 @@ async function saveNapConfig(closeAfter=true){
     seat = seatEl ? (seatEl.options[seatEl.selectedIndex]?.value || '') : '';
     if(!seat || seat === '先选楼层'){ toast('请先选择自定义座位','error'); return; }
   }
-  const cfg = { ...state.napConfig, start_time: start, end_time: end, seat };
+  const cfg = { ...state.napConfig, start_time: start, end_time: '', seat };
   const { ok } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/nap_config`,
     { method:'POST', body: cfg });
   if(ok){
@@ -1750,8 +1728,9 @@ async function saveNapConfig(closeAfter=true){
 }
 
 async function saveNapSettings(){
-  const start = ($('ns-start') || {}).value;
-  const end = ($('ns-end') || {}).value || '';
+  const start = ($('ns-start') || {}).value || '14:00';
+  const triggerTime = ($('ns-trigger') || {}).value || '12:00';
+  if(triggerTime >= start){ toast('午休结束必须晚于开始','error'); return; }
   const seatMode = ($('ns-seat-mode') || {}).value;
   let seat = '';
   if(seatMode === 'custom'){
@@ -1760,8 +1739,7 @@ async function saveNapSettings(){
     if(!seat || seat === '先选楼层'){ toast('请先选择自定义座位','error'); return; }
   }
   const autoDaily = ($('ns-auto-daily') || {}).checked || false;
-  const triggerTime = ($('ns-trigger') || {}).value || '12:00';
-  const cfg = { start_time: start, end_time: end, seat, auto_daily: autoDaily, trigger_time: triggerTime };
+  const cfg = { start_time: start, end_time: '', seat, auto_daily: autoDaily, trigger_time: triggerTime };
   const { ok } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/nap_config`,
     { method:'POST', body: cfg });
   if(ok){
@@ -1777,8 +1755,10 @@ async function saveNapSettings(){
 async function doNap(){
   if(!state.todayResv){ toast('今日无预约','info'); return; }
   const start = ($('nap-start') || {}).value;
-  const end = ($('nap-end') || {}).value;
-  if(!start || !end || start >= end){ toast('请检查时间段','error'); return; }
+  // end 继承当前预约结束时间
+  const end = ((state.todayResv.resvEndTime || '').split(' ')[1] || '').slice(0,5);
+  if(!start || !end){ toast('请检查时间','error'); return; }
+  if(start >= end){ toast('回来时间晚于原预约结束','error'); return; }
 
   const seatMode = ($('nap-seat-mode') || {}).value;
   let seat = '';
