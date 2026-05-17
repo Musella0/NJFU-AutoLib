@@ -160,7 +160,7 @@ def register():
     # 迁移游客数据到真实 uid
     _migrate_guest_data(db, uid)
     client.close()
-    return jsonify({"message": "注册成功", "uid": uid}), 200
+    return jsonify({"message": "注册成功", "uid": uid, "nickname": ""}), 200
 
 
 @app.route("/api/auth/login", methods=["POST"])
@@ -183,8 +183,9 @@ def login():
     session["web_uid"] = uid
     # 迁移游客数据到真实 uid
     _migrate_guest_data(db, uid)
+    nickname = (user.get("nickname") or "").strip()
     client.close()
-    return jsonify({"message": "登录成功", "uid": uid}), 200
+    return jsonify({"message": "登录成功", "uid": uid, "nickname": nickname}), 200
 
 
 @app.route("/api/auth/logout", methods=["POST"])
@@ -196,10 +197,47 @@ def logout():
 @app.route("/api/auth/me", methods=["GET"])
 def auth_me():
     if "web_uid" in session:
-        return jsonify({"logged_in": True, "uid": session["web_uid"], "is_guest": False}), 200
+        client, db = get_db()
+        user = db.web_users.find_one({"uid": session["web_uid"]}) or {}
+        nickname = (user.get("nickname") or "").strip()
+        client.close()
+        return jsonify({"logged_in": True, "uid": session["web_uid"], "nickname": nickname, "is_guest": False}), 200
     if "guest_uid" in session:
-        return jsonify({"logged_in": False, "uid": session["guest_uid"], "is_guest": True}), 200
-    return jsonify({"logged_in": False, "is_guest": True}), 200
+        return jsonify({"logged_in": False, "uid": session["guest_uid"], "nickname": "", "is_guest": True}), 200
+    return jsonify({"logged_in": False, "nickname": "", "is_guest": True}), 200
+
+
+@app.route("/api/auth/profile", methods=["POST"])
+def update_profile():
+    """登录用户更新昵称 / 密码。两个字段都可选，留空即不修改对应字段。"""
+    if "web_uid" not in session:
+        return jsonify({"error": "请先登录"}), 401
+    data = request.get_json() or {}
+    uid = session["web_uid"]
+
+    update = {}
+    if "nickname" in data:
+        nick = (data.get("nickname") or "").strip()
+        if len(nick) > 30:
+            return jsonify({"error": "昵称最多 30 个字符"}), 400
+        update["nickname"] = nick
+    if data.get("password"):
+        pw = data["password"]
+        if len(pw) < 4:
+            return jsonify({"error": "密码至少 4 位"}), 400
+        update["password"] = generate_password_hash(pw)
+
+    if not update:
+        return jsonify({"error": "没有要更新的内容"}), 400
+
+    client, db = get_db()
+    db.web_users.update_one({"uid": uid}, {"$set": update})
+    client.close()
+    return jsonify({
+        "message": "已更新",
+        "uid": uid,
+        "nickname": update.get("nickname", "")
+    }), 200
 
 
 # ==================== Admin Auth (2FA) ====================

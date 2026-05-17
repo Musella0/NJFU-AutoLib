@@ -6,6 +6,7 @@ const state = {
   noticesCollapsed: false,
   isGuest: true,
   uid: '',
+  nickname: '',       // 可选显示名，覆盖 uid 显示
   accounts: [],       // list of account summaries
   currentPid: '',     // currently selected pid
   currentCfg: null,   // full detail for currentPid
@@ -129,9 +130,11 @@ async function checkAuth(){
     if(data.logged_in){
       state.isGuest = false;
       state.uid = data.uid;
+      state.nickname = data.nickname || '';
     }else{
       state.isGuest = true;
       state.uid = data.uid || '';
+      state.nickname = '';
     }
   }catch(e){
     state.isGuest = true;
@@ -146,6 +149,7 @@ function updateAuthUI(){
   const mo = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][dt.getMonth()];
   $('date').textContent = `${wd} · ${mo} ${dt.getDate()} · ${dt.getFullYear()}`;
 
+  const profileBtn = $('settings-profile-btn');
   if(state.isGuest){
     hello.textContent = '你好，同学 ☕';
     $('settings-uid').textContent = '游客';
@@ -156,12 +160,18 @@ function updateAuthUI(){
     $('settings-auth-btn').style.display = '';
     $('settings-auth-btn').textContent = '登录';
     $('settings-auth-btn').onclick = () => openSheet('login');
+    if(profileBtn) profileBtn.style.display = 'none';
     $('logout-card').style.display = 'none';
   }else{
-    hello.textContent = `你好，${state.uid} ☕`;
-    $('settings-uid').textContent = state.uid;
-    $('settings-accounts-meta').textContent = `已登录 · ${state.accounts.length} 个学号`;
+    const name = state.nickname || state.uid;
+    hello.textContent = `你好，${name} ☕`;
+    $('settings-uid').textContent = name;
+    const subMeta = state.nickname
+      ? `已登录 · @${state.uid} · ${state.accounts.length} 个学号`
+      : `已登录 · ${state.accounts.length} 个学号`;
+    $('settings-accounts-meta').textContent = subMeta;
     $('settings-auth-btn').style.display = 'none';
+    if(profileBtn) profileBtn.style.display = '';
     $('logout-card').style.display = '';
   }
 }
@@ -181,12 +191,35 @@ async function doAuth(){
     toast(data.message || '成功', 'success');
     state.isGuest = false;
     state.uid = data.uid;
+    state.nickname = data.nickname || '';
     updateAuthUI();
     closeSheet();
     await loadAccounts();
     await loadHome();
   }else{
     toast(data.error || '失败', 'error');
+  }
+}
+
+async function saveProfile(){
+  const nick = $('pf-nick').value.trim();
+  const pw = $('pf-pass').value;
+  const nickChanged = nick !== (state.nickname || '');
+  if(!pw && !nickChanged){
+    toast('没有要更新的内容','info');
+    return;
+  }
+  const body = {};
+  if(nickChanged) body.nickname = nick;
+  if(pw) body.password = pw;
+  const { ok, data } = await api('/api/auth/profile', { method:'POST', body });
+  if(ok){
+    if('nickname' in body) state.nickname = data.nickname || '';
+    toast(data.message || '已保存','success');
+    closeSheet();
+    updateAuthUI();
+  }else{
+    toast(data.error || '保存失败','error');
   }
 }
 
@@ -200,6 +233,7 @@ async function doLogout(){
   await api('/api/auth/logout', { method:'POST' });
   state.isGuest = true;
   state.uid = '';
+  state.nickname = '';
   state.accounts = [];
   state.currentPid = '';
   state.currentCfg = null;
@@ -1454,6 +1488,19 @@ const SHEETS = {
       <div class="field"><label>密码</label><input type="password" id="auth-pass" placeholder="至少4位"></div>
     </div>
     <button class="btn accent mt-lg" id="auth-btn" style="width:100%" onclick="doAuth()">登录</button>
+  `,
+  profile: () => `
+    <div class="grab"></div>
+    <h3>账号资料</h3>
+    <div class="desc">昵称会替代用户名 <strong>${escHtml(state.uid)}</strong> 显示。各字段留空即不修改。</div>
+    <div class="col gap-sm">
+      <div class="field"><label>昵称（可选）</label><input type="text" id="pf-nick" maxlength="30" placeholder="清空 = 恢复用 ${escHtml(state.uid)}" value="${escHtml(state.nickname || '')}"></div>
+      <div class="field"><label>新密码（可选）</label><input type="password" id="pf-pass" placeholder="留空 = 不修改"></div>
+    </div>
+    <div class="row-flex mt-lg">
+      <button class="btn ghost grow" onclick="closeSheet()">取消</button>
+      <button class="btn accent grow" onclick="saveProfile()">保存</button>
+    </div>
   `,
   accounts: () => `
     <div class="grab"></div>
