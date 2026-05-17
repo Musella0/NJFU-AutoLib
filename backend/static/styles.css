@@ -187,6 +187,11 @@ body.no-wobble .chip,body.no-wobble .pill{border-radius:999px !important}
 .chip .x:hover{color:var(--danger)}
 .chip.add{border-style:dashed;color:var(--ink3);background:transparent}
 .chip.add:hover{color:var(--accent);border-color:var(--accent)}
+.chip.draggable{cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none}
+.chip.draggable:active{cursor:grabbing}
+.chip.draggable .grip{font-family:var(--mono);font-size:10px;color:var(--ink4);letter-spacing:-1px;line-height:1}
+.chip.dragging{opacity:.85;box-shadow:0 4px 12px rgba(0,0,0,.18);cursor:grabbing;z-index:50;position:relative;background:var(--accent-soft);border-color:var(--accent)}
+.chip.drag-over{border-color:var(--accent);background:var(--accent-soft)}
 
 /* ========= Tomorrow strip ========= */
 .tomorrow{
@@ -222,15 +227,32 @@ body.no-wobble .chip,body.no-wobble .pill{border-radius:999px !important}
 /* ========= Week bar ========= */
 .week{padding:16px}
 .week .rows{margin-top:10px;position:relative}
-.week .hours-row{height:14px;margin-bottom:2px}
+.week .hours-row{height:18px;margin-bottom:2px}
 .week .scale .tick{
   position:absolute;top:0;
-  font-family:var(--mono);font-size:9px;color:var(--ink3);
+  font-family:var(--mono);font-size:11px;font-weight:600;color:var(--ink2);
   transform:translateX(-50%);line-height:1;
 }
 .week .scale .tick:first-child{transform:translateX(0)}
 .week .scale .tick:last-child{transform:translateX(-100%)}
+.week .scale .tick::after{
+  content:'';position:absolute;left:50%;top:13px;
+  width:1px;height:5px;background:var(--ink3);
+  transform:translateX(-50%);
+}
+.week .scale .tick:first-child::after{left:0;transform:none}
+.week .scale .tick:last-child::after{left:auto;right:0;transform:none}
 .week .row{position:relative;height:18px;margin-bottom:5px;display:flex;align-items:center}
+/* 每日 track 背景：12/16/20 处竖向虚线 */
+.week .row:not(.hours-row) .track{
+  background-image:
+    repeating-linear-gradient(to bottom, var(--ink4) 0 3px, transparent 3px 6px),
+    repeating-linear-gradient(to bottom, var(--ink4) 0 3px, transparent 3px 6px),
+    repeating-linear-gradient(to bottom, var(--ink4) 0 3px, transparent 3px 6px);
+  background-size: 1px 100%, 1px 100%, 1px 100%;
+  background-position: 28.57% 0, 57.14% 0, 85.71% 0;
+  background-repeat: no-repeat;
+}
 .week .row .day{
   width:60px;text-align:left;padding-right:8px;
   font-family:var(--hand);font-size:13px;color:var(--ink2);flex-shrink:0;
@@ -244,7 +266,7 @@ body.no-wobble .chip,body.no-wobble .pill{border-radius:999px !important}
 .week .row .day .tag.dim{background:var(--ink);color:#fff}
 .week .row .day.today{color:var(--accent);font-weight:700}
 .week .row .day.off{color:var(--ink4)}
-.week .track{position:relative;flex:1;height:100%}
+.week .track{position:relative;flex:1;height:100%;margin-left:8px}
 .week .bar{
   position:absolute;height:12px;top:3px;
   border:1.5px solid var(--line);border-radius:4px;

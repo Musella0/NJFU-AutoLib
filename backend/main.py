@@ -106,13 +106,26 @@ def _get_decrypted_cfg(pid: str, uid: str):
 
 # ==================== Pages ====================
 
+def _static_v():
+    """以静态目录最新 mtime 作为版本号，防止浏览器缓存旧资源"""
+    try:
+        static_dir = os.path.join(app.root_path, "static")
+        return int(max(
+            os.path.getmtime(os.path.join(static_dir, f))
+            for f in os.listdir(static_dir)
+            if os.path.isfile(os.path.join(static_dir, f))
+        ))
+    except Exception:
+        return 0
+
+
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", static_v=_static_v())
 
 @app.route("/admin")
 def admin():
-    return render_template("admin.html")
+    return render_template("admin.html", static_v=_static_v())
 
 
 # ==================== User Auth ====================

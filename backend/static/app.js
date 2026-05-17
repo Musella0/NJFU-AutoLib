@@ -488,8 +488,10 @@ function renderCfgSeats(){
   const seats = (state.currentCfg && state.currentCfg.seat_list) || [];
   seats.forEach((s, i) => {
     const chip = document.createElement('span');
-    chip.className = 'chip';
-    chip.innerHTML = `<span class="ord">${i+1}</span>${escHtml(s)}<span class="x" onclick="removeCfgSeat(${i})">×</span>`;
+    chip.className = 'chip draggable';
+    chip.dataset.idx = i;
+    chip.innerHTML = `<span class="grip">⋮⋮</span><span class="ord">${i+1}</span>${escHtml(s)}<span class="x" onclick="removeCfgSeat(${i})">×</span>`;
+    chip.addEventListener('pointerdown', onSeatPointerDown);
     list.appendChild(chip);
   });
   const add = document.createElement('span');
@@ -502,6 +504,75 @@ function renderCfgSeats(){
 function removeCfgSeat(i){
   if(!state.currentCfg) return;
   state.currentCfg.seat_list = (state.currentCfg.seat_list || []).filter((_, idx) => idx !== i);
+  renderCfgSeats();
+}
+
+// ---------- seat priority drag-to-reorder ----------
+let _seatDrag = null;
+
+function onSeatPointerDown(e){
+  if(e.target && e.target.classList && e.target.classList.contains('x')) return;
+  if(e.pointerType === 'mouse' && e.button !== 0) return;
+  const chip = e.currentTarget;
+  _seatDrag = {
+    startX: e.clientX, startY: e.clientY,
+    chip, list: chip.parentElement,
+    idx: parseInt(chip.dataset.idx, 10),
+    overIdx: null,
+    started: false,
+    pointerId: e.pointerId,
+  };
+  document.addEventListener('pointermove', onSeatPointerMove);
+  document.addEventListener('pointerup', onSeatPointerUp);
+  document.addEventListener('pointercancel', onSeatPointerUp);
+}
+
+function onSeatPointerMove(e){
+  if(!_seatDrag || e.pointerId !== _seatDrag.pointerId) return;
+  const dx = e.clientX - _seatDrag.startX;
+  const dy = e.clientY - _seatDrag.startY;
+  if(!_seatDrag.started){
+    if(Math.hypot(dx, dy) < 5) return;
+    _seatDrag.started = true;
+    _seatDrag.chip.classList.add('dragging');
+    try{ _seatDrag.chip.setPointerCapture(_seatDrag.pointerId); }catch(_){}
+  }
+  if(e.cancelable) e.preventDefault();
+  // chip 跟随指针，避免遮挡命中检测
+  _seatDrag.chip.style.transform = `translate(${dx}px, ${dy}px) scale(1.05)`;
+  _seatDrag.chip.style.pointerEvents = 'none';
+  const els = document.elementsFromPoint(e.clientX, e.clientY);
+  let over = null;
+  for(const el of els){
+    if(el.classList && el.classList.contains('chip') && el.parentElement === _seatDrag.list && el !== _seatDrag.chip && !el.classList.contains('add')){
+      over = el; break;
+    }
+  }
+  _seatDrag.list.querySelectorAll('.chip.drag-over').forEach(c => c.classList.remove('drag-over'));
+  if(over){
+    over.classList.add('drag-over');
+    _seatDrag.overIdx = parseInt(over.dataset.idx, 10);
+  }else{
+    _seatDrag.overIdx = null;
+  }
+}
+
+function onSeatPointerUp(e){
+  if(!_seatDrag || e.pointerId !== _seatDrag.pointerId) return;
+  document.removeEventListener('pointermove', onSeatPointerMove);
+  document.removeEventListener('pointerup', onSeatPointerUp);
+  document.removeEventListener('pointercancel', onSeatPointerUp);
+  const { chip, started, idx, overIdx, list } = _seatDrag;
+  chip.classList.remove('dragging');
+  chip.style.transform = '';
+  chip.style.pointerEvents = '';
+  list.querySelectorAll('.chip.drag-over').forEach(c => c.classList.remove('drag-over'));
+  _seatDrag = null;
+  if(!started || overIdx === null || overIdx === idx) return;
+  const arr = (state.currentCfg && state.currentCfg.seat_list) || [];
+  if(idx < 0 || idx >= arr.length || overIdx < 0 || overIdx >= arr.length) return;
+  const [moved] = arr.splice(idx, 1);
+  arr.splice(overIdx, 0, moved);
   renderCfgSeats();
 }
 
