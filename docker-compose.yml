@@ -96,5 +96,7 @@ services:
 
 volumes:
   mongo_data:
+    external: true
+    name: autolib-docker_mongo_data
   api_logs:
   scheduler_logs:
