@@ -79,4 +79,4 @@ autolib/
 4. 生产环境建议配合 Nginx/Caddy 加 HTTPS，并设置 `SESSION_COOKIE_SECURE=true`
 5. 周五图书馆 20:00 关门，预约结束时间超过 20:00 的会自动截断
 
-![](https://storage.moegirl.org.cn/moegirl/commons/0/02/%E8%BF%99%E7%A7%8D%E4%B8%9C%E8%A5%BF%E5%B0%8F%E8%8C%83%E5%9B%B4%E4%BA%AB%E5%8F%97%E5%B0%B1%E5%8F%AF%E4%BB%A5%E4%BA%86.png)
+[![](https://s41.ax1x.com/2026/05/17/pevTaxe.webp)](https://imgchr.com/i/pevTaxe)
