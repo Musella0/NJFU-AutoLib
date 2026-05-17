@@ -223,8 +223,41 @@
         <button class="btn accent grow" id="btn-save-cfg" onclick="saveCfg()">保存配置</button>
       </div>
 
-      <div class="mt-lg" style="text-align:center">
-        <button class="btn sm ghost" onclick="reserveNow()">⚡ 用当前配置立即抢一次</button>
+      <div class="mt-lg">
+        <button class="btn accent" style="width:100%" id="btn-reserve-now" onclick="toggleReserveNowPanel()">⚡ 立即预约</button>
+      </div>
+
+      <div id="reserve-now-panel" class="box pad mt-lg" style="display:none">
+        <div class="label" style="margin-bottom:12px">本次预约</div>
+        <div class="col gap-sm">
+          <div class="field">
+            <label>区域</label>
+            <select id="rn-location" onchange="onRnLocationChange()">
+              <option value="">加载中…</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>座位</label>
+            <select id="rn-seat">
+              <option value="">请先选区域</option>
+            </select>
+          </div>
+          <div class="row-flex mt">
+            <div class="field">
+              <label>开始</label>
+              <input type="time" id="rn-start" value="08:00" oninput="checkRnDuration()">
+            </div>
+            <div class="field">
+              <label>结束</label>
+              <input type="time" id="rn-end" value="22:00" oninput="checkRnDuration()">
+            </div>
+          </div>
+          <div class="tiny mt" id="rn-duration-hint" style="color:var(--warn);display:none"></div>
+        </div>
+        <div class="row-flex mt-lg">
+          <button class="btn ghost grow" onclick="toggleReserveNowPanel()">取消</button>
+          <button class="btn accent grow" onclick="submitReserveNow()">确认预约</button>
+        </div>
       </div>
 
     </div>

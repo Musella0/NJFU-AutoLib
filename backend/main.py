@@ -674,6 +674,10 @@ def reserve_custom(pid):
         return jsonify({"error": "缺少 seat / start_time / end_time"}), 400
     if start_time >= end_time:
         return jsonify({"error": "结束时间必须晚于开始时间"}), 400
+    from datetime import datetime as _dt
+    _dur_min = (_dt.strptime(end_time, "%H:%M") - _dt.strptime(start_time, "%H:%M")).total_seconds() / 60
+    if _dur_min < 120:
+        return jsonify({"error": "预约时长至少 2 小时（120 分钟）"}), 400
 
     try:
         from scheduled_task import get_seat_ids

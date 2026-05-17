@@ -595,6 +595,110 @@ async function reserveNow(){
   }
 }
 
+// ---------- reserve-now panel (config page) ----------
+let _rnSeats = null;
+
+function toggleReserveNowPanel(){
+  const panel = $('reserve-now-panel');
+  const opening = panel.style.display === 'none';
+  panel.style.display = opening ? '' : 'none';
+  if(opening && !_rnSeats) loadReserveNowSeats();
+}
+
+async function loadReserveNowSeats(){
+  const { ok, data } = await api('/api/public/seats');
+  if(!ok || !data.seats){ toast('加载座位列表失败','error'); return; }
+  _rnSeats = data.seats;
+  const locSel = $('rn-location');
+  locSel.innerHTML = '<option value="">选择区域</option>' +
+    Object.keys(_rnSeats).map(loc => `<option value="${escHtml(loc)}">${escHtml(loc)}</option>`).join('');
+  onRnLocationChange();
+}
+
+function onRnLocationChange(){
+  const loc = $('rn-location').value;
+  const seatSel = $('rn-seat');
+  if(!loc || !_rnSeats || !_rnSeats[loc]){
+    seatSel.innerHTML = '<option value="">请先选区域</option>';
+    return;
+  }
+  seatSel.innerHTML = _rnSeats[loc].map(s => `<option value="${escHtml(s)}">${escHtml(s)}</option>`).join('');
+}
+
+function checkRnDuration(){
+  const start = $('rn-start').value;
+  const end   = $('rn-end').value;
+  const hint  = $('rn-duration-hint');
+  if(!start || !end){ hint.style.display='none'; return; }
+  const [sh,sm] = start.split(':').map(Number);
+  const [eh,em] = end.split(':').map(Number);
+  const dur = (eh*60+em) - (sh*60+sm);
+  if(dur < 120)       { hint.textContent='最短 2 小时'; hint.style.display=''; }
+  else if(dur > 900)  { hint.textContent='最长 15 小时'; hint.style.display=''; }
+  else                { hint.style.display='none'; }
+}
+
+function showReserveResult(msg, success){
+  let body;
+  if(success){
+    const time = (msg.match(/(\d{2}:\d{2})-(\d{2}:\d{2})/) || []);
+    const timeStr = time[1] ? `${time[1]} – ${time[2]}` : '';
+    const locMatch = msg.match(/新增成功\s+(.+)$/);
+    const loc = locMatch ? locMatch[1].trim() : '';
+    body = `
+      <div style="text-align:center;font-size:36px;margin:4px 0 12px">✅</div>
+      <div class="h2" style="text-align:center;margin-bottom:16px">预约成功</div>
+      ${timeStr ? `<div class="row-between box tight ghost"><span class="sub">时段</span><span>${escHtml(timeStr)}</span></div>` : ''}
+      ${loc     ? `<div class="row-between box tight ghost mt"><span class="sub">位置</span><span>${escHtml(loc)}</span></div>` : ''}
+      <button class="btn accent mt-lg" style="width:100%" onclick="closeSheet()">好的</button>`;
+  } else {
+    const details = [];
+    msg.replace(/\n/g, ' ').split(/(?=\d+F-[A-Z]\d+)/).forEach(chunk => {
+      const seat   = (chunk.match(/^(\d+F-[A-Z]\d+)/) || [])[1];
+      const reason = (chunk.match(/预约失败[：:]\s*(.+?)(?:\s{2,}|$)/) || [])[1];
+      if(seat && reason) details.push({ seat, reason: reason.trim() });
+    });
+    body = `
+      <div style="text-align:center;font-size:36px;margin:4px 0 12px">❌</div>
+      <div class="h2" style="text-align:center;margin-bottom:16px">预约失败</div>
+      ${details.length ? details.map(d => `
+        <div class="box tight ghost mt">
+          <div class="row-between"><span class="sub">座位</span><span>${escHtml(d.seat)}</span></div>
+          <div class="row-between mt"><span class="sub">原因</span><span style="color:var(--danger);text-align:right;max-width:68%">${escHtml(d.reason)}</span></div>
+        </div>`).join('') :
+        `<div class="box tight ghost" style="color:var(--ink3);font-size:13px">${escHtml(msg)}</div>`}
+      <button class="btn ghost mt-lg" style="width:100%" onclick="closeSheet()">知道了</button>`;
+  }
+  $('sheet-content').innerHTML = `<div class="grab"></div>${body}`;
+  const sc = $('scrim');
+  sc.classList.remove('center');
+  sc.classList.add('show');
+}
+
+async function submitReserveNow(){
+  if(!state.currentPid){ toast('请先添加学号','error'); return; }
+  const seat  = $('rn-seat').value;
+  const start = $('rn-start').value;
+  const end   = $('rn-end').value;
+  if(!seat)         { toast('请选择座位','error'); return; }
+  if(!start||!end)  { toast('请填写时间','error'); return; }
+  if(start >= end)  { toast('结束时间必须晚于开始时间','error'); return; }
+
+  toast('正在预约…','info');
+  const { ok, data } = await api(
+    `/api/my/accounts/${encodeURIComponent(state.currentPid)}/reserve_custom`,
+    { method:'POST', body: { seat, start_time: start, end_time: end } }
+  );
+  if(ok){
+    toggleReserveNowPanel();
+    loadReservations();
+    loadNotices();
+    showReserveResult(data.result || (data.success ? '预约成功' : '预约完成'), data.success);
+  }else{
+    toast(data.error || '预约失败','error');
+  }
+}
+
 // ---------- reservations (today + tomorrow) ----------
 function localDateStr(offsetDays){
   const d = new Date(Date.now() + (offsetDays || 0) * 86400000);
@@ -748,7 +852,7 @@ function renderTodayCard(opt){
     return;
   }
 
-  if (resv.resvStatus === 3281) {
+  if (resv.resvStatus === 3281 || resv.resvStatus === 1169) {
     card.style.display = '';
     empty.style.display = 'none';
     card.innerHTML = `
@@ -845,7 +949,7 @@ function renderTomorrowCard(opt){
 }
 
 function fmtResvStatus(s){
-  return { 1027:'已预约', 1093:'使用中', 3141:'暂离', 3265:'已结束', 3281:'已违约' }[s] || `状态(${s})`;
+  return { 1027:'已预约', 1093:'使用中', 1169:'已违约', 3141:'暂离', 3265:'已结束', 3281:'已违约' }[s] || `状态(${s})`;
 }
 
 function renderTomorrowStrip(){

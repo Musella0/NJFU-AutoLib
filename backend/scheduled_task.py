@@ -236,6 +236,11 @@ def calculate_reservation_time(res_item: Dict[str, Any]) -> List[Tuple[str, str]
             end_time = "20:00"
         if begin_time >= end_time:
             continue
+        # 跳过不满 120 分钟的时段（图书馆最低预约时长限制）
+        _b = datetime.strptime(begin_time, "%H:%M")
+        _e = datetime.strptime(end_time, "%H:%M")
+        if (_e - _b).total_seconds() < 7200:
+            continue
         result.append((
             f"{date_str} {begin_time}:00",
             f"{date_str} {end_time}:00"
@@ -521,8 +526,8 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
         shift_minutes = 60 if protection_minutes == -1 else protection_minutes
 
         new_begin = begin_time + timedelta(minutes=shift_minutes)
-        duration = (end_time - new_begin).total_seconds() / 3600
-        new_end = end_time + timedelta(minutes=shift_minutes) if duration < 2 else end_time
+        # 确保重约时长不低于 120 分钟（图书馆最低限制）
+        new_end = max(end_time, new_begin + timedelta(hours=2))
 
         new_begin_str = f"{date_str} {new_begin.strftime('%H:%M:%S')}"
         new_end_str = f"{date_str} {new_end.strftime('%H:%M:%S')}"
