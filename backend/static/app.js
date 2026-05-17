@@ -589,45 +589,46 @@ async function saveCfg(){
   }
 }
 
-async function reserveNow(){
-  if(!state.currentPid){ toast('请先添加学号','error'); return; }
-  if(!confirm('立即用当前配置抢一次座？')) return;
-
-  toast('正在用当前配置抢座...','info');
-  const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/reserve_now`, { method:'POST' });
-  if(ok){
-    toast(data.success ? '预约成功 🎉' : '预约已完成', data.success ? 'success' : 'info');
-    loadReservations();
-    loadNotices();
-    if(data.result) alert('预约结果：\n\n' + data.result);
-  }else{
-    toast(data.error || '预约失败','error');
-  }
-}
-
-// ---------- reserve-now panel (config page) ----------
+// ---------- reserve-now sheet ----------
 let _rnSeats = null;
 
-function toggleReserveNowPanel(){
-  const panel = $('reserve-now-panel');
-  const opening = panel.style.display === 'none';
-  panel.style.display = opening ? '' : 'none';
-  if(opening && !_rnSeats) loadReserveNowSeats();
+async function openReserveNow(defaultSeat){
+  if(!state.currentPid){ toast('请先添加学号','error'); return; }
+  if(!_rnSeats){
+    const { ok, data } = await api('/api/public/seats');
+    if(!ok || !data.seats){ toast('加载座位列表失败','error'); return; }
+    _rnSeats = data.seats;
+  }
+  openSheet('reserve-now');
+  const locSel = $('rn-location');
+  if(locSel){
+    locSel.innerHTML = '<option value="">选择区域</option>' +
+      Object.keys(_rnSeats).map(loc => `<option value="${escHtml(loc)}">${escHtml(loc)}</option>`).join('');
+  }
+  const seatList = (state.currentCfg && state.currentCfg.seat_list) || [];
+  const pick = defaultSeat || seatList[0];
+  if(pick) selectRnSeat(pick);
 }
 
-async function loadReserveNowSeats(){
-  const { ok, data } = await api('/api/public/seats');
-  if(!ok || !data.seats){ toast('加载座位列表失败','error'); return; }
-  _rnSeats = data.seats;
+function selectRnSeat(seatName){
+  if(!_rnSeats || !seatName) return;
+  let zone = '';
+  for(const [loc, seats] of Object.entries(_rnSeats)){
+    if(seats.includes(seatName)){ zone = loc; break; }
+  }
+  if(!zone){ toast(`未找到「${seatName}」所在区域`,'error'); return; }
   const locSel = $('rn-location');
-  locSel.innerHTML = '<option value="">选择区域</option>' +
-    Object.keys(_rnSeats).map(loc => `<option value="${escHtml(loc)}">${escHtml(loc)}</option>`).join('');
+  if(!locSel) return;
+  locSel.value = zone;
   onRnLocationChange();
+  const seatSel = $('rn-seat');
+  if(seatSel) seatSel.value = seatName;
 }
 
 function onRnLocationChange(){
   const loc = $('rn-location').value;
   const seatSel = $('rn-seat');
+  if(!seatSel) return;
   if(!loc || !_rnSeats || !_rnSeats[loc]){
     seatSel.innerHTML = '<option value="">请先选区域</option>';
     return;
@@ -700,7 +701,7 @@ async function submitReserveNow(){
     { method:'POST', body: { seat, start_time: start, end_time: end } }
   );
   if(ok){
-    toggleReserveNowPanel();
+    closeSheet();
     loadReservations();
     loadNotices();
     showReserveResult(data.result || (data.success ? '预约成功' : '预约完成'), data.success);
@@ -830,7 +831,7 @@ function renderTodayCard(opt){
       <div class="sub" style="margin-top:6px">${reserveOn ? '按当前配置今日无座位，或抢座进行中' : '自动预约已暂停'}</div>
       ${napHint}
       <div class="actions" style="justify-content:center">
-        <button class="btn accent" onclick="reserveNow()">⚡ 立即预约</button>
+        <button class="btn accent" onclick="openReserveNow()">⚡ 立即预约</button>
       </div>`;
     return;
   }
@@ -870,7 +871,10 @@ function renderTodayCard(opt){
       <div class="label">今日座位</div>
       <div class="seat">${seatHtml}</div>
       <div class="time">${timeHtml}</div>
-      <div class="meta-row"><span class="pill warn">⚠ 今日预约已违约</span></div>`;
+      <div class="meta-row"><span class="pill warn">⚠ 今日预约已违约</span></div>
+      <div class="actions" style="margin-top:10px;justify-content:center">
+        <button class="btn sm accent" onclick="openReserveNow('${escHtml(seat)}')">⚡ 再次预约</button>
+      </div>`;
     return;
   }
 
@@ -1231,6 +1235,34 @@ async function loadSeats(){
   }
 }
 
+function frequentSeatChips(zoneId, seatId){
+  const list = (state.currentCfg && state.currentCfg.seat_list) || [];
+  const chips = list.slice(0, 3);
+  if(!chips.length) return '';
+  return `
+    <div class="box tight" style="background:#dbeafe;border:1px solid #93c5fd;margin-bottom:8px">
+      <div class="tiny" style="color:#1e40af;margin-bottom:6px;font-weight:600">常用座位 · 点击快速选择</div>
+      <div class="row-flex" style="flex-wrap:wrap;gap:6px">
+        ${chips.map(s => `<button type="button" class="btn sm" style="background:#bfdbfe;color:#1e3a8a;border:0" onclick="fillSeatPicker('${escHtml(s)}','${zoneId}','${seatId}')">${escHtml(s)}</button>`).join('')}
+      </div>
+    </div>`;
+}
+
+function fillSeatPicker(seatName, zoneId, seatId){
+  if(!seatName || !state.allSeats) return;
+  let zone = '';
+  for(const [z, seats] of Object.entries(state.allSeats)){
+    if(seats.includes(seatName)){ zone = z; break; }
+  }
+  if(!zone){ toast(`未找到「${seatName}」所在区域`,'error'); return; }
+  const zSel = $(zoneId);
+  if(!zSel) return;
+  zSel.value = zone;
+  onZone(zone, seatId);
+  const sSel = $(seatId);
+  if(sSel) sSel.value = seatName;
+}
+
 function sortedZones(){
   const ORDER = ['二楼A区','二楼B区','六楼A区','七楼A区','七楼B区','三楼夹层','三楼A区','三楼B区','三楼C区','四楼夹层','四楼A区','五楼A区'];
   const keys = Object.keys(state.allSeats);
@@ -1535,6 +1567,51 @@ const SHEETS = {
     </div>
   `,
 
+  'reserve-now': () => {
+    const seatList = (state.currentCfg && state.currentCfg.seat_list) || [];
+    const chips = seatList.slice(0, 3);
+    return `
+    <div class="grab"></div>
+    <h3>⚡ 立即预约</h3>
+    ${chips.length ? `
+      <div class="box tight mt" style="background:#dbeafe;border:1px solid #93c5fd">
+        <div class="tiny" style="color:#1e40af;margin-bottom:6px;font-weight:600">常用座位 · 点击快速选择</div>
+        <div class="row-flex" style="flex-wrap:wrap;gap:6px">
+          ${chips.map(s => `<button class="btn sm" style="background:#bfdbfe;color:#1e3a8a;border:0" onclick="selectRnSeat('${escHtml(s)}')">${escHtml(s)}</button>`).join('')}
+        </div>
+      </div>
+    ` : ''}
+    <div class="col gap-sm mt">
+      <div class="field">
+        <label>区域</label>
+        <select id="rn-location" onchange="onRnLocationChange()">
+          <option value="">加载中…</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>座位</label>
+        <select id="rn-seat">
+          <option value="">请先选区域</option>
+        </select>
+      </div>
+      <div class="row-flex mt">
+        <div class="field">
+          <label>开始</label>
+          <input type="time" id="rn-start" value="08:00" oninput="checkRnDuration()">
+        </div>
+        <div class="field">
+          <label>结束</label>
+          <input type="time" id="rn-end" value="22:00" oninput="checkRnDuration()">
+        </div>
+      </div>
+      <div class="tiny" id="rn-duration-hint" style="color:var(--warn);display:none"></div>
+    </div>
+    <div class="row-flex mt-lg">
+      <button class="btn ghost grow" onclick="closeSheet()">取消</button>
+      <button class="btn accent grow" onclick="submitReserveNow()">确认预约</button>
+    </div>`;
+  },
+
   'nap-about': () => `
     <div class="grab"></div>
     <h3>😴 一键午休</h3>
@@ -1581,6 +1658,7 @@ const SHEETS = {
         </select>
       </div>
       <div id="nap-custom-seat" style="display:${defSeat ? 'block' : 'none'}">
+        ${frequentSeatChips('nap-zone','nap-seat-pick')}
         <div class="col gap-sm">
           <div class="field"><label>楼层 / 区域</label>
             <select id="nap-zone" onchange="onZone(this.value,'nap-seat-pick')">
@@ -1631,6 +1709,7 @@ const SHEETS = {
         </select>
       </div>
       <div id="ns-custom-seat" style="display:${defSeat ? 'block' : 'none'}">
+        ${frequentSeatChips('ns-zone','ns-seat-pick')}
         <div class="col gap-sm">
           <div class="field"><label>楼层 / 区域</label>
             <select id="ns-zone" onchange="onZone(this.value,'ns-seat-pick')">
