@@ -1525,6 +1525,27 @@ const SHEETS = {
     </div>
   `,
 
+  'nap-about': () => `
+    <div class="grab"></div>
+    <h3>😴 一键午休</h3>
+    <div class="desc">专为午休设计的快捷功能，出门吃饭前点一下，回来时座位还在。</div>
+    <div class="col gap-sm">
+      <div class="box tight" style="border-left:4px solid var(--accent)">
+        <div class="sub" style="font-weight:700">✓ 自动续约下午</div>
+        <div class="t">系统立即取消当前预约，并以相同座位重新预约下午时段（默认 14:00 起）</div>
+      </div>
+      <div class="box tight" style="border-left:4px solid var(--ok)">
+        <div class="sub" style="font-weight:700">✓ 每日自动触发</div>
+        <div class="t">在设置页开启后，每天到触发时刻（默认 12:05）自动执行，无需手动操作</div>
+      </div>
+      <div class="box tight" style="border-left:4px solid var(--danger)">
+        <div class="sub" style="font-weight:700">⚠ 极小占座风险</div>
+        <div class="t">取消到重新预约约需 1 秒，极低概率被他人抢占</div>
+      </div>
+    </div>
+    <button class="btn primary mt-lg" style="width:100%" onclick="closeSheet()">好的</button>
+  `,
+
   'nap-confirm': () => {
     const resv = state.todayResv;
     const currentSeat = (resv && resv.devInfo && resv.devInfo.devName) || '';
@@ -1828,7 +1849,7 @@ function openSheet(name){
   const tpl = SHEETS[name];
   content.innerHTML = tpl ? tpl() : '<div class="grab"></div><h3>未实现</h3>';
   sc.classList.add('show');
-  if(name === 'lp-info' || name === 'lp-warning' || name === 'cancel' || name === 'guest-data-notice' || name === 'nap-info') sc.classList.add('center');
+  if(name === 'lp-info' || name === 'lp-warning' || name === 'cancel' || name === 'guest-data-notice' || name === 'nap-info' || name === 'nap-about') sc.classList.add('center');
   else sc.classList.remove('center');
 }
 function closeSheet(){ $('scrim').classList.remove('show'); }
