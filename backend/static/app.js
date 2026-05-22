@@ -2062,7 +2062,7 @@ function renderVisitStats(d){
     return h > 0 ? (min > 0 ? `${h}h${min}m` : `${h}h`) : `${min}m`;
   };
   if(!d || d.total_visits === 0){
-    box.innerHTML = `<div class="sub" style="color:var(--ink3);text-align:center">还没有道馆记录</div>
+    box.innerHTML = `<div class="sub" style="color:var(--ink3);text-align:center">还没有学习记录</div>
       <div class="tiny mt" style="color:var(--ink3);text-align:center">系统检测到签到后自动记录</div>`;
     return;
   }
@@ -2099,7 +2099,6 @@ function renderVisitStats(d){
 async function loadHome(){
   renderHome();
   loadNotices();
-  loadVisitStats();
 }
 
 // 起止联动：开始时间变化时，重建结束下拉，只保留 > 开始 的档位
@@ -2130,6 +2129,7 @@ async function init(){
   await loadSeats();
   await loadAccounts();
   loadNotices();
+  loadVisitStats();
 }
 
 init();
