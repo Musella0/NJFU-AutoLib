@@ -45,6 +45,9 @@ services:
       - "${API_PORT:-5004}:5004"
     volumes:
       - api_logs:/app/logs
+      # 前端热更新：直接挂载源码目录，改 CSS/JS/HTML 后刷新浏览器即可
+      - ./backend/static:/app/static
+      - ./backend/templates:/app/templates
 
   # ==================== 定时预约任务 ====================
   scheduler:
