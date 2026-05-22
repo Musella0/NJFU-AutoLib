@@ -2120,11 +2120,45 @@ document.addEventListener('change', (e) => {
   endEl.innerHTML = endOpts.map(o => `<option value="${o}"${o===newEnd?' selected':''}>${o}</option>`).join('');
 });
 
+// ---------- theme ----------
+const THEME_KEY = 'autolib_theme';
+const THEME_ORDER = ['system', 'light', 'dark'];
+const THEME_LABEL = { system: '跟随系统', light: '亮色', dark: '暗色' };
+const THEME_ICON = {
+  system: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M9 21h6M12 17v4"/></svg>',
+  light:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>',
+  dark:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>'
+};
+function getTheme(){
+  const t = localStorage.getItem(THEME_KEY);
+  return (t === 'light' || t === 'dark') ? t : 'system';
+}
+function setTheme(t){
+  if(t !== 'light' && t !== 'dark') t = 'system';
+  localStorage.setItem(THEME_KEY, t);
+  document.documentElement.setAttribute('data-theme', t);
+  syncThemeUI();
+}
+function cycleTheme(){
+  const cur = getTheme();
+  const next = THEME_ORDER[(THEME_ORDER.indexOf(cur) + 1) % THEME_ORDER.length];
+  setTheme(next);
+}
+function syncThemeUI(){
+  const btn = $('theme-btn');
+  if(!btn) return;
+  const cur = getTheme();
+  btn.innerHTML = THEME_ICON[cur];
+  btn.title = THEME_LABEL[cur] + '（点击切换）';
+  btn.setAttribute('aria-label', '主题：' + THEME_LABEL[cur]);
+}
+
 // ---------- init ----------
 async function init(){
   // Wire scrim click-outside
   $('scrim').addEventListener('click', e => { if(e.target.id === 'scrim') closeSheet(); });
 
+  syncThemeUI();
   await checkAuth();
   await loadSeats();
   await loadAccounts();
