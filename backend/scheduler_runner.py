@@ -82,8 +82,9 @@ def main():
     )
     scheduler.add_job(
         run_visit_check,
-        'interval',
-        minutes=15,
+        'cron',
+        hour='8,10,12,14,16,18,20,22',
+        minute=0,
         id='visit_check',
         replace_existing=True
     )
