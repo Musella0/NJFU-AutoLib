@@ -30,6 +30,14 @@ def run_auto_nap_check():
     except Exception as e:
         logger.error(f"自动午休检查异常: {e}", exc_info=True)
 
+def run_visit_check():
+    """每15分钟扫描一次，记录已签到用户的道馆记录"""
+    try:
+        from scheduled_task import scan_and_record_visits
+        scan_and_record_visits()
+    except Exception as e:
+        logger.error(f"道馆签到检查异常: {e}", exc_info=True)
+
 def run_reservation_task():
     """执行一次完整的预约 + 迟到保护流程"""
     logger.info("========== 开始执行预约任务 ==========")
@@ -70,6 +78,13 @@ def main():
         'interval',
         minutes=1,
         id='auto_nap_check',
+        replace_existing=True
+    )
+    scheduler.add_job(
+        run_visit_check,
+        'interval',
+        minutes=15,
+        id='visit_check',
         replace_existing=True
     )
 

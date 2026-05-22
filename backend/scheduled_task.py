@@ -430,6 +430,38 @@ def _mark_seat_by_protection(pid: str, dev_name: str) -> None:
         log_with_user(logger, 'warning', pid, '迟到保护', f"标记 by_protection 失败: {str(e)}")
 
 
+def _record_visit_log(pid: str, uuid: str, target_time_str: str, seat_name: str) -> None:
+    """记录一次道馆（按 uuid upsert，防重复写入）"""
+    try:
+        date_str, time_range = target_time_str.split(' ')
+        begin_str, end_str = time_range.split('-', 1)
+        begin_dt = datetime.strptime(f"{date_str} {begin_str}", "%Y-%m-%d %H:%M:%S")
+        end_dt = datetime.strptime(f"{date_str} {end_str}", "%Y-%m-%d %H:%M:%S")
+        duration_minutes = int((end_dt - begin_dt).total_seconds() / 60)
+        device = db.devices.find_one({"devName": seat_name}, {"_id": 0, "location": 1})
+        location = device.get("location", "") if device else ""
+        now = datetime.now()
+        db.visit_logs.update_one(
+            {"uuid": uuid},
+            {"$setOnInsert": {
+                "pid": pid,
+                "uuid": uuid,
+                "seat_name": seat_name,
+                "location": location,
+                "planned_begin": begin_dt,
+                "planned_end": end_dt,
+                "planned_duration_minutes": duration_minutes,
+                "checkin_detected_at": now,
+                "created_at": now,
+            }},
+            upsert=True
+        )
+        log_with_user(logger, 'info', pid, '道馆统计',
+                      f"记录道馆 {seat_name} {date_str} 共{duration_minutes}分钟")
+    except Exception as e:
+        log_with_user(logger, 'warning', pid, '道馆统计', f"记录道馆失败: {str(e)}")
+
+
 def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str, Any]) -> None:
     """
     执行迟到保护动作
@@ -486,6 +518,7 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
                         if current_status in IN_LIBRARY_STATUSES:
                             log_with_user(logger, 'info', pid, '迟到保护',
                                 f"用户已在馆内（状态码: {current_status}），跳过迟到保护")
+                            _record_visit_log(pid, seat_dict['uuid'], seat_dict['target_time'], dev_name)
                             return
                         log_with_user(logger, 'info', pid, '迟到保护',
                             f"用户未签到（状态码: {current_status}），继续执行迟到保护")
@@ -788,6 +821,51 @@ def process_auto_naps() -> None:
             auto_nap_action(pid)
         else:
             log_with_user(logger, 'debug', pid, '自动午休', f"当前时间 {now.strftime('%H:%M')} 不匹配触发时间 {trigger}，跳过")
+
+def scan_and_record_visits() -> None:
+    """扫描所有用户今日预约，若检测到签到状态则记录道馆日志（每15分钟由调度器调用）"""
+    IN_LIBRARY_STATUSES = {1093, 3141}
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    try:
+        users = list(user_config_info.find(
+            {"owned_seat": {"$exists": True, "$ne": {}}, "verified": True},
+            {"pid": 1, "vpn_password": 1, "lib_password": 1, "owned_seat": 1}
+        ))
+    except Exception as e:
+        log_with_user(logger, 'error', '系统', '道馆统计', f"查询用户列表异常: {str(e)}")
+        return
+
+    for user in users:
+        pid = user.get("pid", "")
+        owned = user.get("owned_seat") or {}
+        if not any(
+            sd.get("target_time", "")[:10] == today_str
+            for seats in owned.values()
+            for sd in seats
+        ):
+            continue
+        try:
+            library = LibrarySystem(
+                username=pid,
+                password=_dec(user["lib_password"]),
+                vpn_password=_dec(user["vpn_password"])
+            )
+            res_list, _ = library.get_reservation_info()
+            if not res_list:
+                continue
+            for res in res_list:
+                if res.get("resvStatus") in IN_LIBRARY_STATUSES:
+                    uuid = res.get("uuid", "")
+                    begin_time = res.get("resvBeginTime", "")
+                    end_time = res.get("resvEndTime", "")
+                    dev_info = res.get("devInfo") or {}
+                    seat_name = dev_info.get("devName", "")
+                    if uuid and seat_name and begin_time and end_time:
+                        target_time_str = f"{begin_time}-{end_time[-8:]}"
+                        _record_visit_log(pid, uuid, target_time_str, seat_name)
+        except Exception as e:
+            log_with_user(logger, 'warning', pid, '道馆统计', f"扫描签到状态失败: {str(e)}")
+
 
 if __name__ == "__main__":
     """

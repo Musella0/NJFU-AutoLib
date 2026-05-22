@@ -2041,10 +2041,65 @@ function openSheet(name){
 }
 function closeSheet(){ $('scrim').classList.remove('show'); }
 
+// ---------- visit stats ----------
+async function loadVisitStats(){
+  const box = $('visit-stats-box');
+  if(!box) return;
+  try{
+    const { ok, data } = await api('/api/my/visit_stats');
+    if(ok) renderVisitStats(data);
+    else box.innerHTML = '<div class="tiny" style="color:var(--ink3);text-align:center">暂无道馆数据</div>';
+  }catch(e){
+    box.innerHTML = '<div class="tiny" style="color:var(--ink3);text-align:center">暂无道馆数据</div>';
+  }
+}
+
+function renderVisitStats(d){
+  const box = $('visit-stats-box');
+  if(!box) return;
+  const fmtH = m => {
+    const h = Math.floor(m / 60), min = m % 60;
+    return h > 0 ? (min > 0 ? `${h}h${min}m` : `${h}h`) : `${min}m`;
+  };
+  if(!d || d.total_visits === 0){
+    box.innerHTML = `<div class="sub" style="color:var(--ink3);text-align:center">还没有道馆记录</div>
+      <div class="tiny mt" style="color:var(--ink3);text-align:center">系统检测到签到后自动记录</div>`;
+    return;
+  }
+  const recentHtml = (d.recent || []).map(r => {
+    const loc = r.location ? escHtml(r.location) : escHtml(r.seat_name);
+    return `<div class="row-between" style="padding:4px 0;border-top:1px solid var(--border)">
+      <div><div class="t" style="font-size:12px">${escHtml(r.date)}</div><div class="sub" style="font-size:13px">${loc}</div></div>
+      <div class="mono" style="font-size:13px;color:var(--ink2)">${fmtH(r.duration_minutes)}</div>
+    </div>`;
+  }).join('');
+  box.innerHTML = `
+    <div class="row-between" style="margin-bottom:10px">
+      <div style="text-align:center;flex:1">
+        <div class="h2" style="color:var(--accent)">${d.this_week_visits}</div>
+        <div class="tiny">本周次数</div>
+      </div>
+      <div style="text-align:center;flex:1">
+        <div class="h2" style="color:var(--accent)">${fmtH(d.this_week_minutes)}</div>
+        <div class="tiny">本周时长</div>
+      </div>
+      <div style="text-align:center;flex:1">
+        <div class="h2">${d.total_visits}</div>
+        <div class="tiny">累计次数</div>
+      </div>
+      <div style="text-align:center;flex:1">
+        <div class="h2">${fmtH(d.total_minutes)}</div>
+        <div class="tiny">累计时长</div>
+      </div>
+    </div>
+    ${recentHtml}`;
+}
+
 // ---------- home loader ----------
 async function loadHome(){
   renderHome();
   loadNotices();
+  loadVisitStats();
 }
 
 // 起止联动：开始时间变化时，重建结束下拉，只保留 > 开始 的档位

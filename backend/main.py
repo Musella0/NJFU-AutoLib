@@ -1029,6 +1029,54 @@ def admin_delete_announcement(ann_id):
     return jsonify({"error": "公告不存在"}), 404
 
 
+@app.route("/api/my/visit_stats", methods=["GET"])
+@login_required
+def my_visit_stats():
+    uid = _ensure_uid()
+    client, db = get_db()
+    pids = [c["pid"] for c in db.user_config_info.find({"web_uid": uid}, {"pid": 1})]
+    if not pids:
+        client.close()
+        return jsonify({"total_visits": 0, "total_minutes": 0,
+                        "this_week_visits": 0, "this_week_minutes": 0, "recent": []}), 200
+
+    logs = list(db.visit_logs.find(
+        {"pid": {"$in": pids}},
+        {"_id": 0, "uuid": 1, "seat_name": 1, "location": 1,
+         "planned_begin": 1, "planned_duration_minutes": 1}
+    ).sort("planned_begin", DESCENDING).limit(200))
+
+    now = datetime.now()
+    week_start = (now - timedelta(days=now.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+
+    total_visits = len(logs)
+    total_minutes = sum(l.get("planned_duration_minutes", 0) for l in logs)
+    week_logs = [l for l in logs if isinstance(l.get("planned_begin"), datetime)
+                 and l["planned_begin"] >= week_start]
+    this_week_visits = len(week_logs)
+    this_week_minutes = sum(l.get("planned_duration_minutes", 0) for l in week_logs)
+
+    recent = []
+    for l in logs[:10]:
+        pb = l.get("planned_begin")
+        recent.append({
+            "date": pb.strftime("%Y-%m-%d") if isinstance(pb, datetime) else str(pb)[:10],
+            "seat_name": l.get("seat_name", ""),
+            "location": l.get("location", ""),
+            "duration_minutes": l.get("planned_duration_minutes", 0),
+        })
+
+    client.close()
+    return jsonify({
+        "total_visits": total_visits,
+        "total_minutes": total_minutes,
+        "this_week_visits": this_week_visits,
+        "this_week_minutes": this_week_minutes,
+        "recent": recent,
+    }), 200
+
+
 @app.route("/api/my/reservation_results", methods=["GET"])
 @login_required
 def my_reservation_results():
