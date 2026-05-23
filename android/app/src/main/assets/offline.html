@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>无网络连接</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; min-height: 100vh;
+    font-family: 'Noto Sans SC', sans-serif;
+    background: #fffbfe; color: #49454f;
+  }
+  .icon { font-size: 64px; margin-bottom: 24px; }
+  h1 { font-size: 20px; font-weight: 600; margin-bottom: 8px; }
+  p  { font-size: 14px; color: #79747e; margin-bottom: 32px; }
+  button {
+    padding: 12px 28px; border-radius: 100px; border: none;
+    background: #6750a4; color: #fff;
+    font-size: 14px; font-weight: 500; cursor: pointer;
+  }
+</style>
+</head>
+<body>
+  <div class="icon">📡</div>
+  <h1>无法连接到服务器</h1>
+  <p>请检查网络或确认服务器正在运行</p>
+  <button onclick="history.back()">返回重试</button>
+</body>
+</html>

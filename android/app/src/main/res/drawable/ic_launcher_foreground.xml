@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 书本图标 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M30,24 L78,24 Q82,24 82,28 L82,80 Q82,84 78,84 L30,84 Q26,84 26,80 L26,28 Q26,24 30,24 Z" />
+    <path
+        android:fillColor="#6750A4"
+        android:pathData="M54,24 L54,84" />
+    <path
+        android:fillColor="#9C8DC3"
+        android:pathData="M36,36 L50,36 M36,44 L50,44 M36,52 L50,52"
+        android:strokeWidth="3"
+        android:strokeColor="#9C8DC3"
+        android:strokeLineCap="round" />
+    <path
+        android:fillColor="#9C8DC3"
+        android:pathData="M58,36 L72,36 M58,44 L72,44 M58,52 L72,52"
+        android:strokeWidth="3"
+        android:strokeColor="#9C8DC3"
+        android:strokeLineCap="round" />
+</vector>
