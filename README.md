@@ -16,7 +16,9 @@
 ### 方法1 直接使用
 直接登陆网址：[南林图书馆.中国](https://南林图书馆.中国)
 
-安卓端也可以选择下载[船新版本](../../releases/latest)~~（其实就是个套壳app，和网页访问没区别）~~
+安卓端也可以选择下载[船新版本](../../releases/latest)；也可以选择[蓝奏云](https://wwbqs.lanzouq.com/iWI1y3q8st5a)
+
+~~（其实就是个套壳app，和网页访问没区别）~~
 
 ### 方法2 自己部署
 详细部署步骤见 [quickstart.md](quickstart.md)。
