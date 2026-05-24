@@ -9,6 +9,9 @@ import android.util.Log
 import android.webkit.*
 import android.widget.ProgressBar
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.isVisible
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import com.autolib.app.databinding.ActivityMainBinding
@@ -21,10 +24,25 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
         webView = binding.webView
+
+        // 把导航栏高度注入网页，让 CSS env(safe-area-inset-bottom) 生效
+        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
+            val navBar = insets.getInsets(WindowInsetsCompat.Type.navigationBars())
+            val statusBar = insets.getInsets(WindowInsetsCompat.Type.statusBars())
+            webView.evaluateJavascript(
+                "document.documentElement.style.setProperty('--nav-inset','${navBar.bottom}px');" +
+                "document.documentElement.style.setProperty('--status-inset','${statusBar.top}px');",
+                null
+            )
+            insets
+        }
+
+        if (BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true)
 
         // Cookie 持久化——保证 Flask session 重启后还在
         CookieManager.getInstance().apply {

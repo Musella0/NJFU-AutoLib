@@ -457,7 +457,7 @@ select.time-input:disabled{opacity:.5;cursor:not-allowed}
 
 .bnav{
   position:fixed;
-  bottom:20px;left:50%;transform:translateX(-50%);
+  bottom:calc(20px + var(--nav-inset, env(safe-area-inset-bottom, 0px)));left:50%;transform:translateX(-50%);
   width:calc(100% - 36px);max-width:420px;
   background:var(--bnav-bg);backdrop-filter:blur(8px);
   border:2.5px solid var(--line);
@@ -475,7 +475,7 @@ select.time-input:disabled{opacity:.5;cursor:not-allowed}
 
 /* ========= Modal / sheet ========= */
 .scrim{
-  position:fixed;inset:0;z-index:100;
+  position:fixed;top:0;right:0;bottom:0;left:0;z-index:100;
   background:var(--scrim);backdrop-filter:blur(2px);
   display:none;align-items:flex-end;justify-content:center;
 }
@@ -484,7 +484,8 @@ select.time-input:disabled{opacity:.5;cursor:not-allowed}
 .sheet{
   width:100%;max-width:440px;background:var(--paper);
   border:2.5px solid var(--line);border-top-width:2.5px;
-  border-radius:22px 22px 0 0;padding:20px 20px 28px;
+  border-radius:22px 22px 0 0;
+  padding:20px 20px calc(28px + var(--nav-inset, env(safe-area-inset-bottom, 0px)));
   box-shadow:0 -8px 0 var(--line);
   max-height:85vh;overflow:auto;
 }
