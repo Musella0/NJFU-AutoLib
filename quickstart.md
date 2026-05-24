@@ -83,40 +83,7 @@ docker compose up -d --build
 
 ## 6. 验证服务状态
 
-查看各容器运行状态：
-
-```bash
-docker compose ps
-```
-
-查看日志（按 Ctrl+C 退出）：
-
-```bash
-docker compose logs -f flask-api
-docker compose logs -f scheduler
-```
 
 访问用户端页面：[http://localhost:5004](http://localhost:5004)
 
 访问管理后台：[http://localhost:5004/admin](http://localhost:5004/admin)
-
----
-
-## 常用运维命令
-
-```bash
-# 重启所有服务
-docker compose restart
-
-# 重启单个服务
-docker compose restart flask-api
-
-# 停止并删除容器（保留数据）
-docker compose down
-
-# 停止并删除容器及数据卷（慎用，数据会清空）
-docker compose down -v
-
-# 重新构建镜像
-docker compose build --no-cache && docker compose up -d
-```
