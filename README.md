@@ -1,6 +1,6 @@
 # AutoLib — 南京林业大学图书馆自动抢座系统
 
-> 原作：[lnk137/NJFU-AutomaticLibrary](https://github.com/lnk137/NJFU-AutomaticLibrary)，通过勤奋的肘击Claude做出的二创的 Web 版本。
+> 原作：[lnk137/NJFU-AutomaticLibrary](https://github.com/lnk137/NJFU-AutomaticLibrary)，基于肘击Claude做出的二创的 Web 版本。
 
 ---
 
