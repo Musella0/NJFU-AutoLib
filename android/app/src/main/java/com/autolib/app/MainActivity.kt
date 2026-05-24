@@ -30,15 +30,12 @@ class MainActivity : AppCompatActivity() {
 
         webView = binding.webView
 
-        // 把导航栏高度注入网页，让 CSS env(safe-area-inset-bottom) 生效
+        // 记录系统栏高度，页面加载完后注入 CSS 变量
+        var navInsetPx = 0
+        var statusInsetPx = 0
         ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
-            val navBar = insets.getInsets(WindowInsetsCompat.Type.navigationBars())
-            val statusBar = insets.getInsets(WindowInsetsCompat.Type.statusBars())
-            webView.evaluateJavascript(
-                "document.documentElement.style.setProperty('--nav-inset','${navBar.bottom}px');" +
-                "document.documentElement.style.setProperty('--status-inset','${statusBar.top}px');",
-                null
-            )
+            navInsetPx = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
+            statusInsetPx = insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
             insets
         }
 
@@ -58,8 +55,11 @@ class MainActivity : AppCompatActivity() {
             builtInZoomControls = false
             displayZoomControls = false
             setSupportZoom(false)
+            // 网络可用时遵守 HTTP 缓存头；离线时自动回落到缓存
             cacheMode = WebSettings.LOAD_DEFAULT
             mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            // 开启数据库缓存（兼容旧版 WebView）
+            databaseEnabled = true
         }
 
         webView.webViewClient = object : WebViewClient() {
@@ -82,6 +82,12 @@ class MainActivity : AppCompatActivity() {
             override fun onPageFinished(view: WebView, url: String) {
                 binding.progressBar.isVisible = false
                 CookieManager.getInstance().flush()
+                // 页面加载完后注入系统栏高度，确保 CSS 变量生效
+                view.evaluateJavascript(
+                    "document.documentElement.style.setProperty('--nav-inset','${navInsetPx}px');" +
+                    "document.documentElement.style.setProperty('--status-inset','${statusInsetPx}px');",
+                    null
+                )
             }
 
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {

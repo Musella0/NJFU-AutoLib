@@ -104,6 +104,23 @@ def _get_decrypted_cfg(pid: str, uid: str):
     return cfg
 
 
+# ==================== Cache headers ====================
+
+@app.after_request
+def add_cache_headers(response):
+    path = request.path
+    if path.startswith('/static/') and request.args.get('v'):
+        # 带版本号的静态资源：永久缓存（版本号变则 URL 变）
+        response.cache_control.public = True
+        response.cache_control.max_age = 31536000
+        response.headers['Expires'] = 'Thu, 31 Dec 2099 23:59:59 GMT'
+    elif path in ('/', '/admin'):
+        # HTML 页面：每次重新验证，但允许使用缓存版本（304 快速响应）
+        response.cache_control.no_cache = True
+    elif path.startswith('/api/'):
+        response.cache_control.no_store = True
+    return response
+
 # ==================== Pages ====================
 
 def _static_v():
