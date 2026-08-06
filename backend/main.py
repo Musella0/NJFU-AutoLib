@@ -234,63 +234,113 @@ def admin():
 
 
 # ==================== User Auth ====================
+# 不单独注册网站账号：直接使用学号 + 统一身份认证密码登录，
+# 数据以学号（web_uid = pid）归属，换设备登录即可找回。
 
-@app.route("/api/auth/register", methods=["POST"])
-@limiter.limit("3/minute")
-def register():
-    data = request.get_json()
-    uid = data.get("username", "").strip()
-    password = data.get("password", "")
-    if not uid or not password:
-        return jsonify({"error": "用户名和密码不能为空"}), 400
-    if len(password) < 4:
-        return jsonify({"error": "密码至少4位"}), 400
-    if len(uid) < 2:
-        return jsonify({"error": "用户名至少2位"}), 400
+def _check_unified_identity(pid: str, password: str):
+    """验证学号 + 统一身份认证密码。
 
-    client, db = get_db()
-    existing = db.web_users.find_one({"uid": uid})
+    返回 (status, error)：
+    - "ok"              webvpn 与图书馆 CAS 均通过
+    - "auth_failed"     统一身份认证失败（密码错误）
+    - "vpn_unreachable" webvpn 服务异常（可回退本地缓存校验）
+    - "lib_unreachable" 密码正确但图书馆系统异常
+    """
+    try:
+        from utils.vpn_system import VPNSystem
+        vpn = VPNSystem(pid, password)
+        if not vpn.vpn_login():
+            return "auth_failed", "统一身份认证失败：请检查学号和密码是否正确"
+    except Exception as e:
+        return "vpn_unreachable", f"统一身份认证服务异常：{str(e)}"
+    try:
+        from utils.library_system import LibrarySystem
+        LibrarySystem(username=pid, password=password, session=vpn.session)
+    except Exception as e:
+        return "lib_unreachable", f"图书馆系统异常：{str(e)}"
+    return "ok", None
+
+
+def _cache_identity(db, pid: str, password: str):
+    """把统一身份认证密码哈希缓存到 web_users，供学校服务不可用时离线登录。"""
+    db.web_users.update_one(
+        {"uid": pid},
+        {
+            "$set": {"password": generate_password_hash(password)},
+            "$setOnInsert": {"uid": pid, "created_at": datetime.now()},
+        },
+        upsert=True,
+    )
+
+
+def _ensure_own_account_config(db, pid: str, vpn_password: str):
+    """登录即绑定：确保当前学号的图书馆配置存在，并刷新缓存密码。"""
+    existing = db.user_config_info.find_one({"web_uid": pid, "pid": pid})
     if existing:
-        client.close()
-        return jsonify({"error": "该用户名已注册，请直接登录"}), 409
-
-    db.web_users.insert_one({
-        "uid": uid,
-        "password": generate_password_hash(password),
-        "created_at": datetime.now()
+        db.user_config_info.update_one(
+            {"_id": existing["_id"]},
+            {"$set": {
+                "vpn_password": _enc(vpn_password),
+                "verified": True,
+                "updated_at": datetime.now(),
+            }},
+        )
+        return
+    cfg = default_account_config()
+    cfg.update({
+        "pid": pid,
+        "web_uid": pid,
+        "vpn_password": _enc(vpn_password),
+        "verified": True,
+        "updated_at": datetime.now(),
     })
+    db.user_config_info.insert_one(cfg)
 
+
+def _login_as(db, pid: str):
+    """建立会话，并把当前浏览器的游客数据合并到该学号。返回昵称。"""
     session.permanent = True
-    session["web_uid"] = uid
-    # 迁移游客数据到真实 uid
-    _migrate_guest_data(db, uid)
-    client.close()
-    return jsonify({"message": "注册成功", "uid": uid, "nickname": ""}), 200
+    session["web_uid"] = pid
+    _migrate_guest_data(db, pid)
+    user = db.web_users.find_one({"uid": pid}) or {}
+    return (user.get("nickname") or "").strip()
 
 
 @app.route("/api/auth/login", methods=["POST"])
 @limiter.limit("5/minute")
 def login():
-    data = request.get_json()
-    uid = data.get("username", "").strip()
-    password = data.get("password", "")
-    if not uid or not password:
-        return jsonify({"error": "用户名和密码不能为空"}), 400
+    """学号 + 统一身份认证密码登录，无需注册。"""
+    data = request.get_json(silent=True) or {}
+    pid = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+    if not pid or not password:
+        return jsonify({"error": "学号和密码不能为空"}), 400
+
+    status, err = _check_unified_identity(pid, password)
+    if status == "auth_failed":
+        return jsonify({"error": err}), 401
 
     client, db = get_db()
-    user = db.web_users.find_one({"uid": uid})
-
-    if not user or not check_password_hash(user.get("password", ""), password):
+    if status == "vpn_unreachable":
+        # 学校服务异常时，回退到本地缓存的密码哈希
+        user = db.web_users.find_one({"uid": pid})
+        if not user or not check_password_hash(user.get("password", ""), password):
+            client.close()
+            return jsonify({"error": f"{err}，且本地没有可用的登录缓存"}), 503
+        nickname = _login_as(db, pid)
         client.close()
-        return jsonify({"error": "用户名或密码错误"}), 401
+        return jsonify({
+            "message": "学校服务暂时不可用，已使用本地缓存登录",
+            "uid": pid, "nickname": nickname,
+        }), 200
 
-    session.permanent = True
-    session["web_uid"] = uid
-    # 迁移游客数据到真实 uid
-    _migrate_guest_data(db, uid)
-    nickname = (user.get("nickname") or "").strip()
+    # 统一身份认证已通过（lib_unreachable 时图书馆 SSO 异常，但密码正确）
+    _cache_identity(db, pid, password)
+    nickname = _login_as(db, pid)
+    _ensure_own_account_config(db, pid, password)
     client.close()
-    return jsonify({"message": "登录成功", "uid": uid, "nickname": nickname}), 200
+    message = "登录成功" if status == "ok" else "登录成功（图书馆系统暂时异常，请稍后重新验证）"
+    return jsonify({"message": message, "uid": pid, "nickname": nickname}), 200
 
 
 @app.route("/api/auth/logout", methods=["POST"])
@@ -314,7 +364,7 @@ def auth_me():
 
 @app.route("/api/auth/profile", methods=["POST"])
 def update_profile():
-    """登录用户更新昵称 / 密码。两个字段都可选，留空即不修改对应字段。"""
+    """登录用户更新昵称。密码即统一身份认证密码，由登录流程自动缓存，不提供修改。"""
     if "web_uid" not in session:
         return jsonify({"error": "请先登录"}), 401
     data = request.get_json() or {}
@@ -326,11 +376,6 @@ def update_profile():
         if len(nick) > 30:
             return jsonify({"error": "昵称最多 30 个字符"}), 400
         update["nickname"] = nick
-    if data.get("password"):
-        pw = data["password"]
-        if len(pw) < 4:
-            return jsonify({"error": "密码至少 4 位"}), 400
-        update["password"] = generate_password_hash(pw)
 
     if not update:
         return jsonify({"error": "没有要更新的内容"}), 400
@@ -837,11 +882,26 @@ def verify_account(pid):
         }), 200
 
     # webvpn 与图书馆 CAS SSO 均通过。
+    promoted = False
+    if _is_guest():
+        # 游客验证学号 + 统一身份认证密码成功，即视为以该学号登录：
+        # 数据归属学号而非浏览器，换设备验证一次即可找回。
+        client2, db2 = get_db()
+        _cache_identity(db2, pid, vpn_password)
+        session.permanent = True
+        session["web_uid"] = pid
+        _migrate_guest_data(db2, pid)
+        uid = pid
+        client2.close()
+        promoted = True
     mark_verified(True)
-    return jsonify({
+    resp = {
         "verified": True,
-        "message": "统一身份认证及图书馆登录验证成功"
-    }), 200
+        "message": "统一身份认证及图书馆登录验证成功",
+    }
+    if promoted:
+        resp.update({"logged_in": True, "uid": pid})
+    return jsonify(resp), 200
 
 
 @app.route("/api/my/accounts/<pid>/result", methods=["GET"])

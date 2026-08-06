@@ -14,7 +14,6 @@ const state = {
   todayResv: null,    // today's live reservation (if any)
   tomorrowResv: null, // tomorrow's live reservation (if any)
   cfgMode: 'week',    // UI: 'week' or 'simple'
-  authMode: 'login',
   napConfig: { start_time: '14:00', end_time: '', seat: '', auto_daily: false, trigger_time: '12:00' },
 };
 
@@ -159,13 +158,7 @@ function updateAuthUI(){
   if(state.isGuest){
     hello.textContent = '你好，同学 ☕';
     $('settings-uid').textContent = '游客';
-    const n = state.accounts.length;
-    $('settings-accounts-meta').textContent = n
-      ? `游客模式 · ${n} 个学号 · 数据仅存本会话`
-      : '游客模式 · 数据仅存本会话';
-    $('settings-auth-btn').style.display = '';
-    $('settings-auth-btn').textContent = '登录';
-    $('settings-auth-btn').onclick = () => openSheet('login');
+    $('settings-accounts-meta').textContent = '游客模式 · 仅可浏览，添加学号即登录';
     if(profileBtn) profileBtn.style.display = 'none';
     $('logout-card').style.display = 'none';
   }else{
@@ -176,63 +169,28 @@ function updateAuthUI(){
       ? `已登录 · @${state.uid} · ${state.accounts.length} 个学号`
       : `已登录 · ${state.accounts.length} 个学号`;
     $('settings-accounts-meta').textContent = subMeta;
-    $('settings-auth-btn').style.display = 'none';
     if(profileBtn) profileBtn.style.display = '';
     $('logout-card').style.display = '';
   }
 }
 
-async function doAuth(){
-  const uid = $('auth-uid').value.trim();
-  const pass = $('auth-pass').value;
-  if(!uid || !pass){ toast('请填写用户名和密码','error'); return; }
-  const btn = $('auth-btn');
-  btn.disabled = true;
-  const labelOld = btn.textContent;
-  btn.textContent = '...';
-  const { ok, data } = await api(`/api/auth/${state.authMode}`, { method:'POST', body:{ username: uid, password: pass } });
-  btn.disabled = false;
-  btn.textContent = labelOld;
-  if(ok){
-    toast(data.message || '成功', 'success');
-    state.isGuest = false;
-    state.uid = data.uid;
-    state.nickname = data.nickname || '';
-    updateAuthUI();
-    closeSheet();
-    await loadAccounts();
-    await loadHome();
-  }else{
-    toast(data.error || '失败', 'error');
-  }
-}
-
 async function saveProfile(){
   const nick = $('pf-nick').value.trim();
-  const pw = $('pf-pass').value;
   const nickChanged = nick !== (state.nickname || '');
-  if(!pw && !nickChanged){
+  if(!nickChanged){
     toast('没有要更新的内容','info');
     return;
   }
-  const body = {};
-  if(nickChanged) body.nickname = nick;
-  if(pw) body.password = pw;
+  const body = { nickname: nick };
   const { ok, data } = await api('/api/auth/profile', { method:'POST', body });
   if(ok){
-    if('nickname' in body) state.nickname = data.nickname || '';
+    state.nickname = data.nickname || '';
     toast(data.message || '已保存','success');
     closeSheet();
     updateAuthUI();
   }else{
     toast(data.error || '保存失败','error');
   }
-}
-
-function switchAuth(mode){
-  state.authMode = mode;
-  document.querySelectorAll('.login-toggle button').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
-  $('auth-btn').textContent = mode === 'login' ? '登录' : '注册';
 }
 
 async function doLogout(){
@@ -356,7 +314,25 @@ async function verifyAdd(){
     return;
   }
 
-  // Step 2: save (backend defaults: is_reserved=True, late_protection=False)
+  // 游客验证成功即被后端提升为登录态（数据归属学号，换设备可找回）
+  if(vres.data.logged_in && vres.data.uid){
+    state.isGuest = false;
+    state.uid = vres.data.uid;
+    updateAuthUI();
+  }
+
+  // 该学号在云端已有配置 → 直接恢复，绝不用默认值覆盖
+  state.currentPid = pid;
+  await loadAccounts();
+  if(state.accounts.some(a => a.pid === pid)){
+    btn.disabled = false;
+    btn.textContent = '验证并保存';
+    toast('已恢复学号 ' + pid + ' 的云端配置','success');
+    closeSheet();
+    return;
+  }
+
+  // Step 2: 首次添加才保存默认配置 (backend defaults: is_reserved=True, late_protection=False)
   const sres = await api(`/api/my/accounts/${encodeURIComponent(pid)}`, {
     method:'POST',
     body:{
@@ -371,12 +347,8 @@ async function verifyAdd(){
   btn.textContent = '验证并保存';
   if(sres.ok){
     toast('已添加学号 ' + pid,'success');
-    state.currentPid = pid;
     closeSheet();
     await loadAccounts();
-    if(state.isGuest && !localStorage.getItem('autolib_guest_data_notice_ack')){
-      openSheet('guest-data-notice');
-    }
   }else{
     toast(sres.data.error || '保存失败','error');
   }
@@ -1535,48 +1507,14 @@ function cancelLP(){
   closeSheet();
 }
 
-function ackGuestDataNotice(){
-  localStorage.setItem('autolib_guest_data_notice_ack', '1');
-  closeSheet();
-}
-
 // ---------- sheets ----------
 const SHEETS = {
-  'guest-data-notice': () => `
-    <div class="grab"></div>
-    <h3>📦 关于你的数据安全</h3>
-    <div class="desc">你现在是<strong>游客模式</strong>，没有注册网站账号。</div>
-    <div class="box tight" style="margin-top:12px">
-      <div class="t">你的学号和密码<strong>不保存在手机或电脑上</strong>，而是加密存放在服务器里。</div>
-      <div class="t" style="margin-top:8px">但这份数据是和你<strong>当前的浏览器绑定</strong>的——如果你清除了浏览器数据、换了设备，或者很久没打开，这些数据就找不回来了。</div>
-      <div class="t" style="margin-top:8px">👉 建议去「设置」页面注册一个网站账号（不需要手机号），这样数据会永久保存，换手机也能用。</div>
-    </div>
-    <div class="row-flex mt-lg">
-      <button class="btn ghost grow" onclick="ackGuestDataNotice()">我知道了</button>
-      <button class="btn accent grow" onclick="ackGuestDataNotice(); go('settings'); openSheet('login')">去注册账号</button>
-    </div>
-  `,
-  login: () => `
-    <div class="grab"></div>
-    <h3>登录 / 注册</h3>
-    <div class="desc">用户名仅用于管理这个网页，不是你的学号。</div>
-    <div class="seg login-toggle" style="margin-bottom:14px">
-      <button class="on" data-mode="login" onclick="switchAuth('login')">登录</button>
-      <button data-mode="register" onclick="switchAuth('register')">注册</button>
-    </div>
-    <div class="col gap-sm">
-      <div class="field"><label>用户名</label><input type="text" id="auth-uid" placeholder="你的用户名"></div>
-      <div class="field"><label>密码</label><input type="password" id="auth-pass" placeholder="至少4位"></div>
-    </div>
-    <button class="btn accent mt-lg" id="auth-btn" style="width:100%" onclick="doAuth()">登录</button>
-  `,
   profile: () => `
     <div class="grab"></div>
     <h3>账号资料</h3>
-    <div class="desc">昵称会替代用户名 <strong>${escHtml(state.uid)}</strong> 显示。各字段留空即不修改。</div>
+    <div class="desc">昵称会替代学号 <strong>${escHtml(state.uid)}</strong> 显示。密码即统一身份认证密码，需在学校的系统里修改。</div>
     <div class="col gap-sm">
       <div class="field"><label>昵称（可选）</label><input type="text" id="pf-nick" maxlength="30" placeholder="清空 = 恢复用 ${escHtml(state.uid)}" value="${escHtml(state.nickname || '')}"></div>
-      <div class="field"><label>新密码（可选）</label><input type="password" id="pf-pass" placeholder="留空 = 不修改"></div>
     </div>
     <div class="row-flex mt-lg">
       <button class="btn ghost grow" onclick="closeSheet()">取消</button>
@@ -1613,9 +1551,13 @@ const SHEETS = {
   `,
   'add-pid': () => `
     <div class="grab"></div>
-    <h3>添加新学号</h3>
-    <div class="desc">填写学号和统一身份认证密码，我们会先验证再保存。</div>
-    <div class="col gap-sm">
+    <h3>添加学号</h3>
+    <div class="desc">填写学号和统一身份认证（网上办事大厅）密码，验证通过后即完成登录并绑定。</div>
+    <div class="box tight" style="margin-top:4px">
+      <div class="t">🔒 你的学号和密码会<strong>加密保存在服务器上</strong>，仅用于每天自动预约时登录学校系统，管理员也无法看到明文。</div>
+      <div class="t" style="margin-top:8px">数据跟随学号保存：换手机、换浏览器后，重新验证一次学号密码即可找回所有配置。</div>
+    </div>
+    <div class="col gap-sm" style="margin-top:12px">
       <div class="field"><label>学号</label><input type="text" id="new-pid" placeholder="18210xxxxx"></div>
       <div class="field"><label>统一身份认证密码（网上办事大厅）</label><input type="password" id="new-vpn"></div>
     </div>
@@ -2116,7 +2058,7 @@ function openSheet(name){
   const tpl = SHEETS[name];
   content.innerHTML = tpl ? tpl() : '<div class="grab"></div><h3>未实现</h3>';
   sc.classList.add('show');
-  if(name === 'lp-info' || name === 'lp-warning' || name === 'cancel' || name === 'guest-data-notice' || name === 'nap-info' || name === 'nap-about') sc.classList.add('center');
+  if(name === 'lp-info' || name === 'lp-warning' || name === 'cancel' || name === 'nap-info' || name === 'nap-about') sc.classList.add('center');
   else sc.classList.remove('center');
 }
 function closeSheet(){ $('scrim').classList.remove('show'); }

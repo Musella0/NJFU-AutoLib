@@ -8,3 +8,5 @@ __pycache__/
 *.pyc
 # Local encrypted administrator credentials
 data/
+# Local database backups
+backups/
