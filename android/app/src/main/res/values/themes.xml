@@ -1,12 +1,52 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 无标题栏，让 WebView 全屏占满 -->
     <style name="Theme.AutoLib" parent="Theme.MaterialComponents.DayNight.NoActionBar">
         <item name="colorPrimary">@color/primary</item>
         <item name="colorPrimaryVariant">@color/primary_variant</item>
         <item name="colorOnPrimary">@color/on_primary</item>
+        <item name="colorSecondary">@color/primary</item>
+        <item name="colorOnSecondary">@color/on_primary</item>
+        <item name="colorControlActivated">@color/primary</item>
         <item name="android:windowBackground">@color/background</item>
-        <item name="android:statusBarColor">@android:color/transparent</item>
-        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:statusBarColor">@color/background</item>
+        <item name="android:navigationBarColor">@color/surface</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:fontFamily">sans-serif</item>
+        <item name="colorSurface">@color/surface</item>
+        <item name="android:colorAccent">@color/primary</item>
+        <item name="materialAlertDialogTheme">@style/ThemeOverlay.AutoLib.Dialog</item>
+    </style>
+
+    <style name="ThemeOverlay.AutoLib.Dialog" parent="ThemeOverlay.MaterialComponents.MaterialAlertDialog">
+        <item name="colorSurface">@color/background</item>
+        <item name="shapeAppearanceMediumComponent">@style/ShapeAppearance.AutoLib.Large</item>
+    </style>
+
+    <style name="ShapeAppearance.AutoLib.Large" parent="ShapeAppearance.MaterialComponents.LargeComponent">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">18dp</item>
+    </style>
+
+    <style name="Widget.AutoLib.BottomNavigation" parent="Widget.MaterialComponents.BottomNavigationView.Colored">
+        <item name="itemIconTint">@color/bottom_nav_tint</item>
+        <item name="itemTextColor">@color/bottom_nav_tint</item>
+        <item name="itemActiveIndicatorStyle">@style/Widget.AutoLib.BottomNavigation.Indicator</item>
+        <item name="itemRippleColor">@android:color/transparent</item>
+    </style>
+
+    <style name="Widget.AutoLib.BottomNavigation.Indicator">
+        <item name="android:color">@color/stroke</item>
+        <item name="shapeAppearance">@style/ShapeAppearance.AutoLib.NavPill</item>
+    </style>
+
+    <style name="ShapeAppearance.AutoLib.NavPill" parent="ShapeAppearance.MaterialComponents.SmallComponent">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">10dp</item>
+    </style>
+
+    <style name="TextAppearance.AutoLib.Nav" parent="TextAppearance.MaterialComponents.Caption">
+        <item name="android:fontFamily">sans-serif-rounded</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:textStyle">bold</item>
     </style>
 </resources>

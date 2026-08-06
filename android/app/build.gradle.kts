@@ -11,8 +11,8 @@ android {
         applicationId = "com.autolib.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 3
+        versionName = "2.1-native"
 
         buildConfigField("String", "SERVER_URL", "\"https://xn--1jq43jfrduzxh22d.xn--fiqs8s\"")
     }
@@ -46,5 +46,4 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
-    implementation(libs.androidx.swiperefreshlayout)
 }

@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">AutoLib</string>
+    <string name="add_library_account">添加学号</string>
 </resources>

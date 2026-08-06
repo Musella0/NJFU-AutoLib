@@ -1,130 +1,37 @@
-# AutoLib Android App
+# AutoLib Android 原生客户端
 
-AutoLib 的安卓 WebView 壳，打包后可安装到手机，点图标直接进入你的 AutoLib 服务器界面。
+这是 AutoLib 的原生 Android 客户端。界面由 Android View / Material Components 构成，直接调用后端 `/api/**` JSON 接口，不加载网页或 HTML。
 
----
+## 已实现
 
-## 快速开始
+- 原生主页：今日/明日预约、预约状态、公告和预约结果
+- 原生预约：选择区域、座位和时段后立即预约
+- 原生预约操作：到馆、取消、一键午休续约
+- 原生配置：按星期/统一时段、候选座位优先级、自动预约和迟到保护
+- 凭据验证：分别验证 WebVPN 与图书馆密码后保存
+- 原生账号：登录、注册、资料编辑、退出以及多个图书馆学号切换
+- 原生统计：本周/累计学习次数、时长和最近记录
+- Flask 会话 Cookie 本地持久化
 
-### 前置要求
+## 服务器地址
 
-| 工具 | 版本 | 说明 |
-|---|---|---|
-| JDK | 17+ | `java -version` 确认 |
-| Android SDK | API 34 | 通过 Android Studio 安装 |
-| `ANDROID_HOME` | 已设置 | 指向 SDK 目录 |
-
-最简单的方式是安装 [Android Studio](https://developer.android.com/studio)，它会自动配置好 SDK 和环境变量。
-
----
-
-## 第一步：修改服务器地址
-
-打开 `app/build.gradle.kts`，找到这一行：
+在 `app/build.gradle.kts` 的 `SERVER_URL` 中设置 HTTPS 后端地址：
 
 ```kotlin
 buildConfigField("String", "SERVER_URL", "\"https://example.com\"")
 ```
 
-把 `https://example.com` 换成你的服务器地址，例如：
+后端必须部署本仓库 `backend/`，且客户端地址应能访问其 JSON API。
 
-```kotlin
-buildConfigField("String", "SERVER_URL", "\"https://autolib.yourdomain.com\"")
-```
+## 构建
 
----
+项目需要 JDK 17 或更高版本、Android SDK 34 和 Gradle 8.x：
 
-## 第二步：获取 Gradle Wrapper JAR
-
-由于 `gradle-wrapper.jar` 是二进制文件不适合放进 git，首次使用需要下载：
-
-```bash
+```powershell
 cd android
-
-# 方案 A：如果已有 Gradle（推荐）
-gradle wrapper --gradle-version=8.7
-
-# 方案 B：用 Android Studio 打开项目，IDE 会自动下载
+.\gradlew.bat assembleDebug
 ```
 
----
+调试 APK 输出到 `app/build/outputs/apk/debug/app-debug.apk`。发布包请配置自己的 signingConfig 后执行 `assembleRelease`，不要分发未签名的 release APK。
 
-## 第三步：打包调试版 APK
-
-```bash
-cd android
-./gradlew assembleDebug
-```
-
-APK 输出在：`app/build/outputs/apk/debug/app-debug.apk`
-
-安装到手机（需要 adb 并开启 USB 调试）：
-
-```bash
-adb install app/build/outputs/apk/debug/app-debug.apk
-```
-
----
-
-## 打包正式版（Release）
-
-### 1. 生成签名 Keystore
-
-```bash
-keytool -genkeypair -v \
-  -keystore autolib-release.jks \
-  -keyalg RSA -keysize 2048 \
-  -validity 10000 \
-  -alias autolib
-```
-
-### 2. 在 `app/build.gradle.kts` 加入签名配置
-
-```kotlin
-signingConfigs {
-    create("release") {
-        storeFile = file("../../autolib-release.jks")
-        storePassword = "你的密码"
-        keyAlias = "autolib"
-        keyPassword = "你的密码"
-    }
-}
-buildTypes {
-    release {
-        signingConfig = signingConfigs.getByName("release")
-        // ... 其余保持不变
-    }
-}
-```
-
-### 3. 打包
-
-```bash
-./gradlew assembleRelease
-```
-
-APK 在：`app/build/outputs/apk/release/app-release.apk`
-
----
-
-## 换图标
-
-用 Android Studio 的 **Image Asset** 工具：
-
-1. 右键 `app/src/main/res` → New → Image Asset
-2. Icon Type 选 Launcher Icons (Adaptive and Legacy)
-3. 导入你的图片（1024×1024 PNG 最佳）
-4. 点 Finish，自动覆盖所有分辨率
-
----
-
-## 常见问题
-
-**Q: 打开 app 显示「无法连接到服务器」**  
-A: 确认服务器已运行且域名可从手机访问。注意如果服务器用 HTTP（非 HTTPS），需要在 `AndroidManifest.xml` 把 `usesCleartextTraffic` 改为 `true`。
-
-**Q: 登录后重启 app 需要重新登录**  
-A: Cookie 应该是自动持久化的。如果没有，确认服务器的 `SESSION_COOKIE_SECURE=true`（使用 HTTPS 时必须）。
-
-**Q: 返回键直接退出了 app**  
-A: 正常行为——当 WebView 没有可以返回的历史页面时才会退出。
+> 仓库若缺少 `gradle/wrapper/gradle-wrapper.jar`，可在安装了 Gradle 的环境中运行 `gradle wrapper --gradle-version 8.13` 补齐后再使用 `gradlew.bat`。
