@@ -559,7 +559,7 @@ function removeCfgSeat(i){
   if(!state.currentCfg) return;
   state.currentCfg.seat_list = (state.currentCfg.seat_list || []).filter((_, idx) => idx !== i);
   renderCfgSeats();
-  scheduleCfgAutosave();
+  persistSeatList();
 }
 
 // ---------- seat priority drag-to-reorder ----------
@@ -629,7 +629,7 @@ function onSeatPointerUp(e){
   const [moved] = arr.splice(idx, 1);
   arr.splice(overIdx, 0, moved);
   renderCfgSeats();
-  scheduleCfgAutosave();
+  persistSeatList();
 }
 
 function setCfgMode(m){
@@ -643,6 +643,7 @@ function setCfgMode(m){
 }
 
 let cfgAutosaveTimer = null;
+let seatSaveChain = Promise.resolve();
 
 function scheduleCfgAutosave(){
   if(!state.currentPid || !state.currentCfg) return;
@@ -650,11 +651,38 @@ function scheduleCfgAutosave(){
   cfgAutosaveTimer = setTimeout(() => saveCfg({ silent: true }), 700);
 }
 
+function persistSeatList(){
+  if(!state.currentPid || !state.currentCfg) return Promise.resolve(false);
+
+  // Capture both values now. Serialising requests prevents a quick sequence of
+  // add/remove/reorder operations from reaching MongoDB out of order.
+  const pid = state.currentPid;
+  const seats = [...(state.currentCfg.seat_list || [])];
+  seatSaveChain = seatSaveChain
+    .catch(() => false)
+    .then(async () => {
+      const { ok, data } = await api(
+        `/api/my/accounts/${encodeURIComponent(pid)}`,
+        { method:'POST', body:{ seat_list: seats } },
+      );
+      if(ok){
+        const summary = state.accounts.find(account => account.pid === pid);
+        if(summary) summary.seat_list = [...seats];
+        return true;
+      }
+      toast('座位保存失败：' + (data.error || '请稍后重试'), 'error');
+      return false;
+    });
+  return seatSaveChain;
+}
+
 async function flushCfgAutosave(){
-  if(!cfgAutosaveTimer) return;
-  clearTimeout(cfgAutosaveTimer);
-  cfgAutosaveTimer = null;
-  await saveCfg({ silent: true });
+  if(cfgAutosaveTimer){
+    clearTimeout(cfgAutosaveTimer);
+    cfgAutosaveTimer = null;
+    await saveCfg({ silent: true });
+  }
+  await seatSaveChain.catch(() => false);
 }
 
 async function saveCfg(options = {}){
@@ -1448,8 +1476,9 @@ function addSeat(){
   seats.push(s);
   state.currentCfg.seat_list = seats;
   renderCfgSeats();
-  scheduleCfgAutosave();
-  toast('已添加 ' + s, 'success');
+  persistSeatList().then(ok => {
+    if(ok) toast('已添加并保存 ' + s, 'success');
+  });
   closeSheet();
 }
 
@@ -2211,8 +2240,9 @@ async function init(){
 
   syncThemeUI();
   await checkAuth();
-  await loadSeats();
-  await loadAccounts();
+  // Account configuration comes from MongoDB and must remain visible even if
+  // loading the seat catalogue is slow or temporarily unavailable.
+  await Promise.all([loadSeats(), loadAccounts()]);
   loadNotices();
   loadVisitStats();
 }
