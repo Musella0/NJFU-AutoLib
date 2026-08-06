@@ -144,10 +144,23 @@ def get_all_active_reservations() -> List[Dict[str, Any]]:
     Returns:
         List[Dict[str, Any]]: 按优先级排序的预约记录列表，每条记录包含完整的预约配置
     """
-    return list(
-        user_config_info.find({"is_reserved": "True", "verified": True})
-        .sort("priority", DESCENDING)
+    candidates = list(
+        user_config_info.find({
+            "is_reserved": "True",
+            "verified": True,
+            "seat_list": {"$type": "array", "$ne": []},
+        }).sort([("priority", DESCENDING), ("updated_at", DESCENDING)])
     )
+    # 同一学号即使残留于不同游客会话，也只能进入一次预约队列。
+    active = []
+    seen_pids = set()
+    for candidate in candidates:
+        pid = candidate.get("pid")
+        if not pid or pid in seen_pids:
+            continue
+        seen_pids.add(pid)
+        active.append(candidate)
+    return active
 
 def get_seat_ids(seat_list: List[str]) -> List[str]:
     """

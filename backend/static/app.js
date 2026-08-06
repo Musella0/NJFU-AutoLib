@@ -24,6 +24,12 @@ const TIME_MIN = '08:00';
 const TIME_MAX_DEFAULT = '22:00';
 const TIME_MAX_FRIDAY = '20:00';
 
+function defaultWeekTime(){
+  const week_time = {};
+  WEEK_DEFAULTS.forEach((segment, index) => { week_time[String(index + 1)] = [segment]; });
+  return { week_time };
+}
+
 // iso weekday 1..7 (Fri=5). Pass null/undefined for generic 08-22 range.
 function timeBounds(isoDay){
   const max = isoDay === 5 ? TIME_MAX_FRIDAY : TIME_MAX_DEFAULT;
@@ -230,6 +236,7 @@ function switchAuth(mode){
 }
 
 async function doLogout(){
+  await flushCfgAutosave();
   await api('/api/auth/logout', { method:'POST' });
   state.isGuest = true;
   state.uid = '';
@@ -305,7 +312,8 @@ async function loadAccountDetail(pid){
   loadReservations();
 }
 
-function pickAcct(pid){
+async function pickAcct(pid){
+  await flushCfgAutosave();
   state.currentPid = pid;
   toast('已切换到 ' + pid, 'success');
   closeSheet();
@@ -351,7 +359,13 @@ async function verifyAdd(){
   // Step 2: save (backend defaults: is_reserved=True, late_protection=False)
   const sres = await api(`/api/my/accounts/${encodeURIComponent(pid)}`, {
     method:'POST',
-    body:{ vpn_password: vpn, mode: 'week_time', verified: true }
+    body:{
+      vpn_password: vpn,
+      seat_list: [],
+      mode: 'week_time',
+      time: defaultWeekTime(),
+      verified: true,
+    }
   });
   btn.disabled = false;
   btn.textContent = '验证并保存';
@@ -396,6 +410,7 @@ function renderConfig(){
     let simpleSegs = toSegments(cfg.time && cfg.time.tomorrow);
     if(!simpleSegs.length) simpleSegs = ['08:00-22:00'];
     simpleList.innerHTML = simpleSegs.map(simpleSegRowHtml).join('');
+    simpleList.onchange = () => scheduleCfgAutosave();
   }
 
   // Seats
@@ -459,10 +474,12 @@ function buildWeekGrid(weekTime){
     tg.addEventListener('click', () => {
       const row = tg.closest('[data-day]');
       const isOn = tg.classList.contains('on');
-      row.querySelectorAll('input[type="time"]').forEach(inp => inp.disabled = !isOn);
+      row.querySelectorAll('[data-field="start"], [data-field="end"]').forEach(inp => inp.disabled = !isOn);
       row.querySelectorAll('[data-field="seg-add"], .seg-del').forEach(b => b.disabled = !isOn);
+      scheduleCfgAutosave();
     });
   });
+  grid.onchange = () => scheduleCfgAutosave();
 }
 
 function addSeg(btn){
@@ -472,6 +489,7 @@ function addSeg(btn){
   const list = row.querySelector('[data-field="seg-list"]');
   // 新段默认用该天的默认时段
   list.insertAdjacentHTML('beforeend', segmentRowHtml(WEEK_DEFAULTS[isoDay-1], isoDay, false));
+  scheduleCfgAutosave();
 }
 
 function removeSeg(btn){
@@ -484,12 +502,14 @@ function removeSeg(btn){
     return;
   }
   btn.closest('[data-seg]').remove();
+  scheduleCfgAutosave();
 }
 
 function addSimpleSeg(){
   const list = $('simple-seg-list');
   if(!list) return;
   list.insertAdjacentHTML('beforeend', simpleSegRowHtml('08:00-22:00'));
+  scheduleCfgAutosave();
 }
 
 function removeSimpleSeg(btn){
@@ -501,6 +521,7 @@ function removeSimpleSeg(btn){
     return;
   }
   btn.closest('[data-seg]').remove();
+  scheduleCfgAutosave();
 }
 
 function simpleSegRowHtml(seg){
@@ -538,6 +559,7 @@ function removeCfgSeat(i){
   if(!state.currentCfg) return;
   state.currentCfg.seat_list = (state.currentCfg.seat_list || []).filter((_, idx) => idx !== i);
   renderCfgSeats();
+  scheduleCfgAutosave();
 }
 
 // ---------- seat priority drag-to-reorder ----------
@@ -607,6 +629,7 @@ function onSeatPointerUp(e){
   const [moved] = arr.splice(idx, 1);
   arr.splice(overIdx, 0, moved);
   renderCfgSeats();
+  scheduleCfgAutosave();
 }
 
 function setCfgMode(m){
@@ -616,12 +639,33 @@ function setCfgMode(m){
   });
   $('week-mode').style.display = m === 'week' ? '' : 'none';
   $('simple-mode').style.display = m === 'simple' ? '' : 'none';
+  scheduleCfgAutosave();
 }
 
-async function saveCfg(){
+let cfgAutosaveTimer = null;
+
+function scheduleCfgAutosave(){
+  if(!state.currentPid || !state.currentCfg) return;
+  clearTimeout(cfgAutosaveTimer);
+  cfgAutosaveTimer = setTimeout(() => saveCfg({ silent: true }), 700);
+}
+
+async function flushCfgAutosave(){
+  if(!cfgAutosaveTimer) return;
+  clearTimeout(cfgAutosaveTimer);
+  cfgAutosaveTimer = null;
+  await saveCfg({ silent: true });
+}
+
+async function saveCfg(options = {}){
+  const silent = options && options.silent === true;
+  clearTimeout(cfgAutosaveTimer);
+  cfgAutosaveTimer = null;
   if(!state.currentPid || !state.currentCfg){
-    toast('请先添加学号','error');
-    openSheet('accounts');
+    if(!silent){
+      toast('请先添加学号','error');
+      openSheet('accounts');
+    }
     return;
   }
 
@@ -660,19 +704,21 @@ async function saveCfg(){
     : { tomorrow: simpleSegs, week_time: wt };
 
   const body = {
-    vpn_password: $('cfg-vpn').value,
     seat_list: state.currentCfg.seat_list || [],
     mode,
     time: timeCfg,
     is_reserved: $('cfg-toggle-reserve').classList.contains('on') ? 'True' : 'False',
     late_protection: $('cfg-toggle-lp').classList.contains('on') ? 'True' : 'False',
   };
+  if(!silent) body.vpn_password = $('cfg-vpn').value;
 
   const btn = $('btn-save-cfg');
-  btn.disabled = true;
-  btn.textContent = '保存中...';
+  if(!silent){
+    btn.disabled = true;
+    btn.textContent = '保存中...';
+  }
   const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}`, { method:'POST', body });
-  if(ok){
+  if(ok && !silent){
     const napAuto = $('cfg-toggle-nap').classList.contains('on');
     if(!state.napConfig || state.napConfig.auto_daily !== napAuto){
       const newNap = { ...(state.napConfig || {}), auto_daily: napAuto };
@@ -681,14 +727,21 @@ async function saveCfg(){
       state.napConfig = newNap;
     }
   }
-  btn.disabled = false;
-  btn.textContent = '保存配置';
+  if(!silent){
+    btn.disabled = false;
+    btn.textContent = '保存配置';
+  }
   if(ok){
-    toast('配置已保存','success');
-    await loadAccounts();
-    setTimeout(() => go('home'), 400);
+    Object.assign(state.currentCfg, body);
+    const summary = state.accounts.find(account => account.pid === state.currentPid);
+    if(summary) Object.assign(summary, body);
+    if(!silent){
+      toast('配置已保存','success');
+      await loadAccounts();
+      setTimeout(() => go('home'), 400);
+    }
   }else{
-    toast(data.error || '保存失败','error');
+    toast((silent ? '自动保存失败：' : '') + (data.error || '保存失败'),'error');
   }
 }
 
@@ -1395,6 +1448,7 @@ function addSeat(){
   seats.push(s);
   state.currentCfg.seat_list = seats;
   renderCfgSeats();
+  scheduleCfgAutosave();
   toast('已添加 ' + s, 'success');
   closeSheet();
 }
