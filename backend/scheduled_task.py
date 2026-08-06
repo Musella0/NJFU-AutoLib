@@ -300,7 +300,6 @@ def reservation(res_item: Dict[str, Any]) -> None:
     # 加载账号信息
     pid = res_item["pid"]
     vpn_password = _dec(res_item["vpn_password"])
-    lib_password = _dec(res_item["lib_password"]).replace('！', '!')
     seat_list = res_item["seat_list"]
 
     try:
@@ -324,7 +323,7 @@ def reservation(res_item: Dict[str, Any]) -> None:
         log_with_user(logger, 'info', pid, '系统初始化', "开始初始化图书馆系统")
         library = LibrarySystem(
             username=pid,
-            password=lib_password,
+            password=vpn_password,
             vpn_password=vpn_password
         )
 
@@ -502,7 +501,7 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
 
         library = LibrarySystem(
             username=user["pid"],
-            password=_dec(user["lib_password"]),
+            password=_dec(user["vpn_password"]),
             vpn_password=_dec(user["vpn_password"])
         )
 
@@ -736,11 +735,10 @@ def auto_nap_action(pid: str) -> None:
         nap_seat_name = (nap_cfg.get("seat") or "").strip()
 
         vpn_password = _dec(cfg["vpn_password"])
-        lib_password = _dec(cfg["lib_password"]).replace('！', '!')
 
         library = LibrarySystem(
             username=pid,
-            password=lib_password,
+            password=vpn_password,
             vpn_password=vpn_password,
         )
 
@@ -829,7 +827,7 @@ def scan_and_record_visits() -> None:
     try:
         users = list(user_config_info.find(
             {"owned_seat": {"$exists": True, "$ne": {}}, "verified": True},
-            {"pid": 1, "vpn_password": 1, "lib_password": 1, "owned_seat": 1}
+            {"pid": 1, "vpn_password": 1, "owned_seat": 1}
         ))
     except Exception as e:
         log_with_user(logger, 'error', '系统', '道馆统计', f"查询用户列表异常: {str(e)}")
@@ -847,7 +845,7 @@ def scan_and_record_visits() -> None:
         try:
             library = LibrarySystem(
                 username=pid,
-                password=_dec(user["lib_password"]),
+                password=_dec(user["vpn_password"]),
                 vpn_password=_dec(user["vpn_password"])
             )
             res_list, _ = library.get_reservation_info()

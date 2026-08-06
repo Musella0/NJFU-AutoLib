@@ -14,13 +14,12 @@ def require_admin():
     if not session.get("is_admin"):
         return jsonify({"error": "需要管理员权限"}), 403
 
-# 构建 MongoDB 连接字符串，暂时去掉密码验证
-# WARNING: 这会禁用应用层面的数据库认证，带来安全风险，仅用于调试！
-# 在生产环境中应启用并正确配置数据库认证
+# 构建带认证信息的 MongoDB 连接字符串。
 mongo_uri = config.get_mongo_uri()
 
 try:
-    print(f"正在连接 MongoDB: {mongo_uri}")
+    # 不记录完整 URI，避免将数据库凭据写入容器日志。
+    print(f"正在连接 MongoDB: {config.DB_IP}")
     mongo_client = MongoClient(mongo_uri)
     # 测试连接，如果认证在服务器端开启，此处仍可能失败
     print("正在测试连接...")
@@ -29,7 +28,7 @@ try:
     db = mongo_client[config.DB_NAME]  # 使用配置的数据库名
     user_cfg = db.user_config_info
     ann = db.announcements
-    print("✅ MongoDB 连接成功！(应用未启用密码验证)")
+    print("✅ MongoDB 连接成功！")
 except Exception as e:
     import traceback
 
@@ -74,7 +73,6 @@ def insert_full_reservation():
     {
       "pid": "...",
       "vpn_password": "...",
-      "lib_password": "...",
       "seat_list": [...],
       "mode": "...",
       "time": {...},
@@ -94,6 +92,7 @@ def insert_full_reservation():
         return jsonify(*err)
     if 'pid' not in data:
         return jsonify({"error": "缺少 pid"}), 400
+    data.pop("lib_password", None)
 
     # 获取原有数据
     existing_data = user_cfg.find_one({"pid": data["pid"]})
@@ -103,6 +102,7 @@ def insert_full_reservation():
         # 删除MongoDB的_id字段
         if "_id" in existing_data:
             del existing_data["_id"]
+        existing_data.pop("lib_password", None)
 
         # 特殊处理priority字段
         if "priority" not in existing_data:
@@ -113,9 +113,8 @@ def insert_full_reservation():
             if value is not None:  # 只更新非None的字段
                 existing_data[key] = value
         # 加密敏感字段
-        for field in ("vpn_password", "lib_password"):
-            if field in existing_data and existing_data[field]:
-                existing_data[field] = _enc(existing_data[field])
+        if existing_data.get("vpn_password"):
+            existing_data["vpn_password"] = _enc(existing_data["vpn_password"])
         # 更新更新时间
         existing_data['updated_at'] = datetime.utcnow()
         # 使用更新后的数据
@@ -127,15 +126,14 @@ def insert_full_reservation():
         if "priority" not in rec:
             rec["priority"] = 0
         # 加密敏感字段
-        for field in ("vpn_password", "lib_password"):
-            if field in rec and rec[field]:
-                rec[field] = _enc(rec[field])
+        if rec.get("vpn_password"):
+            rec["vpn_password"] = _enc(rec["vpn_password"])
         rec['updated_at'] = datetime.utcnow()
 
     # 更新数据库
     user_cfg.update_one(
         {"pid": data["pid"]},
-        {"$set": rec},
+        {"$set": rec, "$unset": {"lib_password": ""}},
         upsert=True
     )
 
@@ -150,13 +148,13 @@ def insert_full_reservation():
 def insert_or_update_reservation():
     """
     插入或更新用户配置（预约信息）
-    包括：vpn_password、lib_password、seat_list
+    包括：vpn_password、seat_list
     """
     data, err = get_json_or_400()
     if err:
         return jsonify(*err)
 
-    required = ["pid", "vpn_password", "lib_password", "seat_list"]
+    required = ["pid", "vpn_password", "seat_list"]
     missing = [f for f in required if f not in data]
     if missing:
         return jsonify({"error": f"缺少字段: {', '.join(missing)}"}), 400
@@ -164,11 +162,17 @@ def insert_or_update_reservation():
     rec = {
         "pid": data["pid"],
         "vpn_password": _enc(data["vpn_password"]),
-        "lib_password": _enc(data["lib_password"]),
         "seat_list": data["seat_list"],
     }
-    result, code = upsert_collection(user_cfg, {"pid": rec["pid"]}, rec)
-    return jsonify(result), code
+    try:
+        user_cfg.update_one(
+            {"pid": rec["pid"]},
+            {"$set": rec, "$unset": {"lib_password": ""}},
+            upsert=True,
+        )
+        return jsonify({"message": "操作成功！"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @database_bp.route("/reservation/time", methods=["POST"])
@@ -320,8 +324,7 @@ def query_reservation_info():
     请求体:
     {
         "pid": "学号",
-        "vpn_password": "VPN密码",
-        "lib_password": "图书馆密码",
+        "vpn_password": "统一身份认证密码",
         "begin_date": "开始日期(可选)",
         "end_date": "结束日期(可选)",
         "page": 页码(可选),
@@ -353,7 +356,7 @@ def query_reservation_info():
         return jsonify(*err)
 
     # 验证必要字段
-    required = ["pid", "vpn_password", "lib_password"]
+    required = ["pid", "vpn_password"]
     missing = [f for f in required if f not in data]
     if missing:
         return jsonify({"error": f"缺少必要字段: {', '.join(missing)}"}), 400
@@ -362,7 +365,7 @@ def query_reservation_info():
         # 初始化图书馆系统
         library = LibrarySystem(
             username=data["pid"],
-            password=_dec(data["lib_password"]),
+            password=_dec(data["vpn_password"]),
             vpn_password=_dec(data["vpn_password"])
         )
 
@@ -400,8 +403,7 @@ def delete_reservation():
     请求体:
     {
         "pid": "学号",
-        "vpn_password": "VPN密码",
-        "lib_password": "图书馆密码",
+        "vpn_password": "统一身份认证密码",
         "uuid": "预约记录的UUID"
     }
 
@@ -416,7 +418,7 @@ def delete_reservation():
         return jsonify(*err)
 
     # 验证必要字段
-    required = ["pid", "vpn_password", "lib_password", "uuid"]
+    required = ["pid", "vpn_password", "uuid"]
     missing = [f for f in required if f not in data]
     if missing:
         return jsonify({"error": f"缺少必要字段: {', '.join(missing)}"}), 400
@@ -425,7 +427,7 @@ def delete_reservation():
         # 初始化图书馆系统（解密密码）
         library = LibrarySystem(
             username=data["pid"],
-            password=_dec(data["lib_password"]),
+            password=_dec(data["vpn_password"]),
             vpn_password=_dec(data["vpn_password"])
         )
 

@@ -8,6 +8,3 @@ flask-cors
 python-dotenv
 pymongo
 apscheduler
-pyotp
-qrcode
-Pillow

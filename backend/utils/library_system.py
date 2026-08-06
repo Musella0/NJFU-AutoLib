@@ -20,7 +20,10 @@
 """
 
 from datetime import datetime, timedelta
+import html
+import re
 from typing import Dict, List, Optional, Tuple, Any, Union
+from urllib.parse import urljoin, urlparse
 
 import requests
 from pymongo import MongoClient, ASCENDING, DESCENDING
@@ -34,6 +37,42 @@ from utils.vpn_system import VPNSystem
 
 # 获取日志记录器
 logger = logging.getLogger(__name__)
+
+
+class LibraryLoginError(Exception):
+    """图书馆登录失败，并保留上游返回的错误码和原始消息。"""
+
+    is_credentials_error = False
+
+    def __init__(self, message: str, code: Optional[Union[int, str]] = None) -> None:
+        self.code = code
+        self.server_message = message
+        detail = f"code {code}：{message}" if code is not None else message
+        super().__init__(detail)
+
+
+class LibraryCredentialsError(LibraryLoginError):
+    """上游明确指出用户名或密码不正确。"""
+
+    is_credentials_error = True
+
+
+def _is_credentials_error(message: str) -> bool:
+    """只识别明确提到用户名/账号与密码错误的响应。"""
+    normalized = message.replace(" ", "")
+    credential_markers = (
+        "用户名或密码错误",
+        "用户名或密码不正确",
+        "账号或密码错误",
+        "账号或密码不正确",
+        "帐号或密码错误",
+        "帐号或密码不正确",
+        "登录名或密码错误",
+        "登录名或密码不正确",
+        "密码错误",
+        "密码不正确",
+    )
+    return any(marker in normalized for marker in credential_markers)
 
 def log_with_user(level: str, user: str, operation: str, message: str) -> None:
     """
@@ -93,7 +132,7 @@ class LibrarySystem(BaseSystem):
 
         Args:
             username: 用户名（学号）
-            password: 图书馆密码
+            password: 旧版图书馆密码（仅在 CAS SSO 失败回退时使用）
             vpn_password: VPN密码，如果提供则自动登录VPN
             session: 可选的共享会话对象
         """
@@ -170,36 +209,241 @@ class LibrarySystem(BaseSystem):
             print(f"VPN登录失败: {str(e)}")
             raise
 
+    def _wrap_internal_url(self, url: str) -> str:
+        """
+        将原始 libseat 地址包装为 webvpn 代理地址。
+
+        输出格式与项目现有请求一致：
+        {base_url}{path}{vpn_suffix}&{query}
+        """
+        parsed = urlparse(url)
+        wrapped = f"{self.base_url}{parsed.path.lstrip('/')}{self.vpn_suffix}"
+        if parsed.query:
+            wrapped += f"&{parsed.query}"
+        return wrapped
+
+    def _resolve_sso_url(
+        self,
+        next_url: str,
+        current_url: Optional[str] = None,
+    ) -> str:
+        """将 SSO 跳转目标规整为可以直接请求的绝对地址。"""
+        next_url = html.unescape(next_url.strip())
+
+        if next_url.startswith("//"):
+            next_url = "https:" + next_url
+        elif not urlparse(next_url).scheme:
+            if current_url:
+                next_url = urljoin(current_url, next_url)
+            elif next_url.startswith("/"):
+                next_url = "https://webvpn.njfu.edu.cn" + next_url
+
+        parsed = urlparse(next_url)
+        if (parsed.hostname or "").lower() == "libseat.njfu.edu.cn":
+            return self._wrap_internal_url(next_url)
+        return next_url
+
+    def _follow_sso_redirects(self, url: str, max_hops: int = 15) -> bool:
+        """
+        跟随 CAS SSO 跳转链直到落地。
+
+        支持普通 HTTP 3xx 跳转，以及 webvpn 返回的
+        window.location.href JS 垫片页。
+        """
+        for hop in range(max_hops):
+            resp = self.session.get(
+                url,
+                allow_redirects=False,
+                timeout=30,
+            )
+
+            if resp.status_code >= 400:
+                self._sso_error = (
+                    f"SSO跳转第{hop + 1}跳返回HTTP {resp.status_code}"
+                )
+                log_with_user(
+                    'warning', self.username, 'CAS登录', self._sso_error
+                )
+                return False
+
+            next_url = None
+            if resp.status_code in (301, 302, 303, 307, 308):
+                next_url = resp.headers.get("Location")
+                if not next_url:
+                    self._sso_error = (
+                        f"SSO跳转第{hop + 1}跳缺少Location响应头"
+                    )
+                    log_with_user(
+                        'warning', self.username, 'CAS登录', self._sso_error
+                    )
+                    return False
+
+            if not next_url and resp.status_code == 200:
+                match = re.search(
+                    r"""window\.location\.href\s*=\s*['"]([^'"]+)['"]""",
+                    resp.text,
+                )
+                if match:
+                    next_url = match.group(1)
+
+            if not next_url:
+                log_with_user(
+                    'debug',
+                    self.username,
+                    'CAS登录',
+                    f"SSO跳转链结束于第{hop + 1}跳，状态码{resp.status_code}",
+                )
+                return True
+
+            url = self._resolve_sso_url(next_url, current_url=url)
+
+        self._sso_error = f"SSO跳转超过最大次数（{max_hops}跳）"
+        log_with_user('warning', self.username, 'CAS登录', self._sso_error)
+        return False
+
+    def _login_via_cas_sso(self) -> bool:
+        """
+        通过统一身份认证（CAS SSO）登录图书馆系统。
+
+        前提是 self.session 已完成 webvpn 登录并持有 CAS 会话。
+        失败原因写入 self._sso_error，供上层错误信息使用。
+        """
+        self._sso_error = "未知错误"
+
+        try:
+            # 现有逆向记录中出现过两套附加参数；逐套尝试，
+            # 只要接口成功返回 data 就停止，不手工拼接 URL 编码。
+            param_sets = [
+                {
+                    "finalAddress": "http://libseat.njfu.edu.cn/",
+                    "manager": "false",
+                    "consoleType": "16",
+                },
+                {
+                    "finalAddress": "http://libseat.njfu.edu.cn/",
+                    "errPageUrl": "",
+                    "manScSpaceReserv": "",
+                },
+            ]
+
+            entry = None
+            attempt_errors = []
+            address_url = (
+                f"{self.base_url}ic-web/auth/address{self.vpn_suffix}"
+            )
+
+            for param_index, params in enumerate(param_sets, start=1):
+                try:
+                    addr_resp = self.session.get(
+                        address_url,
+                        params=params,
+                        timeout=30,
+                    )
+                    if addr_resp.status_code != 200:
+                        attempt_errors.append(
+                            f"HTTP {addr_resp.status_code}"
+                        )
+                        continue
+
+                    addr_result = addr_resp.json()
+                    entry = addr_result.get("data")
+                    if entry:
+                        self._sso_param_set = param_index
+                        break
+
+                    attempt_errors.append(
+                        addr_result.get("message", "响应data为空")
+                    )
+                except Exception as e:
+                    attempt_errors.append(str(e))
+
+            if not entry:
+                detail = "；".join(attempt_errors) or "无有效响应"
+                self._sso_error = f"获取SSO入口地址失败: {detail}"
+                log_with_user(
+                    'warning', self.username, 'CAS登录', self._sso_error
+                )
+                return False
+
+            entry = self._resolve_sso_url(entry)
+            if not self._follow_sso_redirects(entry):
+                return False
+
+            info_resp = self.session.get(
+                f"{self.base_url}ic-web/auth/userInfo{self.vpn_suffix}",
+                timeout=30,
+            )
+            if info_resp.status_code != 200:
+                self._sso_error = (
+                    f"获取用户信息返回HTTP {info_resp.status_code}"
+                )
+                log_with_user(
+                    'warning', self.username, 'CAS登录', self._sso_error
+                )
+                return False
+
+            result = info_resp.json()
+            if result.get("code") != 0 or not result.get("data"):
+                self._sso_error = (
+                    "SSO后仍未登录: "
+                    f"{result.get('message', '未知错误')}"
+                )
+                log_with_user(
+                    'warning', self.username, 'CAS登录', self._sso_error
+                )
+                return False
+
+            user_info = result["data"]
+            self._set_user_cookie(user_info)
+            self.user_info = user_info
+            log_with_user(
+                'info',
+                self.username,
+                'CAS登录',
+                "通过统一身份认证（CAS SSO）登录成功",
+            )
+            return True
+
+        except Exception as e:
+            self._sso_error = f"CAS单点登录异常: {str(e)}"
+            log_with_user(
+                'warning', self.username, 'CAS登录', self._sso_error
+            )
+            return False
+
     def _initialize_login(self) -> None:
         """
-        初始化登录流程
+        登录图书馆系统。
 
-        执行完整的登录流程：
-        1. 获取初始Cookie
-        2. 获取公钥
-        3. 加密密码并登录
-        4. 设置用户Cookie
-
-        Raises:
-            Exception: 登录过程中的任何步骤失败都会抛出异常，包含具体原因
+        优先复用 webvpn 会话走 CAS SSO；SSO 主路径完全不使用
+        图书馆密码。若 SSO 失败，则保留旧版 RSA 密码登录作为
+        兼容回退，并在最终异常中同时报告两条路径的失败原因。
         """
-        # 获取初始Cookie
-        if not self._get_initial_cookie():
-            raise Exception("登录失败: 获取初始Cookie失败")
+        if self._login_via_cas_sso():
+            return
 
-        # 获取公钥
-        public_key, nonce = self._get_public_key()
-        if not public_key or not nonce:
-            raise Exception("登录失败: 获取公钥失败")
+        sso_error = getattr(self, "_sso_error", "未知错误")
 
-        # 执行登录
-        user_info = self._perform_login(public_key, nonce)
-        if not user_info:
-            raise Exception("登录失败: 用户名或密码错误")
+        try:
+            if not self._get_initial_cookie():
+                raise Exception("获取初始Cookie失败")
 
-        # 设置Cookie和用户信息
-        self._set_user_cookie(user_info)
-        self.user_info = user_info
+            public_key, nonce = self._get_public_key()
+            if not public_key or not nonce:
+                raise Exception("获取公钥失败")
+
+            user_info = self._perform_login(public_key, nonce)
+            if not user_info:
+                raise Exception("用户名或密码错误，或旧登录接口已停用")
+
+            self._set_user_cookie(user_info)
+            self.user_info = user_info
+
+        except Exception as old_login_error:
+            raise Exception(
+                f"登录失败: CAS SSO未成功（{sso_error}）；"
+                f"旧版密码登录回退同样失败（{old_login_error}）"
+            ) from old_login_error
 
     def ensure_login(self) -> Optional[Dict[str, Any]]:
         """
@@ -254,7 +498,7 @@ class LibrarySystem(BaseSystem):
             log_with_user('error', self.username, '公钥获取', f"获取公钥时发生异常: {str(e)}")
             return None, None
 
-    def _perform_login(self, public_key: str, nonce: str) -> Optional[Dict[str, Any]]:
+    def _perform_login(self, public_key: str, nonce: str) -> Dict[str, Any]:
         """
         执行登录请求
 
@@ -263,7 +507,11 @@ class LibrarySystem(BaseSystem):
             nonce: 随机字符串
 
         Returns:
-            Optional[Dict[str, Any]]: 登录成功返回用户信息，失败返回None
+            Dict[str, Any]: 登录成功后的用户信息
+
+        Raises:
+            LibraryCredentialsError: 上游明确返回用户名或密码错误
+            LibraryLoginError: HTTP、响应格式或其他业务认证错误
         """
         try:
             # 加密密码
@@ -282,18 +530,31 @@ class LibrarySystem(BaseSystem):
             login_resp = self.session.post(self.login_url, json=login_data)
 
             if login_resp.status_code != 200:
-                log_with_user('error', self.username, '登录', f"登录请求失败: 状态码 {login_resp.status_code}")
-                return None
+                error_msg = f"登录请求失败：HTTP {login_resp.status_code}"
+                log_with_user('error', self.username, '登录', error_msg)
+                raise LibraryLoginError(error_msg)
 
             login_result = login_resp.json()
             if login_result.get('code') != 0:
-                log_with_user('error', self.username, '登录', f"登录失败: {login_result.get('message', '未知错误')}")
-                return None
+                code = login_result.get('code')
+                message = str(login_result.get('message') or '未知错误')
+                log_with_user('error', self.username, '登录', f"登录失败: code {code}: {message}")
+                error_type = LibraryCredentialsError if _is_credentials_error(message) else LibraryLoginError
+                raise error_type(message, code=code)
 
-            return login_result['data']
+            user_info = login_result.get('data')
+            if not isinstance(user_info, dict) or not user_info:
+                error_msg = "登录响应缺少用户信息"
+                log_with_user('error', self.username, '登录', error_msg)
+                raise LibraryLoginError(error_msg)
+
+            return user_info
+        except LibraryLoginError:
+            raise
         except Exception as e:
-            log_with_user('error', self.username, '登录', f"登录请求时发生异常: {str(e)}")
-            return None
+            error_msg = f"登录请求异常：{str(e)}"
+            log_with_user('error', self.username, '登录', error_msg)
+            raise LibraryLoginError(error_msg) from e
 
     def _set_user_cookie(self, user_info: Dict[str, Any]) -> None:
         """
@@ -756,4 +1017,3 @@ class LibrarySystem(BaseSystem):
             formatted_data.append(formatted_item)
 
         return formatted_data, owned_seat
-

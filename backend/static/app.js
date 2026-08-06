@@ -327,10 +327,10 @@ async function deleteAcct(pid){
 }
 
 async function verifyAdd(){
-  const pidEl = $('new-pid'), vpnEl = $('new-vpn'), libEl = $('new-lib');
-  const pid = pidEl.value.trim(), vpn = vpnEl.value, lib = libEl.value;
+  const pidEl = $('new-pid'), vpnEl = $('new-vpn');
+  const pid = pidEl.value.trim(), vpn = vpnEl.value;
   if(!pid){ toast('请输入学号','error'); return; }
-  if(!vpn || !lib){ toast('请填写两个密码','error'); return; }
+  if(!vpn){ toast('请填写统一身份认证密码','error'); return; }
 
   const btn = $('btn-verify-add');
   btn.disabled = true;
@@ -339,7 +339,7 @@ async function verifyAdd(){
   // Step 1: verify credentials before saving
   const vres = await api(`/api/my/accounts/${encodeURIComponent(pid)}/verify`, {
     method:'POST',
-    body:{ vpn_password: vpn, lib_password: lib }
+    body:{ vpn_password: vpn }
   });
   if(!vres.ok || vres.data.verified !== true){
     btn.disabled = false;
@@ -351,7 +351,7 @@ async function verifyAdd(){
   // Step 2: save (backend defaults: is_reserved=True, late_protection=False)
   const sres = await api(`/api/my/accounts/${encodeURIComponent(pid)}`, {
     method:'POST',
-    body:{ vpn_password: vpn, lib_password: lib, mode: 'week_time', verified: true }
+    body:{ vpn_password: vpn, mode: 'week_time', verified: true }
   });
   btn.disabled = false;
   btn.textContent = '验证并保存';
@@ -406,9 +406,8 @@ function renderConfig(){
   $('cfg-toggle-lp').classList.toggle('on', cfg.late_protection === 'True');
   $('cfg-toggle-nap').classList.toggle('on', !!(state.napConfig && state.napConfig.auto_daily));
 
-  // Passwords
+  // Unified identity credential
   $('cfg-vpn').value = cfg.vpn_password || '';
-  $('cfg-lib').value = cfg.lib_password || '';
 
   $('cfg-pid-label').textContent = cfg.pid;
   $('cfg-verify-badge').textContent = cfg.verified ? '✓ 已验证' : '⚠ 未验证';
@@ -662,7 +661,6 @@ async function saveCfg(){
 
   const body = {
     vpn_password: $('cfg-vpn').value,
-    lib_password: $('cfg-lib').value,
     seat_list: state.currentCfg.seat_list || [],
     mode,
     time: timeCfg,
@@ -1533,11 +1531,10 @@ const SHEETS = {
   'add-pid': () => `
     <div class="grab"></div>
     <h3>添加新学号</h3>
-    <div class="desc">填写学号和两个密码，我们会先验证再保存。</div>
+    <div class="desc">填写学号和统一身份认证密码，我们会先验证再保存。</div>
     <div class="col gap-sm">
       <div class="field"><label>学号</label><input type="text" id="new-pid" placeholder="18210xxxxx"></div>
-      <div class="field"><label>VPN 密码（统一身份认证）</label><input type="password" id="new-vpn"></div>
-      <div class="field"><label>图书馆密码（IC 空间系统）</label><input type="password" id="new-lib"></div>
+      <div class="field"><label>统一身份认证密码（网上办事大厅）</label><input type="password" id="new-vpn"></div>
     </div>
     <div class="row-flex mt-lg">
       <button class="btn ghost grow" onclick="closeSheet()">取消</button>

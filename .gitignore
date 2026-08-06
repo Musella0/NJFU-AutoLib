@@ -6,3 +6,5 @@ CLAUDE.md
 .claude/
 __pycache__/
 *.pyc
+# Local encrypted administrator credentials
+data/

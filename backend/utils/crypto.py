@@ -1,5 +1,5 @@
 """
-对称加密工具 — 用于加密存储用户凭据（vpn_password / lib_password）
+对称加密工具 — 用于加密存储用户统一身份认证凭据（vpn_password）
 
 使用 AES-256-GCM，密钥从环境变量 ENCRYPTION_KEY 读取（32 字节 hex 字符串）。
 若未配置则启动时自动生成并打印警告（仅适用于开发环境）。

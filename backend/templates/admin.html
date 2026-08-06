@@ -29,9 +29,9 @@
   .al-field input:focus{border-color:var(--accent)}
   .al-btn{width:100%;padding:10px;background:var(--accent);color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:500;cursor:pointer;font-family:var(--sans);margin-top:8px}
   .al-btn:hover{opacity:.9}
-  .al-qr{text-align:center;margin:16px 0}
-  .al-qr img{border-radius:8px;max-width:200px}
   .al-hint{font-size:11px;color:var(--text3);text-align:center;margin-top:8px}
+  .al-link{display:block;margin:12px auto 0;background:none;border:none;color:var(--accent);font-size:12px;cursor:pointer;font-family:var(--sans)}
+  .al-link:hover{text-decoration:underline}
   /* Stats */
   .stats{display:flex;gap:12px;margin-bottom:24px}
   .stat-card{flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:16px 20px}
@@ -145,7 +145,6 @@
   <div class="topbar-right" id="admin-nav" style="display:none">
     <a href="/" class="topbar-btn">← 用户端</a>
     <button class="topbar-btn" onclick="loadUsers()">↻ 刷新</button>
-    <button class="topbar-btn" onclick="setupTotp()">TOTP 设置</button>
     <button class="topbar-btn" onclick="adminLogout()">退出</button>
   </div>
 </div>
@@ -156,21 +155,26 @@
     <div class="admin-login-wrap">
       <div class="admin-login-card">
         <div class="al-title">管理员登录</div>
-        <div class="al-field"><label>动态验证码 (TOTP)</label><input type="text" id="adm-totp" placeholder="6位数字" maxlength="6" autofocus></div>
+        <div class="al-field"><label>管理员账号</label><input type="text" id="adm-username" autocomplete="username" autofocus></div>
+        <div class="al-field"><label>密码</label><input type="password" id="adm-password" autocomplete="current-password"></div>
         <button class="al-btn" onclick="adminLogin()">登录</button>
-        <div class="al-hint">使用 Google Authenticator / 微软验证器</div>
+        <button class="al-link" onclick="showPasswordReset()">忘记密码？使用邮箱验证码重置</button>
       </div>
     </div>
   </div>
 
-  <!-- TOTP Setup Modal -->
-  <div id="totp-setup" style="display:none">
+  <!-- Password reset -->
+  <div id="password-reset" style="display:none">
     <div class="admin-login-wrap">
       <div class="admin-login-card">
-        <div class="al-title">TOTP 绑定</div>
-        <div class="al-qr" id="totp-qr"></div>
-        <div class="al-hint">用验证器 App 扫描二维码绑定<br>或手动输入密钥: <code id="totp-secret" style="color:var(--accent)"></code></div>
-        <button class="al-btn" onclick="document.getElementById('totp-setup').style.display='none';document.getElementById('admin-main').style.display=''">完成</button>
+        <div class="al-title">找回管理员密码</div>
+        <div class="al-field"><label>管理员账号</label><input type="text" id="reset-username" autocomplete="username"></div>
+        <button class="al-btn" id="btn-send-code" onclick="requestResetCode()">发送邮箱验证码</button>
+        <div class="al-field" style="margin-top:16px"><label>邮箱验证码</label><input type="text" id="reset-code" inputmode="numeric" maxlength="6" autocomplete="one-time-code"></div>
+        <div class="al-field"><label>新密码</label><input type="password" id="reset-password" autocomplete="new-password" placeholder="至少8位，包含字母和数字"></div>
+        <button class="al-btn" onclick="confirmPasswordReset()">重置密码</button>
+        <div class="al-hint">验证码 10 分钟内有效，最多尝试 5 次</div>
+        <button class="al-link" onclick="showAdminLogin()">返回登录</button>
       </div>
     </div>
   </div>
@@ -307,24 +311,34 @@ function esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace
 // ===== Admin Auth =====
 async function checkAdmin(){try{const r=await fetch('/api/admin/me'),d=await r.json();if(d.is_admin){showAdminMain();}else{document.getElementById('admin-login').style.display='';}}catch(e){document.getElementById('admin-login').style.display='';}}
 async function adminLogin(){
-  const t=document.getElementById('adm-totp').value;
-  try{const r=await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({totp_code:t})});const d=await r.json();if(r.ok){toast('登录成功','success');showAdminMain();}else toast(d.error,'error');}catch(e){toast('网络错误','error')}
+  const username=document.getElementById('adm-username').value.trim();
+  const password=document.getElementById('adm-password').value;
+  if(!username||!password)return toast('请输入管理员账号和密码','error');
+  try{const r=await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password})});const d=await r.json();if(r.ok){document.getElementById('adm-password').value='';toast('登录成功','success');showAdminMain();}else toast(d.error,'error');}catch(e){toast('网络错误','error')}
 }
 async function adminLogout(){await fetch('/api/admin/logout',{method:'POST'});location.reload();}
-function showAdminMain(){document.getElementById('admin-login').style.display='none';document.getElementById('totp-setup').style.display='none';document.getElementById('admin-main').style.display='';document.getElementById('admin-nav').style.display='flex';loadUsers();loadAnnouncements();}
-async function setupTotp(){
-  try{const r=await fetch('/api/admin/totp_setup'),d=await r.json();if(d.error){toast(d.error,'error');return;}
-    document.getElementById('totp-qr').innerHTML=`<img src="${d.qr_image}" alt="TOTP QR">`;
-    document.getElementById('totp-secret').textContent=d.secret;
-    document.getElementById('admin-main').style.display='none';document.getElementById('totp-setup').style.display='';}
-  catch(e){toast('获取失败','error')}
+function showAdminLogin(){document.getElementById('password-reset').style.display='none';document.getElementById('admin-main').style.display='none';document.getElementById('admin-nav').style.display='none';document.getElementById('admin-login').style.display='';}
+function showPasswordReset(){document.getElementById('reset-username').value=document.getElementById('adm-username').value.trim();document.getElementById('admin-login').style.display='none';document.getElementById('password-reset').style.display='';}
+function showAdminMain(){document.getElementById('admin-login').style.display='none';document.getElementById('password-reset').style.display='none';document.getElementById('admin-main').style.display='';document.getElementById('admin-nav').style.display='flex';loadUsers();loadAnnouncements();}
+async function requestResetCode(){
+  const username=document.getElementById('reset-username').value.trim();
+  if(!username)return toast('请输入管理员账号','error');
+  const btn=document.getElementById('btn-send-code');btn.disabled=true;
+  try{const r=await fetch('/api/admin/password-reset/request',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username})});const d=await r.json();toast(d.message||d.error,r.ok?'success':'error');}catch(e){toast('网络错误','error')}finally{btn.disabled=false;}
+}
+async function confirmPasswordReset(){
+  const username=document.getElementById('reset-username').value.trim();
+  const code=document.getElementById('reset-code').value.trim();
+  const new_password=document.getElementById('reset-password').value;
+  if(!username||!code||!new_password)return toast('请填写账号、验证码和新密码','error');
+  try{const r=await fetch('/api/admin/password-reset/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,code,new_password})});const d=await r.json();if(r.ok){toast(d.message,'success');document.getElementById('adm-username').value=username;document.getElementById('reset-code').value='';document.getElementById('reset-password').value='';showAdminLogin();}else toast(d.error,'error');}catch(e){toast('网络错误','error')}
 }
 
 // ===== Users =====
 async function loadUsers(){
   try{
     document.getElementById('grid').innerHTML='<div style="color:var(--text3);text-align:center;padding:40px">加载中…</div>';
-    const r=await fetch('/api/users',{cache:'no-store'});if(r.status===403){document.getElementById('admin-main').style.display='none';document.getElementById('admin-nav').style.display='none';document.getElementById('admin-login').style.display='';toast('登录已失效，请重新验证','error');return;}
+    const r=await fetch('/api/users',{cache:'no-store'});if(r.status===403){showAdminLogin();toast('登录已失效，请重新登录','error');return;}
     if(!r.ok){const d=await r.json().catch(()=>({}));document.getElementById('grid').innerHTML=`<div style="color:var(--red);text-align:center;padding:40px">加载失败：${d.error||r.statusText}</div>`;return;}
     users=await r.json();
     if(!Array.isArray(users)){document.getElementById('grid').innerHTML='<div style="color:var(--red);text-align:center;padding:40px">加载失败：数据格式异常</div>';return;}

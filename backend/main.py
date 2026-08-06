@@ -1,7 +1,8 @@
 import os
-import io
-import base64
+import secrets
+import time
 from functools import wraps
+from threading import Lock
 from flask import Flask, render_template, jsonify, request, session
 from flask_cors import CORS
 from flask_limiter import Limiter
@@ -12,7 +13,15 @@ from bson.errors import InvalidId
 from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
 from utils import config
+from utils.admin_credentials import (
+    AdminCredentialError,
+    load_credentials as load_admin_credentials,
+    update_password as update_admin_password,
+    validate_password as validate_admin_password,
+    verify_login as verify_admin_login,
+)
 from utils.crypto import encrypt as _enc, decrypt as _dec
+from utils.notify import send_email
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", os.urandom(32).hex())
@@ -33,8 +42,10 @@ limiter = Limiter(
 from blueprints.database_bp import database_bp
 app.register_blueprint(database_bp, url_prefix="/db")
 
-# Admin TOTP secret from env
-ADMIN_TOTP_SECRET = os.environ.get("ADMIN_TOTP_SECRET", "")
+ADMIN_RESET_CODE_TTL = 10 * 60
+ADMIN_RESET_MAX_ATTEMPTS = 5
+_admin_reset_codes = {}
+_admin_reset_lock = Lock()
 
 
 def get_db():
@@ -86,10 +97,28 @@ def login_required(f):
 def admin_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if not session.get("is_admin"):
+        if not _admin_session_valid():
+            session.pop("is_admin", None)
+            session.pop("admin_auth_version", None)
+            session.pop("admin_username", None)
             return jsonify({"error": "需要管理员权限", "need_admin_login": True}), 403
         return f(*args, **kwargs)
     return decorated
+
+
+def _admin_session_valid():
+    if not session.get("is_admin") or not session.get("admin_auth_version"):
+        return False
+    try:
+        credentials = load_admin_credentials()
+    except AdminCredentialError:
+        return False
+    if not credentials:
+        return False
+    return secrets.compare_digest(
+        session.get("admin_auth_version", ""),
+        credentials["auth_version"],
+    )
 
 
 def _get_decrypted_cfg(pid: str, uid: str):
@@ -98,9 +127,8 @@ def _get_decrypted_cfg(pid: str, uid: str):
     cfg = db.user_config_info.find_one({"pid": pid, "web_uid": uid})
     client.close()
     if cfg:
-        for field in ("vpn_password", "lib_password"):
-            if field in cfg and cfg[field]:
-                cfg[field] = _dec(cfg[field])
+        if cfg.get("vpn_password"):
+            cfg["vpn_password"] = _dec(cfg["vpn_password"])
     return cfg
 
 
@@ -257,63 +285,141 @@ def update_profile():
     }), 200
 
 
-# ==================== Admin Auth (2FA) ====================
+# ==================== Admin Auth ====================
 
 @app.route("/api/admin/login", methods=["POST"])
 @limiter.limit("5/minute")
 def admin_login():
-    data = request.get_json()
-    totp_code = data.get("totp_code", "")
+    data = request.get_json(silent=True) or {}
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+    try:
+        valid, credentials = verify_admin_login(username, password)
+    except AdminCredentialError:
+        return jsonify({"error": "管理员凭据文件无法读取，请检查服务器配置"}), 503
+    if credentials is None:
+        return jsonify({"error": "管理员账号尚未初始化"}), 503
+    if not valid:
+        return jsonify({"error": "管理员账号或密码错误"}), 401
 
-    # TOTP verification (required)
-    if not ADMIN_TOTP_SECRET:
-        return jsonify({"error": "请先在 .env 中配置 ADMIN_TOTP_SECRET"}), 400
-
-    import pyotp
-    totp = pyotp.TOTP(ADMIN_TOTP_SECRET)
-    if not totp.verify(totp_code, valid_window=1):
-        return jsonify({"error": "动态验证码错误"}), 401
-
+    session.clear()
     session["is_admin"] = True
+    session["admin_auth_version"] = credentials["auth_version"]
+    session["admin_username"] = credentials["username"]
     return jsonify({"message": "管理员登录成功"}), 200
 
 
-@app.route("/api/admin/totp_setup", methods=["GET"])
-@admin_required
-def admin_totp_setup():
-    """Generate TOTP QR code for first-time setup"""
-    if not ADMIN_TOTP_SECRET:
-        return jsonify({"error": "请先在 .env 中配置 ADMIN_TOTP_SECRET"}), 400
+@app.route("/api/admin/password-reset/request", methods=["POST"])
+@limiter.limit("3/hour")
+def admin_password_reset_request():
+    """Send a short-lived recovery code to the configured administrator email."""
+    data = request.get_json(silent=True) or {}
+    username = (data.get("username") or "").strip()
+    try:
+        credentials = load_admin_credentials()
+    except AdminCredentialError:
+        return jsonify({"error": "管理员凭据文件无法读取，请检查服务器配置"}), 503
+    if not credentials:
+        return jsonify({"error": "管理员账号尚未初始化"}), 503
+    if not secrets.compare_digest(username, credentials["username"]):
+        return jsonify({"message": "如果账号存在，验证码将发送至绑定邮箱"}), 200
 
-    import pyotp
-    import qrcode
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    now = time.time()
+    with _admin_reset_lock:
+        previous = _admin_reset_codes.get(username)
+        if previous and now - previous.get("sent_at", 0) < 60:
+            return jsonify({"error": "验证码发送过于频繁，请稍后再试"}), 429
 
-    totp = pyotp.TOTP(ADMIN_TOTP_SECRET)
-    uri = totp.provisioning_uri(name="admin", issuer_name="AutoLib Admin")
+    sent = send_email(
+        credentials["email"],
+        "AutoLib 管理员密码重置验证码",
+        (
+            f"你的 AutoLib 管理员密码重置验证码是：{code}\n\n"
+            "验证码 10 分钟内有效，且只能使用一次。"
+            "如果不是你本人操作，请忽略本邮件。"
+        ),
+    )
+    if not sent:
+        return jsonify({"error": "验证码邮件发送失败，请检查 SMTP 配置"}), 503
 
-    # Generate QR code as base64 image
-    img = qrcode.make(uri)
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    buf.seek(0)
-    b64 = base64.b64encode(buf.read()).decode()
+    with _admin_reset_lock:
+        _admin_reset_codes[username] = {
+            "code_hash": generate_password_hash(code),
+            "expires_at": now + ADMIN_RESET_CODE_TTL,
+            "sent_at": now,
+            "attempts": 0,
+        }
+    return jsonify({"message": "验证码已发送至绑定邮箱"}), 200
 
-    return jsonify({
-        "qr_image": f"data:image/png;base64,{b64}",
-        "secret": ADMIN_TOTP_SECRET,
-        "uri": uri
-    }), 200
+
+@app.route("/api/admin/password-reset/confirm", methods=["POST"])
+@limiter.limit("5 per 10 minutes")
+def admin_password_reset_confirm():
+    """Verify the email code and replace the local administrator password."""
+    data = request.get_json(silent=True) or {}
+    username = (data.get("username") or "").strip()
+    code = (data.get("code") or "").strip()
+    new_password = data.get("new_password") or ""
+    password_error = validate_admin_password(new_password)
+    if password_error:
+        return jsonify({"error": password_error}), 400
+
+    try:
+        credentials = load_admin_credentials()
+    except AdminCredentialError:
+        return jsonify({"error": "管理员凭据文件无法读取，请检查服务器配置"}), 503
+    if not credentials or not secrets.compare_digest(
+        username,
+        credentials["username"],
+    ):
+        return jsonify({"error": "验证码无效或已过期"}), 400
+
+    now = time.time()
+    with _admin_reset_lock:
+        reset = _admin_reset_codes.get(username)
+        if not reset or now > reset["expires_at"]:
+            _admin_reset_codes.pop(username, None)
+            return jsonify({"error": "验证码无效或已过期"}), 400
+        reset["attempts"] += 1
+        if reset["attempts"] > ADMIN_RESET_MAX_ATTEMPTS:
+            _admin_reset_codes.pop(username, None)
+            return jsonify({"error": "验证码尝试次数过多，请重新获取"}), 400
+        code_valid = check_password_hash(reset["code_hash"], code)
+        if not code_valid:
+            return jsonify({"error": "验证码无效或已过期"}), 400
+
+    try:
+        update_admin_password(credentials, new_password)
+    except (AdminCredentialError, OSError):
+        return jsonify({"error": "管理员凭据文件更新失败"}), 500
+    finally:
+        with _admin_reset_lock:
+            _admin_reset_codes.pop(username, None)
+
+    session.clear()
+    return jsonify({"message": "密码已重置，请使用新密码登录"}), 200
 
 
 @app.route("/api/admin/logout", methods=["POST"])
 def admin_logout():
     session.pop("is_admin", None)
+    session.pop("admin_auth_version", None)
+    session.pop("admin_username", None)
     return jsonify({"message": "已退出管理后台"}), 200
 
 
 @app.route("/api/admin/me", methods=["GET"])
 def admin_me():
-    return jsonify({"is_admin": bool(session.get("is_admin"))}), 200
+    valid = _admin_session_valid()
+    if not valid:
+        session.pop("is_admin", None)
+        session.pop("admin_auth_version", None)
+        session.pop("admin_username", None)
+    return jsonify({
+        "is_admin": valid,
+        "username": session.get("admin_username") if valid else None,
+    }), 200
 
 
 # ==================== User Multi-Account API ====================
@@ -343,15 +449,14 @@ def get_my_account(pid):
     client, db = get_db()
     cfg = db.user_config_info.find_one(
         {"web_uid": uid, "pid": pid},
-        {"_id": 0, "web_password": 0}
+        {"_id": 0, "web_password": 0, "lib_password": 0}
     )
     client.close()
     if not cfg:
         return jsonify({}), 200
     # 解密敏感字段返回前端
-    for field in ("vpn_password", "lib_password"):
-        if field in cfg and cfg[field]:
-            cfg[field] = _dec(cfg[field])
+    if cfg.get("vpn_password"):
+        cfg["vpn_password"] = _dec(cfg["vpn_password"])
     if isinstance(cfg.get("updated_at"), datetime):
         cfg["updated_at"] = cfg["updated_at"].strftime("%Y-%m-%d %H:%M:%S")
     return jsonify(cfg), 200
@@ -363,15 +468,14 @@ def save_my_account(pid):
     """Save/update a library account config"""
     uid = _ensure_uid()
     data = request.get_json()
-    allowed = ["vpn_password", "lib_password", "seat_list", "mode", "time",
+    allowed = ["vpn_password", "seat_list", "mode", "time",
                "is_reserved", "late_protection",
                "notify_email", "notify_serverchan_key", "verified"]
     update = {k: v for k, v in data.items() if k in allowed and v is not None}
 
     # 加密敏感字段
-    for field in ("vpn_password", "lib_password"):
-        if field in update:
-            update[field] = _enc(update[field])
+    if "vpn_password" in update:
+        update["vpn_password"] = _enc(update["vpn_password"])
     update["pid"] = pid
     update["web_uid"] = uid
     update["updated_at"] = datetime.now()
@@ -398,14 +502,13 @@ def save_my_account(pid):
         # Reset verified if passwords actually changed (unless explicitly set)
         if not explicit_verified:
             vpn_changed = "vpn_password" in update and _dec(update["vpn_password"]) != _dec(existing.get("vpn_password", ""))
-            lib_changed = "lib_password" in update and _dec(update["lib_password"]) != _dec(existing.get("lib_password", ""))
-            if vpn_changed or lib_changed:
+            if vpn_changed:
                 update["verified"] = False
 
     client, db = get_db()
     db.user_config_info.update_one(
         {"pid": pid, "web_uid": uid},
-        {"$set": update},
+        {"$set": update, "$unset": {"lib_password": ""}},
         upsert=True
     )
     client.close()
@@ -432,14 +535,14 @@ def get_account_reservations(pid):
     uid = _ensure_uid()
     cfg = _get_decrypted_cfg(pid, uid)
 
-    if not cfg or not cfg.get("vpn_password") or not cfg.get("lib_password"):
-        return jsonify({"error": "请先保存 VPN 和图书馆密码"}), 400
+    if not cfg or not cfg.get("vpn_password"):
+        return jsonify({"error": "请先保存统一身份认证密码"}), 400
 
     try:
         from utils.library_system import LibrarySystem
         library = LibrarySystem(
             username=pid,
-            password=cfg["lib_password"],
+            password=cfg["vpn_password"],
             vpn_password=cfg["vpn_password"]
         )
         reservations, message = library.get_reservation_info()
@@ -460,14 +563,14 @@ def cancel_account_reservation(pid):
 
     cfg = _get_decrypted_cfg(pid, uid)
 
-    if not cfg or not cfg.get("vpn_password") or not cfg.get("lib_password"):
-        return jsonify({"error": "请先保存密码配置"}), 400
+    if not cfg or not cfg.get("vpn_password"):
+        return jsonify({"error": "请先保存统一身份认证密码"}), 400
 
     try:
         from utils.library_system import LibrarySystem
         library = LibrarySystem(
             username=pid,
-            password=cfg["lib_password"],
+            password=cfg["vpn_password"],
             vpn_password=cfg["vpn_password"]
         )
         success, message = library.delete_seat(uuid)
@@ -511,8 +614,8 @@ def do_nap(pid):
     cfg = _get_decrypted_cfg(pid, uid)
     if not cfg:
         return jsonify({"error": "未找到该账号配置"}), 404
-    if not cfg.get("vpn_password") or not cfg.get("lib_password"):
-        return jsonify({"error": "请先保存 VPN 和图书馆密码"}), 400
+    if not cfg.get("vpn_password"):
+        return jsonify({"error": "请先保存统一身份认证密码"}), 400
 
     body = request.get_json(silent=True) or {}
     uuid = (body.get("uuid") or "").strip()
@@ -532,7 +635,7 @@ def do_nap(pid):
 
         library = LibrarySystem(
             username=pid,
-            password=cfg["lib_password"].replace("！", "!"),
+            password=cfg["vpn_password"],
             vpn_password=cfg["vpn_password"],
         )
 
@@ -590,9 +693,9 @@ def toggle_arrived(pid):
 @app.route("/api/my/accounts/<pid>/verify", methods=["POST"])
 @login_required
 def verify_account(pid):
-    """Verify VPN and library credentials in two distinct steps.
+    """Verify the unified identity credential and library CAS session.
 
-    Accepts passwords either from the request body (for pre-save verification
+    Accepts the password either from the request body (for pre-save verification
     in addAccount flow) or falls back to the saved account config in DB.
     Returns `failed_at` to tell the frontend which step failed.
     """
@@ -600,17 +703,15 @@ def verify_account(pid):
     data = request.get_json(silent=True) or {}
 
     vpn_password = data.get("vpn_password")
-    lib_password = data.get("lib_password")
 
-    # Fall back to DB if passwords not provided in body
-    if not vpn_password or not lib_password:
+    # Fall back to DB if the password is not provided in the request body.
+    if not vpn_password:
         cfg = _get_decrypted_cfg(pid, uid) if uid else None
         if cfg:
             vpn_password = vpn_password or cfg.get("vpn_password")
-            lib_password = lib_password or cfg.get("lib_password")
 
-    if not vpn_password or not lib_password:
-        return jsonify({"error": "请填写 VPN 和图书馆密码", "verified": False}), 400
+    if not vpn_password:
+        return jsonify({"error": "请填写统一身份认证密码", "verified": False}), 400
 
     def mark_verified(value: bool):
         """Update verified flag in DB. No-op if account doesn't exist yet."""
@@ -621,7 +722,7 @@ def verify_account(pid):
         )
         c.close()
 
-    # Step 1: VPN login (独立验证 VPN 密码)
+    # Step 1: 登录 webvpn，建立 CAS 会话。
     try:
         from utils.vpn_system import VPNSystem
         vpn = VPNSystem(pid, vpn_password)
@@ -630,7 +731,7 @@ def verify_account(pid):
             return jsonify({
                 "verified": False,
                 "failed_at": "vpn",
-                "error": "VPN 密码错误：请检查统一身份认证（webvpn）密码是否正确"
+                "error": "统一身份认证失败：请检查网上办事大厅密码是否正确"
             }), 200
     except Exception as e:
         mark_verified(False)
@@ -640,32 +741,27 @@ def verify_account(pid):
             "error": f"VPN 登录异常：{str(e)}"
         }), 200
 
-    # Step 2: Library login (复用已登录的 VPN 会话，只验证图书馆密码)
+    # Step 2: 复用 webvpn 会话，通过 CAS SSO 建立图书馆登录态。
     try:
         from utils.library_system import LibrarySystem
         LibrarySystem(
             username=pid,
-            password=lib_password,
+            password=vpn_password,
             session=vpn.session
         )
     except Exception as e:
         mark_verified(False)
-        error_msg = str(e)
-        if "用户名或密码错误" in error_msg:
-            user_msg = f"图书馆密码错误：请检查 IC 空间系统密码（默认密码为 njfu{pid}!）"
-        else:
-            user_msg = f"图书馆登录失败：{error_msg}"
         return jsonify({
             "verified": False,
             "failed_at": "library",
-            "error": user_msg
+            "error": f"图书馆统一身份认证失败：{str(e)}"
         }), 200
 
-    # 两步都通过
+    # webvpn 与图书馆 CAS SSO 均通过。
     mark_verified(True)
     return jsonify({
         "verified": True,
-        "message": "验证成功，VPN 和图书馆密码均正确"
+        "message": "统一身份认证及图书馆登录验证成功"
     }), 200
 
 
@@ -691,8 +787,8 @@ def reserve_now(pid):
     if not cfg:
         return jsonify({"error": "未找到该账号配置"}), 404
 
-    if not cfg.get("vpn_password") or not cfg.get("lib_password"):
-        return jsonify({"error": "请先保存 VPN 和图书馆密码"}), 400
+    if not cfg.get("vpn_password"):
+        return jsonify({"error": "请先保存统一身份认证密码"}), 400
 
     if not cfg.get("seat_list"):
         return jsonify({"error": "请先配置座位列表"}), 400
@@ -730,8 +826,8 @@ def reserve_custom(pid):
     cfg = _get_decrypted_cfg(pid, uid)
     if not cfg:
         return jsonify({"error": "未找到该账号配置"}), 404
-    if not cfg.get("vpn_password") or not cfg.get("lib_password"):
-        return jsonify({"error": "请先保存 VPN 和图书馆密码"}), 400
+    if not cfg.get("vpn_password"):
+        return jsonify({"error": "请先保存统一身份认证密码"}), 400
 
     body = request.get_json(silent=True) or {}
     seat_name = (body.get("seat") or "").strip()
@@ -761,7 +857,7 @@ def reserve_custom(pid):
 
         library = LibrarySystem(
             username=pid,
-            password=cfg["lib_password"].replace("！", "!"),
+            password=cfg["vpn_password"],
             vpn_password=cfg["vpn_password"],
         )
         msg, _ = library.reserve_seat(
@@ -1127,4 +1223,3 @@ def my_reservation_results():
 
 if __name__ == "__main__":
     app.run(debug=False, host="0.0.0.0", port=5004)
-
