@@ -848,7 +848,8 @@ function showReserveResult(msg, success){
   if(success){
     const time = (msg.match(/(\d{2}:\d{2})-(\d{2}:\d{2})/) || []);
     const timeStr = time[1] ? `${time[1]} – ${time[2]}` : '';
-    const locMatch = msg.match(/新增成功\s+(.+)$/);
+    // 新格式：✅ 姓名 · 08-08 · 08:30-22:00 · 3F-C109 · 预约成功；旧格式：… 新增成功 三层C区 3F-C109
+    const locMatch = msg.match(/(\d+F-[A-Z]\d+)/) || msg.match(/新增成功\s+(.+)$/);
     const loc = locMatch ? locMatch[1].trim() : '';
     body = `
       <div style="text-align:center;font-size:36px;margin:4px 0 12px">✅</div>
