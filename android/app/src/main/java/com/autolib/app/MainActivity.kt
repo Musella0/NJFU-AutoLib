@@ -88,6 +88,8 @@ class MainActivity : AppCompatActivity() {
         binding.accountButton.setOnClickListener { showAccountChooser() }
         setupNotifications()
         loadInitialData()
+        // 每天至多一次，且只在确实有新版本时才弹
+        UpdateChecker.checkSilently(this, api) { showUpdateDialog(it) }
     }
 
     /**
@@ -1278,6 +1280,25 @@ class MainActivity : AppCompatActivity() {
         }))
 
         host.addView(section("关于"))
+        host.addView(cardBlock("版本", vertical(0).apply {
+            addView(text("AutoLib ${BuildConfig.VERSION_NAME}", 16, true))
+            // 默认每天自动检查，属于预期行为不必说明；只有被用户关掉时才需要提示，
+            // 否则他既看不出状态、也找不到恢复入口。
+            if (!UpdateChecker.autoCheckEnabled(this@MainActivity)) {
+                addView(text("自动检查已关闭", 12)
+                    .apply { setTextColor(color(R.color.text_muted)) })
+            }
+            addView(horizontal().apply {
+                addView(action("检查更新", 1f, accent = true) { checkUpdateManually() })
+                if (!UpdateChecker.autoCheckEnabled(this@MainActivity)) {
+                    addView(action("恢复自动检查", 1f) {
+                        UpdateChecker.setAutoCheckEnabled(this@MainActivity, true)
+                        toast("已恢复每天自动检查")
+                        renderCurrentPage()
+                    })
+                }
+            })
+        }))
         host.addView(cardBlock("功能说明", vertical(0).apply {
             addView(action("迟到保护是什么？") { showLateProtectionInfo() })
             addView(action("午休是什么？") { showNapInfo() })
@@ -1549,6 +1570,55 @@ class MainActivity : AppCompatActivity() {
      * 请求把小组件钉到桌面。Android 8.0 起支持，省得用户自己长按桌面找；
      * 少数第三方桌面不支持，这时提示手动添加。
      */
+    /**
+     * 升级提示。三个出口对应三种意图：现在就装 / 这版先算了 / 以后别自动弹。
+     * 「跳过此版本」只记住当前 versionCode，更新的版本仍会提示；
+     * 「永不提示」只关自动检查，设置页里手动检查照常可用。
+     */
+    private fun showUpdateDialog(release: UpdateChecker.Release) {
+        if (isFinishing || isDestroyed) return
+        val body = vertical()
+        body.addView(text("发现新版本 ${release.versionName}", 17, true))
+        body.addView(text("当前版本 ${BuildConfig.VERSION_NAME}", 13)
+            .apply { setTextColor(color(R.color.text_muted)) })
+        if (release.notes.isNotBlank()) {
+            body.addView(text(release.notes, 14).apply { setPadding(0, dp(10), 0, 0) })
+        }
+        AlertDialog.Builder(this)
+            .setTitle("检查到更新")
+            .setView(scrolled(body))
+            .setPositiveButton("立即更新") { _, _ -> openDownload(release.downloadUrl) }
+            .setNegativeButton("跳过此版本") { _, _ ->
+                UpdateChecker.skip(this, release.versionCode)
+                toast("已跳过 ${release.versionName}，有更新版本时会再提醒")
+            }
+            .setNeutralButton("永不提示") { _, _ ->
+                UpdateChecker.setAutoCheckEnabled(this, false)
+                toast("已关闭自动检查，可在设置页手动检查")
+                if (currentPage == PAGE_SETTINGS) renderCurrentPage()
+            }
+            .show()
+    }
+
+    private fun openDownload(url: String) {
+        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
+        // 没有浏览器时直接 startActivity 会抛 ActivityNotFoundException
+        if (intent.resolveActivity(packageManager) != null) startActivity(intent)
+        else toast("没有可用的浏览器，请手动访问：$url")
+    }
+
+    private fun checkUpdateManually() {
+        setBusy(true)
+        UpdateChecker.checkManually(this, api) { release, error ->
+            setBusy(false)
+            when {
+                error != null -> toast(error)
+                release != null -> showUpdateDialog(release)
+                else -> toast("已是最新版本 ${BuildConfig.VERSION_NAME}")
+            }
+        }
+    }
+
     private fun requestPinWidget() {
         val manager = getSystemService(AppWidgetManager::class.java)
         if (manager == null || !manager.isRequestPinAppWidgetSupported) {

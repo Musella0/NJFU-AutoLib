@@ -1127,6 +1127,65 @@ def _serialize_announcement(doc):
     }
 
 
+# ==================== App version ====================
+# 客户端升级检查。版本信息存单条文档，管理员在后台改，不用每次发版动代码。
+
+_APP_VERSION_DOC = "android_latest"
+
+
+def _serialize_app_version(doc):
+    doc = doc or {}
+    return {
+        "version_code": int(doc.get("version_code", 0) or 0),
+        "version_name": doc.get("version_name", ""),
+        "download_url": doc.get("download_url", ""),
+        "notes": doc.get("notes", ""),
+        "updated_at": doc["updated_at"].strftime("%Y-%m-%d %H:%M:%S")
+            if isinstance(doc.get("updated_at"), datetime) else doc.get("updated_at", ""),
+    }
+
+
+@app.route("/api/app/version", methods=["GET"])
+def get_app_version():
+    """Public: latest Android build info, used by the in-app update check."""
+    client, db = get_db()
+    doc = db.app_versions.find_one({"_id": _APP_VERSION_DOC})
+    client.close()
+    return jsonify(_serialize_app_version(doc)), 200
+
+
+@app.route("/api/admin/app_version", methods=["POST"])
+@admin_required
+def admin_set_app_version():
+    data = request.get_json(silent=True) or {}
+    try:
+        version_code = int(data.get("version_code", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "version_code 必须是整数"}), 400
+    if version_code <= 0:
+        return jsonify({"error": "version_code 必须大于 0"}), 400
+
+    version_name = (data.get("version_name") or "").strip()
+    download_url = (data.get("download_url") or "").strip()
+    if not version_name:
+        return jsonify({"error": "version_name 不能为空"}), 400
+    # 客户端会用它拉起浏览器，限制协议避免存进 javascript: 之类的东西
+    if not download_url.startswith(("http://", "https://")):
+        return jsonify({"error": "download_url 必须是 http(s) 链接"}), 400
+
+    doc = {
+        "version_code": version_code,
+        "version_name": version_name,
+        "download_url": download_url,
+        "notes": (data.get("notes") or "").strip(),
+        "updated_at": datetime.now(),
+    }
+    client, db = get_db()
+    db.app_versions.update_one({"_id": _APP_VERSION_DOC}, {"$set": doc}, upsert=True)
+    client.close()
+    return jsonify(_serialize_app_version(doc)), 200
+
+
 @app.route("/api/announcements", methods=["GET"])
 def list_announcements():
     """Public list of active announcements — visible to guests and logged-in users."""
