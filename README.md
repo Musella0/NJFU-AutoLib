@@ -16,7 +16,7 @@
 ### 方法1 直接使用
 直接登陆网址：[南林图书馆.中国](https://南林图书馆.中国)
 
-安卓端也可以选择下载[船新版本](../../releases/latest)；也可以选择[蓝奏云](https://wwbqs.lanzouq.com/i2QPO411vl7g)
+安卓端也可以选择下载[船新版本](../../releases/latest)；也可以选择[蓝奏云](https://wwbqs.lanzouq.com/ioEtx4126v1g) (注意蓝奏云之后只会停留在0.2.1版本，最新请在release中下载或下载后点击检查更新)
 
 ### 方法2 自己部署
 可以将一下提示词复制喂给AI，让AI帮你部署：
