@@ -19,7 +19,7 @@
 安卓端也可以选择下载[船新版本](../../releases/latest)；也可以选择[蓝奏云](https://wwbqs.lanzouq.com/ioEtx4126v1g) (注意蓝奏云之后只会停留在0.2.1版本，最新请在release中下载或下载后点击检查更新)
 
 ### 方法2 自己部署
-可以将一下提示词复制喂给AI，让AI帮你部署：
+可以将以下提示词复制喂给AI，让AI帮你部署：
 
 ```
 请帮我把 AutoLib 部署到我自己的服务器上。仓库：https://github.com/Musella0/NJFU-AutoLib这是一个图书馆自动抢座系统，Flask + MongoDB + Caddy，用 Docker Compose 编排。
