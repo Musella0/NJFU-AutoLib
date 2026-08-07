@@ -11,8 +11,9 @@ android {
         applicationId = "com.autolib.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "2.1-native"
+        // versionCode 只增不减：降回去会让已装用户无法覆盖安装，与展示用的 versionName 无关
+        versionCode = 4
+        versionName = "0.2"
 
         buildConfigField("String", "SERVER_URL", "\"https://xn--1jq43jfrduzxh22d.xn--fiqs8s\"")
     }

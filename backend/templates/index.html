@@ -26,7 +26,7 @@
   <!-- =============== TOP BAR =============== -->
   <div class="topbar">
     <div>
-      <div class="hello" id="hello">你好 ☕</div>
+      <div class="hello" id="hello">您好 ☕</div>
       <div class="date" id="date"></div>
     </div>
     <div class="pid-chip" id="pid-chip" onclick="openSheet('accounts')">
@@ -101,6 +101,16 @@
           <button class="btn ghost grow" onclick="closeTmr()">取消</button>
           <button class="btn accent grow" onclick="saveTmr()">保存明日</button>
         </div>
+      </div>
+    </div>
+
+    <!-- STUDY LOG -->
+    <div class="sec-head">
+      <div class="t">STUDY LOG · 学习记录</div>
+    </div>
+    <div class="box pad mb-lg">
+      <div id="visit-stats-box">
+        <div class="tiny" style="color:var(--ink3);text-align:center">加载中…</div>
       </div>
     </div>
 
@@ -230,11 +240,13 @@
             <label>统一身份认证密码（网上办事大厅）</label>
             <input type="password" id="cfg-vpn" style="font-family:var(--mono)">
           </div>
+          <div class="tiny" style="color:var(--ink3)">💡 改过密码后状态会变回「未验证」，重新填写并点「验证并保存」即可。</div>
         </div>
       </div>
 
       <div class="row-flex">
         <button class="btn ghost grow" onclick="go('home')">取消</button>
+        <button class="btn grow" id="btn-verify-cfg" onclick="verifyAndSaveCfg()">验证并保存</button>
         <button class="btn accent grow" id="btn-save-cfg" onclick="saveCfg()">保存配置</button>
       </div>
 
@@ -293,13 +305,6 @@
           <div class="t2" id="nap-settings-label">下午 14:00，同座位</div>
         </div>
         <div class="sub" style="color:var(--ink3)">›</div>
-      </div>
-    </div>
-
-    <div class="box pad mb-lg">
-      <div class="label" style="margin-bottom:8px">学习记录</div>
-      <div id="visit-stats-box">
-        <div class="tiny" style="color:var(--ink3);text-align:center">加载中…</div>
       </div>
     </div>
 

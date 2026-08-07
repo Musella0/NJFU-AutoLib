@@ -1,26 +1,73 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  打开的书 + 带勾日历，橙色描边。
+
+  两组各自缩放，strokeWidth 要按各自的 scale 反算（group 的 scale 会一起放大线宽），
+  否则书和日历的线条粗细会对不上：书 3.2/1.96≈1.6，日历 3.2/1.28=2.5。
+  日历先用背景色铺一层再描边，才能把书的右下角盖住，形成前后叠压关系。
+
+  整组内容约占画布 46%（x 29~79、y 30~78，中心 54,54），四周留白比图标安全区更宽松。
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- 书本图标 -->
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M30,24 L78,24 Q82,24 82,28 L82,80 Q82,84 78,84 L30,84 Q26,84 26,80 L26,28 Q26,24 30,24 Z" />
-    <path
-        android:fillColor="#6750A4"
-        android:pathData="M54,24 L54,84" />
-    <path
-        android:fillColor="#9C8DC3"
-        android:pathData="M36,36 L50,36 M36,44 L50,44 M36,52 L50,52"
-        android:strokeWidth="3"
-        android:strokeColor="#9C8DC3"
-        android:strokeLineCap="round" />
-    <path
-        android:fillColor="#9C8DC3"
-        android:pathData="M58,36 L72,36 M58,44 L72,44 M58,52 L72,52"
-        android:strokeWidth="3"
-        android:strokeColor="#9C8DC3"
-        android:strokeLineCap="round" />
+
+    <!-- 书本 -->
+    <group
+        android:scaleX="1.96"
+        android:scaleY="1.96"
+        android:translateX="25"
+        android:translateY="26">
+        <path
+            android:fillColor="@android:color/transparent"
+            android:pathData="M3,18 A1,1 0 0,1 2,17 L2,4 A1,1 0 0,1 3,3 L8,3 A4,4 0 0,1 12,7 A4,4 0 0,1 16,3 L21,3 A1,1 0 0,1 22,4 L22,17 A1,1 0 0,1 21,18 L15,18 A3,3 0 0,0 12,21 A3,3 0 0,0 9,18 Z"
+            android:strokeColor="#FF5C3A"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:strokeWidth="1.6" />
+        <path
+            android:fillColor="@android:color/transparent"
+            android:pathData="M12,7 L12,21"
+            android:strokeColor="#FF5C3A"
+            android:strokeLineCap="round"
+            android:strokeWidth="1.6" />
+    </group>
+
+    <!-- 日历：底色遮住书的右下角，再描边 -->
+    <group
+        android:scaleX="1.28"
+        android:scaleY="1.28"
+        android:translateX="52"
+        android:translateY="50">
+        <path
+            android:fillColor="#FDEFEA"
+            android:pathData="M5,4 L19,4 A2,2 0 0,1 21,6 L21,20 A2,2 0 0,1 19,22 L5,22 A2,2 0 0,1 3,20 L3,6 A2,2 0 0,1 5,4 Z" />
+        <path
+            android:fillColor="@android:color/transparent"
+            android:pathData="M5,4 L19,4 A2,2 0 0,1 21,6 L21,20 A2,2 0 0,1 19,22 L5,22 A2,2 0 0,1 3,20 L3,6 A2,2 0 0,1 5,4 Z"
+            android:strokeColor="#FF5C3A"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:strokeWidth="2.5" />
+        <path
+            android:fillColor="@android:color/transparent"
+            android:pathData="M3,10 L21,10"
+            android:strokeColor="#FF5C3A"
+            android:strokeWidth="2.5" />
+        <path
+            android:fillColor="@android:color/transparent"
+            android:pathData="M8,2 L8,6 M16,2 L16,6"
+            android:strokeColor="#FF5C3A"
+            android:strokeLineCap="round"
+            android:strokeWidth="2.5" />
+        <path
+            android:fillColor="@android:color/transparent"
+            android:pathData="M9,16 L11,18 L15,14"
+            android:strokeColor="#FF5C3A"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:strokeWidth="2.5" />
+    </group>
 </vector>

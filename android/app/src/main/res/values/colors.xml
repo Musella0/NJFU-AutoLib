@@ -18,4 +18,10 @@
     <color name="accent_soft">#FFF1ED</color>
     <color name="stroke">#2A2A2C</color>
     <color name="stroke_muted">#C7C7CC</color>
+    <!-- 学习热力图 5 档，与网页端 heat0..heat4 变量对应 -->
+    <color name="heat0">#EFECE3</color>
+    <color name="heat1">#3DFF5C3A</color>
+    <color name="heat2">#73FF5C3A</color>
+    <color name="heat3">#B3FF5C3A</color>
+    <color name="heat4">#FF5C3A</color>
 </resources>

@@ -1,5 +1,6 @@
 .env
 .env.*
+!.env.example
 # AI/agent local config
 CLAUDE.md
 .codex
@@ -10,3 +11,17 @@ __pycache__/
 data/
 # Local database backups
 backups/
+
+# ===== Android =====
+# 构建产物近 100MB，且完全可由源码重新生成
+build/
+.gradle/
+# 机器相关的 SDK 路径
+local.properties
+*.apk
+*.aab
+# 签名材料绝不入库
+*.jks
+*.keystore
+.cxx/
+captures/

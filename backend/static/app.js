@@ -156,14 +156,14 @@ function updateAuthUI(){
 
   const profileBtn = $('settings-profile-btn');
   if(state.isGuest){
-    hello.textContent = '你好，同学 ☕';
+    hello.textContent = '您好，同学 ☕';
     $('settings-uid').textContent = '游客';
     $('settings-accounts-meta').textContent = '游客模式 · 仅可浏览，添加学号即登录';
     if(profileBtn) profileBtn.style.display = 'none';
     $('logout-card').style.display = 'none';
   }else{
     const name = state.nickname || state.uid;
-    hello.textContent = `你好，${name} ☕`;
+    hello.textContent = `您好，${name} ☕`;
     $('settings-uid').textContent = name;
     const subMeta = state.nickname
       ? `已登录 · @${state.uid} · ${state.accounts.length} 个学号`
@@ -310,6 +310,16 @@ async function verifyAdd(){
   if(!vres.ok || vres.data.verified !== true){
     btn.disabled = false;
     btn.textContent = '验证并保存';
+    // 学校服务异常时后端可能凭本地缓存放行：仍然进入登录态，只是未验证。
+    if(vres.data.offline && vres.data.logged_in && vres.data.uid){
+      state.isGuest = false;
+      state.uid = vres.data.uid;
+      state.currentPid = pid;
+      toast(vres.data.error || '已使用本地缓存登录','info');
+      closeSheet();
+      await loadAccounts();
+      return;
+    }
     toast(vres.data.error || '验证失败','error');
     return;
   }
@@ -711,6 +721,7 @@ async function saveCfg(options = {}){
     late_protection: $('cfg-toggle-lp').classList.contains('on') ? 'True' : 'False',
   };
   if(!silent) body.vpn_password = $('cfg-vpn').value;
+  if(options.verified) body.verified = true;
 
   const btn = $('btn-save-cfg');
   if(!silent){
@@ -736,7 +747,7 @@ async function saveCfg(options = {}){
     const summary = state.accounts.find(account => account.pid === state.currentPid);
     if(summary) Object.assign(summary, body);
     if(!silent){
-      toast('配置已保存','success');
+      toast(options.verified ? '验证并保存成功' : '配置已保存','success');
       await loadAccounts();
       setTimeout(() => go('home'), 400);
     }
@@ -745,16 +756,43 @@ async function saveCfg(options = {}){
   }
 }
 
+// 改密码后 verified 会被后端重置，这里提供重新验证的入口，
+// 否则配置页只剩一个「未验证」徽章而没有办法把它变回已验证。
+async function verifyAndSaveCfg(){
+  if(!state.currentPid || !state.currentCfg){ toast('请先添加学号','error'); return; }
+  const vpn = $('cfg-vpn').value;
+  if(!vpn){ toast('请填写统一身份认证密码','error'); return; }
+  const btn = $('btn-verify-cfg');
+  btn.disabled = true;
+  btn.textContent = '验证中...';
+  const { ok, data } = await api(
+    `/api/my/accounts/${encodeURIComponent(state.currentPid)}/verify`,
+    { method:'POST', body:{ vpn_password: vpn } },
+  );
+  btn.disabled = false;
+  btn.textContent = '验证并保存';
+  if(!ok || data.verified !== true){
+    toast(data.error || '验证失败','error');
+    return;
+  }
+  state.currentCfg.verified = true;
+  $('cfg-verify-badge').textContent = '✓ 已验证';
+  $('cfg-verify-badge').className = 'pill ok';
+  await saveCfg({ verified: true });
+}
+
 // ---------- reserve-now sheet ----------
 let _rnSeats = null;
 
-async function openReserveNow(defaultSeat){
+async function openReserveNow(defaultSeat, day){
   if(!state.currentPid){ toast('请先添加学号','error'); return; }
   if(!_rnSeats){
-    const { ok, data } = await api('/api/public/seats');
+    const { ok, data } = await api('/api/seats');
     if(!ok || !data.seats){ toast('加载座位列表失败','error'); return; }
     _rnSeats = data.seats;
   }
+  // 弹层由模板重建，目标日期存在 state 里给 submitReserveNow 读
+  state.reserveDay = (day === 'tomorrow') ? 'tomorrow' : 'today';
   openSheet('reserve-now');
   const locSel = $('rn-location');
   if(locSel){
@@ -854,7 +892,7 @@ async function submitReserveNow(){
   toast('正在预约…','info');
   const { ok, data } = await api(
     `/api/my/accounts/${encodeURIComponent(state.currentPid)}/reserve_custom`,
-    { method:'POST', body: { seat, start_time: start, end_time: end } }
+    { method:'POST', body: { seat, start_time: start, end_time: end, day: state.reserveDay || 'today' } }
   );
   if(ok){
     closeSheet();
@@ -927,6 +965,19 @@ async function doCancel(){
   toast(data.message || (ok ? '已取消' : '失败'), (ok && data.success) ? 'success' : 'error');
   if(ok && data.success){
     state.todayResv = null;
+    renderHome();
+  }
+}
+
+async function doCancelTomorrow(){
+  closeSheet();
+  if(!state.tomorrowResv){ toast('没有可取消的预约','info'); return; }
+  const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/cancel`, {
+    method:'POST', body:{ uuid: state.tomorrowResv.uuid }
+  });
+  toast(data.message || (ok ? '已取消' : '失败'), (ok && data.success) ? 'success' : 'error');
+  if(ok && data.success){
+    state.tomorrowResv = null;
     renderHome();
   }
 }
@@ -1092,7 +1143,10 @@ function renderTomorrowCard(opt){
       : '自动预约已暂停，去配置页开启';
     empty.innerHTML = `
       <div class="h2" style="color:var(--ink3)">明日暂无预约</div>
-      <div class="sub" style="margin-top:6px">${msg}</div>`;
+      <div class="sub" style="margin-top:6px">${msg}</div>
+      <div class="actions" style="justify-content:center">
+        <button class="btn accent" onclick="openReserveNow(null,'tomorrow')">⚡ 预约明日</button>
+      </div>`;
     return;
   }
 
@@ -1105,6 +1159,7 @@ function renderTomorrowCard(opt){
   const bhm = bt.slice(0,5), ehm = et.slice(0,5);
   const hours = (bhm && ehm) ? (parseInt(ehm,10) - parseInt(bhm,10)) : '';
   const status = fmtResvStatus(resv.resvStatus);
+  const canCancel = [1027, 1093, 3141].includes(resv.resvStatus);
 
   card.style.display = '';
   empty.style.display = 'none';
@@ -1115,6 +1170,7 @@ function renderTomorrowCard(opt){
     <div class="time">${bhm} — ${ehm}${hours ? ` · ${hours}小时` : ''}</div>
     <div class="meta-row">
       <span class="pill ok"><span class="dot"></span>${escHtml(status)}</span>
+      ${canCancel ? `<span class="pill warn" style="cursor:pointer" onclick="openSheet('cancel-tomorrow')">取消</span>` : ''}
     </div>`;
 }
 
@@ -1383,8 +1439,7 @@ function renderNotices(anns, results){
 // ---------- seats ----------
 async function loadSeats(){
   try{
-    const path = state.isGuest ? '/api/public/seats' : '/api/seats';
-    const { ok, data } = await api(path);
+    const { ok, data } = await api('/api/seats');
     state.allSeats = (ok && data.seats) ? data.seats : {};
   }catch(e){
     state.allSeats = {};
@@ -1575,6 +1630,15 @@ const SHEETS = {
       <button class="btn danger grow" onclick="doCancel()">确认取消</button>
     </div>
   `,
+  'cancel-tomorrow': () => `
+    <div class="grab"></div>
+    <h3>取消明日预约？</h3>
+    <div class="desc">取消后座位立即释放，可能被他人抢走。取消完可以在原位置重新预约明天。</div>
+    <div class="row-flex mt">
+      <button class="btn ghost grow" onclick="closeSheet()">再想想</button>
+      <button class="btn danger grow" onclick="doCancelTomorrow()">确认取消</button>
+    </div>
+  `,
   'seat-picker': () => {
     const zones = sortedZones();
     return `
@@ -1710,9 +1774,11 @@ const SHEETS = {
   'reserve-now': () => {
     const seatList = (state.currentCfg && state.currentCfg.seat_list) || [];
     const chips = seatList.slice(0, 3);
+    const forTomorrow = state.reserveDay === 'tomorrow';
     return `
     <div class="grab"></div>
-    <h3>⚡ 立即预约</h3>
+    <h3>⚡ ${forTomorrow ? '预约明日' : '立即预约'}</h3>
+    ${forTomorrow ? '<div class="desc">为明天预约座位，成功后会覆盖自动抢座的结果。</div>' : ''}
     ${chips.length ? `
       <div class="box tight mt" style="background:#dbeafe;border:1px solid #93c5fd">
         <div class="tiny" style="color:#1e40af;margin-bottom:6px;font-weight:600">常用座位 · 点击快速选择</div>
@@ -2058,7 +2124,7 @@ function openSheet(name){
   const tpl = SHEETS[name];
   content.innerHTML = tpl ? tpl() : '<div class="grab"></div><h3>未实现</h3>';
   sc.classList.add('show');
-  if(name === 'lp-info' || name === 'lp-warning' || name === 'cancel' || name === 'nap-info' || name === 'nap-about') sc.classList.add('center');
+  if(name === 'lp-info' || name === 'lp-warning' || name === 'cancel' || name === 'cancel-tomorrow' || name === 'nap-info' || name === 'nap-about') sc.classList.add('center');
   else sc.classList.remove('center');
 }
 function closeSheet(){ $('scrim').classList.remove('show'); }
@@ -2076,9 +2142,99 @@ async function loadVisitStats(){
   }
 }
 
+// 每天的学习时长分 5 档，配色对应 --heat0..4
+function heatLevel(minutes){
+  if(!minutes) return 0;
+  if(minutes <= 120) return 1;
+  if(minutes <= 240) return 2;
+  if(minutes <= 360) return 3;
+  return 4;
+}
+
+function localDateKey(d){
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+// 老版本后端没有 daily 字段，用 recent 兜底才不至于画出一张空图。
+// recent 只有最近 10 条，热力图会不全——服务端更新后就走 daily。
+function dailyFromRecent(recent){
+  const byDate = new Map();
+  (recent || []).forEach(r => {
+    if(!r.date) return;
+    const cur = byDate.get(r.date) || { date: r.date, visits: 0, minutes: 0 };
+    cur.visits += 1;
+    cur.minutes += (r.duration_minutes || 0);
+    byDate.set(r.date, cur);
+  });
+  return [...byDate.values()];
+}
+
+/** 学期起点：上半年从 1 月 1 日算，下半年从 7 月 1 日算。 */
+function semesterStart(today){
+  return new Date(today.getFullYear(), today.getMonth() < 6 ? 0 : 6, 1);
+}
+
+/**
+ * GitHub 贡献图式的热力图：每列一周（周一在最上），从左到右由远及近。
+ * 只画当前学期（下半年 7–12 月 / 上半年 1–6 月），不是"最近一年"——
+ * 铺满整年大多是空格，按学期看也更贴近实际的作息周期。
+ */
+function heatmapHtml(daily){
+  const byDate = new Map((daily || []).map(x => [x.date, x]));
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const start = semesterStart(today);
+  const semesterLabel = `${start.getFullYear()}年${start.getMonth() < 6 ? '上' : '下'}半年`;
+  // 对齐到周一，保证每一列都是完整的一周
+  const startIso = start.getDay() === 0 ? 7 : start.getDay();
+  start.setDate(start.getDate() - (startIso - 1));
+
+  const cells = [];
+  const months = [];
+  let lastMonth = -1;
+  for(let d = new Date(start); d <= today; d.setDate(d.getDate() + 1)){
+    const key = localDateKey(d);
+    const hit = byDate.get(key);
+    const minutes = hit ? hit.minutes : 0;
+    const visits = hit ? hit.visits : 0;
+    const isToday = key === localDateKey(today);
+    const title = visits
+      ? `${key} · ${visits} 次 · ${Math.floor(minutes/60)}h${minutes%60}m`
+      : `${key} · 没有记录`;
+    cells.push(
+      `<div class="cell l${heatLevel(minutes)}${isToday ? ' today' : ''}" title="${title}"></div>`
+    );
+    // 每周一记一次列首，用于标月份
+    if((d.getDay() === 1 || cells.length === 1)){
+      const m = d.getMonth();
+      months.push(m !== lastMonth ? `<span>${m + 1}月</span>` : '<span></span>');
+      lastMonth = m;
+    }
+  }
+  // 末尾补满一列，避免最后一周残缺导致列错位
+  while(cells.length % 7 !== 0) cells.push('<div class="cell void"></div>');
+
+  const columns = cells.length / 7;
+  return `
+    <div class="heatmap-wrap">
+      <div class="heatmap-inner">
+        <div class="heatmap-months" style="grid-template-columns:repeat(${columns},11px)">${months.join('')}</div>
+        <div class="heatmap" style="grid-template-columns:repeat(${columns},11px)">${cells.join('')}</div>
+      </div>
+    </div>
+    <div class="heatmap-legend">
+      <span>少</span>
+      <span class="cell"></span><span class="cell l1"></span><span class="cell l2"></span>
+      <span class="cell l3"></span><span class="cell l4"></span>
+      <span>多</span>
+      <span style="margin-left:auto">${semesterLabel}</span>
+    </div>`;
+}
+
 function renderVisitStats(d){
   const box = $('visit-stats-box');
   if(!box) return;
+  state.visitStats = d;   // 翻月时要用同一份数据重画
   const fmtH = m => {
     const h = Math.floor(m / 60), min = m % 60;
     return h > 0 ? (min > 0 ? `${h}h${min}m` : `${h}h`) : `${min}m`;
@@ -2088,13 +2244,6 @@ function renderVisitStats(d){
       <div class="tiny mt" style="color:var(--ink3);text-align:center">系统检测到签到后自动记录</div>`;
     return;
   }
-  const recentHtml = (d.recent || []).map(r => {
-    const loc = r.location ? escHtml(r.location) : escHtml(r.seat_name);
-    return `<div class="row-between" style="padding:4px 0;border-top:1px solid var(--border)">
-      <div><div class="t" style="font-size:12px">${escHtml(r.date)}</div><div class="sub" style="font-size:13px">${loc}</div></div>
-      <div class="mono" style="font-size:13px;color:var(--ink2)">${fmtH(r.duration_minutes)}</div>
-    </div>`;
-  }).join('');
   box.innerHTML = `
     <div class="row-between" style="margin-bottom:10px">
       <div style="text-align:center;flex:1">
@@ -2114,7 +2263,7 @@ function renderVisitStats(d){
         <div class="tiny">累计时长</div>
       </div>
     </div>
-    ${recentHtml}`;
+    ${heatmapHtml((d.daily && d.daily.length) ? d.daily : dailyFromRecent(d.recent))}`;
 }
 
 // ---------- home loader ----------

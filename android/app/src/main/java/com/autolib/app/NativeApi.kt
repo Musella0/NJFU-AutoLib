@@ -30,59 +30,108 @@ data class ApiResponse(
 class NativeApi(context: Context) {
     private val prefs = context.getSharedPreferences("native_api", Context.MODE_PRIVATE)
     private val executor = Executors.newFixedThreadPool(3)
+    /** 顺序敏感的写入（座位优先级等）走单线程，避免快速连点后请求乱序落库。 */
+    private val serialExecutor = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
     private val baseUrl = BuildConfig.SERVER_URL.trimEnd('/')
 
-    fun get(path: String, callback: (ApiResponse) -> Unit) = request("GET", path, null, callback)
+    fun get(path: String, callback: (ApiResponse) -> Unit) = request("GET", path, null, false, callback)
     fun post(path: String, body: JSONObject = JSONObject(), callback: (ApiResponse) -> Unit) =
-        request("POST", path, body, callback)
-    fun delete(path: String, callback: (ApiResponse) -> Unit) = request("DELETE", path, null, callback)
+        request("POST", path, body, false, callback)
+    fun postSerial(path: String, body: JSONObject, callback: (ApiResponse) -> Unit) =
+        request("POST", path, body, true, callback)
+    fun delete(path: String, callback: (ApiResponse) -> Unit) = request("DELETE", path, null, false, callback)
 
     fun encoded(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8.name())
 
-    private fun request(method: String, path: String, body: JSONObject?, callback: (ApiResponse) -> Unit) {
-        executor.execute {
-            val response = try {
-                val connection = (URL(baseUrl + path).openConnection() as HttpURLConnection).apply {
-                    requestMethod = method
-                    connectTimeout = 15_000
-                    readTimeout = 90_000
-                    setRequestProperty("Accept", "application/json")
-                    setRequestProperty("User-Agent", "AutoLib-Android/${BuildConfig.VERSION_NAME}")
-                    prefs.getString("cookie", null)?.takeIf { it.isNotBlank() }?.let {
-                        setRequestProperty("Cookie", it)
-                    }
-                    if (body != null) {
-                        doOutput = true
-                        setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                    }
-                }
-                body?.let {
-                    connection.outputStream.use { stream ->
-                        stream.write(it.toString().toByteArray(StandardCharsets.UTF_8))
-                    }
-                }
-                val code = connection.responseCode
-                persistCookie(connection.headerFields["Set-Cookie"])
-                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-                val text = stream?.use { input ->
-                    BufferedReader(InputStreamReader(input, StandardCharsets.UTF_8)).readText()
-                }.orEmpty()
-                connection.disconnect()
-                parse(code, text)
-            } catch (error: Exception) {
-                ApiResponse(-1, error.message.orEmpty(), JSONObject().put("error", error.message ?: "网络连接失败"))
-            }
+    /**
+     * 同步发起请求，调用方必须已经在后台线程。
+     * 供闹钟触发的后台同步和小组件刷新使用——那些场景没有 Activity 可以回调。
+     */
+    fun getBlocking(path: String, readTimeoutMs: Int = 20_000): ApiResponse =
+        execute("GET", path, null, readTimeoutMs)
+
+    /** 同上，小组件按钮（如「我已到馆」）在后台线程直接调用。 */
+    fun postBlocking(path: String, body: JSONObject = JSONObject(), readTimeoutMs: Int = 20_000): ApiResponse =
+        execute("POST", path, body, readTimeoutMs)
+
+    private fun request(
+        method: String,
+        path: String,
+        body: JSONObject?,
+        serial: Boolean,
+        callback: (ApiResponse) -> Unit,
+    ) {
+        (if (serial) serialExecutor else executor).execute {
+            val response = execute(method, path, body, 90_000)
             main.post { callback(response) }
         }
     }
 
+    private fun execute(
+        method: String,
+        path: String,
+        body: JSONObject?,
+        readTimeoutMs: Int,
+    ): ApiResponse {
+        var connection: HttpURLConnection? = null
+        return try {
+            connection = (URL(baseUrl + path).openConnection() as HttpURLConnection).apply {
+                requestMethod = method
+                connectTimeout = 15_000
+                readTimeout = readTimeoutMs
+                setRequestProperty("Accept", "application/json")
+                setRequestProperty("User-Agent", "AutoLib-Android/${BuildConfig.VERSION_NAME}")
+                prefs.getString("cookie", null)?.takeIf { it.isNotBlank() }?.let {
+                    setRequestProperty("Cookie", it)
+                }
+                if (body != null) {
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                }
+            }
+            body?.let {
+                connection.outputStream.use { stream ->
+                    stream.write(it.toString().toByteArray(StandardCharsets.UTF_8))
+                }
+            }
+            val code = connection.responseCode
+            persistCookie(connection.headerFields["Set-Cookie"])
+            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+            val text = stream?.use { input ->
+                BufferedReader(InputStreamReader(input, StandardCharsets.UTF_8)).readText()
+            }.orEmpty()
+            parse(code, text)
+        } catch (error: Exception) {
+            ApiResponse(-1, error.message.orEmpty(), JSONObject().put("error", error.message ?: "网络连接失败"))
+        } finally {
+            connection?.disconnect()
+        }
+    }
+
+    /**
+     * 按 name 合并 Set-Cookie，而不是整体覆盖：退出登录时服务器会下发空值的
+     * session cookie，直接覆盖会把 `session=` 这样的空壳保存下来一直发送。
+     */
     private fun persistCookie(headers: List<String>?) {
-        val cookie = headers.orEmpty()
-            .map { it.substringBefore(';') }
+        val incoming = headers.orEmpty()
+            .map { it.substringBefore(';').trim() }
             .filter { it.contains('=') }
-            .joinToString("; ")
-        if (cookie.isNotBlank()) prefs.edit().putString("cookie", cookie).apply()
+        if (incoming.isEmpty()) return
+        val jar = LinkedHashMap<String, String>()
+        prefs.getString("cookie", null).orEmpty()
+            .split(';')
+            .map { it.trim() }
+            .filter { it.contains('=') }
+            .forEach { jar[it.substringBefore('=')] = it.substringAfter('=') }
+        incoming.forEach {
+            val name = it.substringBefore('=')
+            val value = it.substringAfter('=')
+            if (value.isBlank()) jar.remove(name) else jar[name] = value
+        }
+        prefs.edit()
+            .putString("cookie", jar.entries.joinToString("; ") { "${it.key}=${it.value}" })
+            .apply()
     }
 
     private fun parse(code: Int, text: String): ApiResponse {

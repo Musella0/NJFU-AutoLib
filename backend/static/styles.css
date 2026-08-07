@@ -17,6 +17,11 @@
   --accent:#ff5c3a;
   --accent-soft:rgba(255,92,58,.08);
   --accent-softer:rgba(255,92,58,.04);
+  --heat0:#efece3;
+  --heat1:rgba(255,92,58,.24);
+  --heat2:rgba(255,92,58,.45);
+  --heat3:rgba(255,92,58,.70);
+  --heat4:#ff5c3a;
   --ok:#10b981;
   --ok-soft:rgba(16,185,129,.08);
   --warn:#f59e0b;
@@ -61,6 +66,11 @@
   --accent:#FFD06B;
   --accent-soft:rgba(255,208,107,.14);
   --accent-softer:rgba(255,208,107,.07);
+  --heat0:#2A241C;
+  --heat1:rgba(255,208,107,.20);
+  --heat2:rgba(255,208,107,.40);
+  --heat3:rgba(255,208,107,.66);
+  --heat4:#FFD06B;
   --ok:#7BD4A8;
   --ok-soft:rgba(123,212,168,.14);
   --warn:#FFA94D;
@@ -97,6 +107,11 @@
     --accent:#FFD06B;
     --accent-soft:rgba(255,208,107,.14);
     --accent-softer:rgba(255,208,107,.07);
+  --heat0:#2A241C;
+  --heat1:rgba(255,208,107,.20);
+  --heat2:rgba(255,208,107,.40);
+  --heat3:rgba(255,208,107,.66);
+  --heat4:#FFD06B;
     --ok:#7BD4A8;
     --ok-soft:rgba(123,212,168,.14);
     --warn:#FFA94D;
@@ -555,3 +570,32 @@ body.compact .week{padding:12px}
 body.cozy .today-card{padding:26px 28px}
 body.cozy .today-card .seat{font-size:52px}
 body.cozy .box.pad{padding:22px 24px}
+
+/* ========= 学习热力图 ========= */
+.heatmap-wrap{overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch}
+.heatmap-inner{display:inline-block;min-width:100%}
+.heatmap-months{
+  display:grid;grid-auto-flow:column;gap:3px;
+  font-family:var(--sans);font-size:9px;color:var(--ink3);
+  letter-spacing:.3px;margin-bottom:3px;height:11px;
+}
+.heatmap{display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,1fr);gap:3px}
+.heatmap .cell{
+  width:11px;height:11px;border-radius:2px;
+  background:var(--heat0);border:1px solid transparent;
+}
+.heatmap .cell.l1{background:var(--heat1)}
+.heatmap .cell.l2{background:var(--heat2)}
+.heatmap .cell.l3{background:var(--heat3)}
+.heatmap .cell.l4{background:var(--heat4)}
+.heatmap .cell.today{border-color:var(--accent)}
+.heatmap .cell.void{background:transparent}
+.heatmap-legend{
+  display:flex;align-items:center;gap:4px;margin-top:8px;
+  font-family:var(--sans);font-size:10px;color:var(--ink3);
+}
+.heatmap-legend .cell{width:11px;height:11px;border-radius:2px;background:var(--heat0)}
+.heatmap-legend .cell.l1{background:var(--heat1)}
+.heatmap-legend .cell.l2{background:var(--heat2)}
+.heatmap-legend .cell.l3{background:var(--heat3)}
+.heatmap-legend .cell.l4{background:var(--heat4)}

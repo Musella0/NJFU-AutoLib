@@ -2,4 +2,7 @@
 <resources>
     <string name="app_name">AutoLib</string>
     <string name="add_library_account">添加学号</string>
+    <string name="widget_small_desc">专注今天：座位、进度与「我已到馆」</string>
+    <string name="widget_medium_desc">今天 + 明日，一眼掌握两天安排</string>
+    <string name="widget_large_desc">完整掌控一周：今日、明日与本周节奏</string>
 </resources>
