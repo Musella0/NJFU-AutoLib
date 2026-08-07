@@ -18,20 +18,50 @@
 
 安卓端也可以选择下载[船新版本](../../releases/latest)；也可以选择[蓝奏云](https://wwbqs.lanzouq.com/ioEtx4126v1g) (注意蓝奏云之后只会停留在0.2.1版本，最新请在release中下载或下载后点击检查更新)
 
+#### 安卓客户端
+
+超级大更新，仿佛看到原子弹爆炸，看到后瘫坐在椅子上
+
+已经是**全原生界面**，不再是套壳网页，需要 Android 8.0 及以上。
+
+- **桌面小组件**三种规格，不打开 App 也能看今天坐哪：
+  - `2×2` 专注今天——座位、时段、进度条和「我已到馆」
+  - `4×2` 今天 + 明日两栏对照
+  - `4×4` 完整掌控一周——今日全量信息、明日安排、本周节奏图
+  - 「我已到馆」可以直接在小组件里点掉；午休 / 取消 / 调整明日会跳进 App 对应界面
+- **抢座结果通知**：每天 07:05 自动查询前一晚的抢座结果并推送，默认开启
+- **学习记录热力图**：按学期统计每天的自习时长，颜色深浅一目了然
+- **主页一屏看全**：今日、明日、快捷调整明日时段、本周配置预览
+- 刷卡入座后自动补写到馆记录，迟到保护不会误判；已入座时「取消」会变成「离馆」
+- 跟随系统 / 亮色 / 暗色三档主题
+
+> 客户端连的是上面那个公共服务。自己部署的话需要改服务端地址后重新编译，见下方部署说明。
+
 ### 方法2 自己部署
-可以将以下提示词复制喂给AI，让AI帮你部署：
+
+可以将一下提示词喂给AI，让AI帮你部署：
 
 ```
-请帮我把 AutoLib 部署到我自己的服务器上。仓库：https://github.com/Musella0/NJFU-AutoLib这是一个图书馆自动抢座系统，Flask + MongoDB + Caddy，用 Docker Compose 编排。
-先克隆下来读 `quickstart.md`、`docker-compose.yml`、`.env.example` 和 `Caddyfile`，按你理解的正确顺序执行。
+请帮我把 AutoLib 部署到我自己的服务器上。仓库：https://github.com/Musella0/NJFU-AutoLib
+这是一个图书馆自动抢座系统，Flask + MongoDB + Caddy，用 Docker Compose 编排。
+先克隆下来读 `quickstart.md`、`docker-compose.yml`、`.env.example` 和 `Caddyfile`，
+按你理解的正确顺序执行，每步验证结果再继续，失败就停下来告诉我原因。
 
-动手前先问我四件事：**域名**（要提前解析到这台服务器，Caddy 靠它自动签 HTTPS 证书）、**服务器前面是否还有 CDN 或另一层反向代理**、**是否需要邮件通知**（需要的话我给你 Resend 或 SMTP 配置）、**是否需要配置 Android 客户端**（需要的话我只提供自己的服务器地址，改哪里、怎么编译你自己判断）。
+动手前先问我四件事：**域名**（要提前解析到这台服务器，Caddy 靠它自动签 HTTPS 证书）、
+**服务器前面是否还有 CDN 或另一层反向代理**、**是否需要邮件通知**（需要的话我给你 Resend 或 SMTP 配置）、
+**是否需要配置 Android 客户端**（需要的话我只提供自己的服务器地址，改哪里、怎么编译你自己判断）。
 
-第四问我若回答「需要」，就用我给的地址替换掉客户端里写死的服务端常量并编译出可安装的包，中间不用再问我细节。只提示两点：客户端强制 HTTPS，自签证书要额外配置信任；release 签名口令来自不在版本库里的 `android/local.properties`，缺失时产出的是无法直接安装的未签名包。
+`quickstart.md` 和 `.env.example` 里凡是带 ⚠️ 或写了「否则……」的地方都是踩过的坑
+（反代层数、加密密钥不可丢、Cookie 与协议要匹配、一次性容器正常退出等），逐条照做别跳过。
+`ENCRYPTION_KEY` 生成后额外提醒我单独备份。
+
+第四问我若回答「需要」，就用我给的地址替换掉客户端里写死的服务端常量并编译出可安装的包，
+中间不用再问我细节。只提示两点：客户端强制 HTTPS，自签证书要额外配置信任；
+release 签名口令来自不在版本库里的 `android/local.properties`，缺失时产出的是无法直接安装的未签名包。
 
 过程中不要把密钥、密码打印到终端输出里，写进文件即可；用中文跟我交流。
-
-部署完提醒我：这个项目会代替用户登录学校账号并自动抢座，需自行确认符合学校规定，并对存储他人凭据承担责任。
+部署完提醒我：这个项目会代替用户登录学校账号并自动抢座，需自行确认符合学校规定，
+并对存储他人凭据承担责任。
 ```
 
 详细部署步骤见 [quickstart.md](quickstart.md)。
@@ -41,16 +71,30 @@
 ```bash
 # 1. 复制并填写环境变量
 cp .env.example .env
-# 编辑 .env，填写 MONGO_PASS、SECRET_KEY、ENCRYPTION_KEY、ADMIN_TOTP_SECRET
+# 编辑 .env，填写 MONGO_PASS、SECRET_KEY、ENCRYPTION_KEY
 
 # 2. 启动所有服务
 docker compose up -d --build
 
-# 3. 打开浏览器
+# 3. 创建管理员账号（交互式，会生成 TOTP 密钥且只显示一次）
+docker compose exec flask-api python init_admin.py
+
+# 4. 打开浏览器
 # 用户端：http://localhost:5004/
 # 管理后台：http://localhost:5004/admin
 ```
 
+#### 自己编译安卓客户端
+
+服务端地址是**编译期常量**，默认指向上面的公共服务。要连自己的服务器：
+
+```kotlin
+// android/app/build.gradle.kts
+buildConfigField("String", "SERVER_URL", "\"https://你的域名\"")
+```
+
+然后 `cd android && ./gradlew assembleRelease`。客户端只允许 HTTPS，用自签证书需要改
+`android/app/src/main/res/xml/network_security_config.xml`。
 ### 密码怎么保存的？安全吗？
 
 用户的 VPN 密码和图书馆密码需要存下来（因为自动登录时要用），所以用的是**可逆加密**（AES），而不是哈希。
