@@ -37,6 +37,7 @@ services:
       - SECRET_KEY=${SECRET_KEY:-change-me-to-a-random-string}
       - FLASK_ENV=${FLASK_ENV:-production}
       - SESSION_COOKIE_SECURE=${SESSION_COOKIE_SECURE:-false}
+      - TRUSTED_PROXY_COUNT=${TRUSTED_PROXY_COUNT:-1}
       - ADMIN_CREDENTIALS_FILE=/app/data/admin_credentials.enc
       - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
       - SMTP_HOST=${SMTP_HOST:-smtp-mail.outlook.com}
@@ -122,6 +123,8 @@ services:
       - "443:443/udp"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # APK 下载目录：只暴露这一个目录，仓库其他文件不可达
+      - ./downloads:/srv/downloads:ro
       - caddy_data:/data
       - caddy_config:/config
 
