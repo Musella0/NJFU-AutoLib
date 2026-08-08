@@ -352,6 +352,8 @@
 <!-- =============== TOASTS =============== -->
 <div class="toasts" id="toasts"></div>
 
+<!-- 演示模式：仅 ?demo=1 时接管接口返回假数据，必须排在 app.js 之前 -->
+<script src="{{ url_for('static', filename='demo.js') }}?v={{ static_v }}"></script>
 <script src="{{ url_for('static', filename='app.js') }}?v={{ static_v }}"></script>
 </body>
 </html>
