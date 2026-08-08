@@ -86,10 +86,47 @@ class MainActivity : AppCompatActivity() {
         restoreState(savedInstanceState)
         setupNavigation()
         binding.accountButton.setOnClickListener { showAccountChooser() }
-        setupNotifications()
+        // 先介绍再要权限：讲清楚「每天帮你抢座、结果推通知」之后再弹权限，
+        // 用户才知道这个通知是干什么用的。两个对话框不能同时弹，所以串起来。
+        showWelcomeIfNeeded { setupNotifications() }
         loadInitialData()
         // 每天至多一次，且只在确实有新版本时才弹
         UpdateChecker.checkSilently(this, api) { showUpdateDialog(it) }
+    }
+
+    /**
+     * 首次启动的功能介绍。点「我知道啦」后永久关闭——key 带版本号，
+     * 以后加了大功能把 v1 换成 v2，老用户会再看到一次新版介绍。
+     *
+     * 无论看没看过都会回调 [onDone]，调用方拿它串下一步（申请通知权限）。
+     */
+    private fun showWelcomeIfNeeded(onDone: () -> Unit) {
+        val prefs = getPreferences(MODE_PRIVATE)
+        if (prefs.getBoolean(PREF_WELCOME_ACK, false)) {
+            onDone()
+            return
+        }
+
+        val body = vertical(dp(4)).apply {
+            addView(text("每天抢座太麻烦？配置一次，之后每天到点自动帮你抢好。", 13).apply {
+                setTextColor(color(R.color.text_secondary))
+                setPadding(dp(4), 0, dp(4), dp(10))
+            })
+            addView(noticeCard("📅 自动预约", WELCOME_RESERVE, R.color.primary))
+            addView(noticeCard("🛡 迟到保护", WELCOME_LATE_PROTECTION, R.color.success))
+            addView(noticeCard("😴 自动午休", WELCOME_NAP, R.color.tomorrow))
+            addView(noticeCard("📊 小组件 & 热力图", WELCOME_WIDGET, R.color.text_muted))
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("👋 欢迎使用 AutoLib")
+            .setView(scrolled(body))
+            .setPositiveButton("我知道啦") { _, _ ->
+                prefs.edit().putBoolean(PREF_WELCOME_ACK, true).apply()
+                onDone()
+            }
+            .setCancelable(false)
+            .show()
     }
 
     /**
@@ -2192,6 +2229,8 @@ class MainActivity : AppCompatActivity() {
         private const val TAG_START = "start"
         private const val TAG_END = "end"
         private const val PREF_LP_ACK = "late_protection_ack"
+        /** 欢迎介绍的「已读」标记。加了大功能就把 v1 递增，让老用户再看一次。 */
+        private const val PREF_WELCOME_ACK = "welcome_ack_v1"
         private const val REQUEST_NOTIFICATIONS = 3001
         private const val PREF_NOTIFY_ASKED = "notify_permission_asked"
         private const val STATE_PAGE = "page"
@@ -2208,6 +2247,18 @@ class MainActivity : AppCompatActivity() {
         private val THEME_LABELS = mapOf(
             THEME_SYSTEM to "跟随系统", THEME_LIGHT to "亮色", THEME_DARK to "暗色",
         )
+        private const val WELCOME_RESERVE =
+            "填好学号、想坐哪、几点到几点，剩下的交给我。可以按星期分别排，" +
+                "也可以每天固定时段。抢完发通知告诉你结果。(｡･∀･)ﾉﾞ"
+        private const val WELCOME_LATE_PROTECTION =
+            "没按时到馆？系统自动把预约推迟 1 小时，座位先给你留着。" +
+                "到了记得点主页的「我已到馆」。推迟后再不来，就按学校规则算违约。( ‵▽′)ψ"
+        private const val WELCOME_NAP =
+            "出门吃饭前点一下，系统立刻退掉当前预约、用同一个座位重新约下午时段，" +
+                "回来座位还在。也可以设成每天自动执行。🍚(*´∀`)~♪"
+        private const val WELCOME_WIDGET =
+            "长按桌面添加小组件，2×2 / 4×2 / 4×4 三种规格，不打开 App 也能看今天坐哪、" +
+                "点「我已到馆」。主页还能看按学期统计的自习热力图。"
         private const val LATE_PROTECTION_INFO =
             "开启后，系统会在你预约开始前检查是否到馆。\n\n" +
                 "· 最多保护 1 小时：未按时到馆则自动把预约推迟 1 小时为你保留座位\n" +
