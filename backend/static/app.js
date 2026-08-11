@@ -17,6 +17,11 @@ const state = {
   napConfig: { start_time: '14:00', end_time: '', seat: '', auto_daily: false, trigger_time: '12:00' },
 };
 
+// 首次使用的欢迎弹窗。key 带版本号：以后加了大功能把 v1 改成 v2，老用户会再看到一次。
+const WELCOME_KEY = 'autolib_welcome_ack_v1';
+const APK_URL = 'https://南林图书馆.中国/download/AutoLib-0.2.1.apk';
+const APK_NAME = 'AutoLib-0.2.1.apk';
+
 const WEEK_LABELS = ['一','二','三','四','五','六','日']; // iso 1..7
 const WEEK_DEFAULTS = ['08:00-22:00','08:00-22:00','08:00-22:00','08:00-22:00','08:00-20:00','08:00-22:00','08:00-22:00'];
 const TIME_MIN = '08:00';
@@ -1672,6 +1677,32 @@ const SHEETS = {
       <button class="btn accent grow" onclick="saveEmail()">保存</button>
     </div>
   `,
+  'welcome': () => `
+    <div class="grab"></div>
+    <h3>👋 欢迎使用 AutoLib</h3>
+    <div class="desc">每天抢座太麻烦？配置一次，之后每天到点自动帮你抢好。</div>
+    <div class="col gap-sm">
+      <div class="box tight" style="border-left:4px solid var(--accent)">
+        <div class="sub" style="font-weight:700">📅 自动预约</div>
+        <div class="t">填好学号、想坐哪、几点到几点，剩下的交给我。可以按星期分别排，也可以每天固定时段。抢完发通知告诉你结果。(｡･∀･)ﾉﾞ</div>
+      </div>
+      <div class="box tight" style="border-left:4px solid var(--ok)">
+        <div class="sub" style="font-weight:700">🛡 迟到保护</div>
+        <div class="t">没按时到馆？系统自动把预约推迟 1 小时，座位先给你留着。到了记得点主页的「我已到馆」。推迟后再不来，就按学校规则算违约。( ‵▽′)ψ</div>
+      </div>
+      <div class="box tight" style="border-left:4px solid var(--warn)">
+        <div class="sub" style="font-weight:700">😴 自动午休</div>
+        <div class="t">出门吃饭前点一下，系统立刻退掉当前预约、用同一个座位重新约下午时段，回来座位还在。也可以设成每天自动执行。🍚(*´∀\`)~♪</div>
+      </div>
+      <div class="box tight" style="border-left:4px solid var(--ink3)">
+        <div class="sub" style="font-weight:700">📱 安卓客户端</div>
+        <div class="t">桌面小组件不打开 App 就能看今天坐哪，还有学习时长热力图。</div>
+        <a class="btn sm accent" style="margin-top:8px;text-decoration:none"
+           href="${APK_URL}" download="${APK_NAME}">⬇ 下载 APK</a>
+      </div>
+    </div>
+    <button class="btn primary mt-lg" style="width:100%" onclick="acknowledgeWelcome()">我知道啦</button>
+  `,
   'lp-info': () => `
     <div class="grab"></div>
     <h3>🛡 关于迟到保护</h3>
@@ -2125,10 +2156,23 @@ function openSheet(name){
   const tpl = SHEETS[name];
   content.innerHTML = tpl ? tpl() : '<div class="grab"></div><h3>未实现</h3>';
   sc.classList.add('show');
-  if(name === 'lp-info' || name === 'lp-warning' || name === 'cancel' || name === 'cancel-tomorrow' || name === 'nap-info' || name === 'nap-about') sc.classList.add('center');
+  if(name === 'welcome' || name === 'lp-info' || name === 'lp-warning' || name === 'cancel' || name === 'cancel-tomorrow' || name === 'nap-info' || name === 'nap-about') sc.classList.add('center');
   else sc.classList.remove('center');
 }
 function closeSheet(){ $('scrim').classList.remove('show'); }
+
+// ---------- welcome ----------
+// 演示模式默认跳过，免得挡住截图（?demo=1&welcome=1 可以强制显示）
+function shouldShowWelcome(){
+  if(window.__autolibSkipWelcome) return false;
+  try{ return localStorage.getItem(WELCOME_KEY) !== '1'; }
+  catch(e){ return false; }   // 隐私模式下读不到 storage，就别反复弹
+}
+
+function acknowledgeWelcome(){
+  try{ localStorage.setItem(WELCOME_KEY, '1'); }catch(e){}
+  closeSheet();
+}
 
 // ---------- visit stats ----------
 async function loadVisitStats(){
@@ -2432,6 +2476,8 @@ async function init(){
 
   syncThemeUI();
   if(DEMO_MODE){ await enterDemoMode(); return; }
+  // 先讲清楚这工具干什么，再去加载数据——新访客第一眼不该是一个空主页
+  if(shouldShowWelcome()) openSheet('welcome');
   await checkAuth();
   // Account configuration comes from MongoDB and must remain visible even if
   // loading the seat catalogue is slow or temporarily unavailable.
