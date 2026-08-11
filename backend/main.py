@@ -34,6 +34,19 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 _cors_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
 CORS(app, origins=_cors_origins if _cors_origins else [])
 
+# 本项目默认部署在 Caddy 反代之后，直连拿到的 remote_addr 是反代容器的 IP，
+# 会让所有用户共用同一个限流桶。信任 X-Forwarded-* 才能按真实来源限流。
+# 直接把 Flask 暴露到公网时必须设为 0，否则请求方可以伪造 X-Forwarded-For。
+_trusted_proxies = int(os.environ.get("TRUSTED_PROXY_COUNT", "1"))
+if _trusted_proxies > 0:
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    app.wsgi_app = ProxyFix(
+        app.wsgi_app,
+        x_for=_trusted_proxies,
+        x_proto=_trusted_proxies,
+        x_host=_trusted_proxies,
+    )
+
 limiter = Limiter(
     get_remote_address,
     app=app,
@@ -234,32 +247,9 @@ def admin():
 
 
 # ==================== User Auth ====================
-# 不单独注册网站账号：直接使用学号 + 统一身份认证密码登录，
-# 数据以学号（web_uid = pid）归属，换设备登录即可找回。
-
-def _check_unified_identity(pid: str, password: str):
-    """验证学号 + 统一身份认证密码。
-
-    返回 (status, error)：
-    - "ok"              webvpn 与图书馆 CAS 均通过
-    - "auth_failed"     统一身份认证失败（密码错误）
-    - "vpn_unreachable" webvpn 服务异常（可回退本地缓存校验）
-    - "lib_unreachable" 密码正确但图书馆系统异常
-    """
-    try:
-        from utils.vpn_system import VPNSystem
-        vpn = VPNSystem(pid, password)
-        if not vpn.vpn_login():
-            return "auth_failed", "统一身份认证失败：请检查学号和密码是否正确"
-    except Exception as e:
-        return "vpn_unreachable", f"统一身份认证服务异常：{str(e)}"
-    try:
-        from utils.library_system import LibrarySystem
-        LibrarySystem(username=pid, password=password, session=vpn.session)
-    except Exception as e:
-        return "lib_unreachable", f"图书馆系统异常：{str(e)}"
-    return "ok", None
-
+# 没有独立的登录/注册流程：前端「添加学号」调用
+# /api/my/accounts/<pid>/verify，验证统一身份认证密码通过后会话即被提升为该学号。
+# 数据以学号（web_uid = pid）归属，换设备重新验证一次即可找回。
 
 def _cache_identity(db, pid: str, password: str):
     """把统一身份认证密码哈希缓存到 web_users，供学校服务不可用时离线登录。"""
@@ -273,30 +263,6 @@ def _cache_identity(db, pid: str, password: str):
     )
 
 
-def _ensure_own_account_config(db, pid: str, vpn_password: str):
-    """登录即绑定：确保当前学号的图书馆配置存在，并刷新缓存密码。"""
-    existing = db.user_config_info.find_one({"web_uid": pid, "pid": pid})
-    if existing:
-        db.user_config_info.update_one(
-            {"_id": existing["_id"]},
-            {"$set": {
-                "vpn_password": _enc(vpn_password),
-                "verified": True,
-                "updated_at": datetime.now(),
-            }},
-        )
-        return
-    cfg = default_account_config()
-    cfg.update({
-        "pid": pid,
-        "web_uid": pid,
-        "vpn_password": _enc(vpn_password),
-        "verified": True,
-        "updated_at": datetime.now(),
-    })
-    db.user_config_info.insert_one(cfg)
-
-
 def _login_as(db, pid: str):
     """建立会话，并把当前浏览器的游客数据合并到该学号。返回昵称。"""
     session.permanent = True
@@ -306,41 +272,21 @@ def _login_as(db, pid: str):
     return (user.get("nickname") or "").strip()
 
 
-@app.route("/api/auth/login", methods=["POST"])
-@limiter.limit("5/minute")
-def login():
-    """学号 + 统一身份认证密码登录，无需注册。"""
-    data = request.get_json(silent=True) or {}
-    pid = (data.get("username") or "").strip()
-    password = data.get("password") or ""
-    if not pid or not password:
-        return jsonify({"error": "学号和密码不能为空"}), 400
+def _offline_login(pid: str, password: str) -> bool:
+    """学校服务不可用时的回退：本地缓存的密码哈希对得上就放行进入登录态。
 
-    status, err = _check_unified_identity(pid, password)
-    if status == "auth_failed":
-        return jsonify({"error": err}), 401
-
+    只用于服务异常（不是密码错误）的场景，且不会把 verified 置为 True——
+    学校侧恢复后仍需要重新验证一次。
+    """
     client, db = get_db()
-    if status == "vpn_unreachable":
-        # 学校服务异常时，回退到本地缓存的密码哈希
+    try:
         user = db.web_users.find_one({"uid": pid})
         if not user or not check_password_hash(user.get("password", ""), password):
-            client.close()
-            return jsonify({"error": f"{err}，且本地没有可用的登录缓存"}), 503
-        nickname = _login_as(db, pid)
+            return False
+        _login_as(db, pid)
+        return True
+    finally:
         client.close()
-        return jsonify({
-            "message": "学校服务暂时不可用，已使用本地缓存登录",
-            "uid": pid, "nickname": nickname,
-        }), 200
-
-    # 统一身份认证已通过（lib_unreachable 时图书馆 SSO 异常，但密码正确）
-    _cache_identity(db, pid, password)
-    nickname = _login_as(db, pid)
-    _ensure_own_account_config(db, pid, password)
-    client.close()
-    message = "登录成功" if status == "ok" else "登录成功（图书馆系统暂时异常，请稍后重新验证）"
-    return jsonify({"message": message, "uid": pid, "nickname": nickname}), 200
 
 
 @app.route("/api/auth/logout", methods=["POST"])
@@ -584,7 +530,7 @@ def save_my_account(pid):
     data = request.get_json(silent=True) or {}
     allowed = ["vpn_password", "seat_list", "mode", "time",
                "is_reserved", "late_protection",
-               "notify_email", "notify_serverchan_key", "verified"]
+               "notify_email", "verified"]
     update = {k: v for k, v in data.items() if k in allowed and v is not None}
 
     if "seat_list" in update:
@@ -815,9 +761,12 @@ def toggle_arrived(pid):
 
 
 @app.route("/api/my/accounts/<pid>/verify", methods=["POST"])
+@limiter.limit("5/minute")
 @login_required
 def verify_account(pid):
     """Verify the unified identity credential and library CAS session.
+
+    这是唯一的凭据入口（验证通过即登录），所以必须限流防止撞库。
 
     Accepts the password either from the request body (for pre-save verification
     in addAccount flow) or falls back to the saved account config in DB.
@@ -850,19 +799,31 @@ def verify_account(pid):
     try:
         from utils.vpn_system import VPNSystem
         vpn = VPNSystem(pid, vpn_password)
-        if not vpn.vpn_login():
-            mark_verified(False)
-            return jsonify({
-                "verified": False,
-                "failed_at": "vpn",
-                "error": "统一身份认证失败：请检查网上办事大厅密码是否正确"
-            }), 200
+        vpn_ok = vpn.vpn_login()
     except Exception as e:
+        # 服务异常而非密码错误：本地缓存对得上就先放行，但保持未验证状态。
+        mark_verified(False)
+        response = {
+            "verified": False,
+            "failed_at": "vpn",
+            "error": f"VPN 登录异常：{str(e)}",
+        }
+        if _is_guest() and _offline_login(pid, vpn_password):
+            response["logged_in"] = True
+            response["uid"] = pid
+            response["offline"] = True
+            response["error"] = (
+                f"统一身份认证服务暂时不可用（{str(e)}），"
+                "已使用本地缓存登录，服务恢复后请重新验证"
+            )
+        return jsonify(response), 200
+
+    if not vpn_ok:
         mark_verified(False)
         return jsonify({
             "verified": False,
             "failed_at": "vpn",
-            "error": f"VPN 登录异常：{str(e)}"
+            "error": "统一身份认证失败：请检查网上办事大厅密码是否正确"
         }), 200
 
     # Step 2: 复用 webvpn 会话，通过 CAS SSO 建立图书馆登录态。
@@ -888,9 +849,7 @@ def verify_account(pid):
         # 数据归属学号而非浏览器，换设备验证一次即可找回。
         client2, db2 = get_db()
         _cache_identity(db2, pid, vpn_password)
-        session.permanent = True
-        session["web_uid"] = pid
-        _migrate_guest_data(db2, pid)
+        _login_as(db2, pid)
         uid = pid
         client2.close()
         promoted = True
@@ -960,7 +919,11 @@ def reserve_now(pid):
 @app.route("/api/my/accounts/<pid>/reserve_custom", methods=["POST"])
 @login_required
 def reserve_custom(pid):
-    """用指定座位和时间段预约今天"""
+    """用指定座位和时间段预约今天或明天
+
+    `day` 只接受 today / tomorrow：图书馆系统本身也只开放这两天，
+    限定取值顺便挡掉了任意日期的越权预约。
+    """
     uid = _ensure_uid()
     cfg = _get_decrypted_cfg(pid, uid)
     if not cfg:
@@ -972,7 +935,10 @@ def reserve_custom(pid):
     seat_name = (body.get("seat") or "").strip()
     start_time = (body.get("start_time") or "").strip()  # "HH:MM"
     end_time = (body.get("end_time") or "").strip()      # "HH:MM"
+    day = (body.get("day") or "today").strip()
 
+    if day not in ("today", "tomorrow"):
+        return jsonify({"error": "day 只能是 today 或 tomorrow"}), 400
     if not seat_name or not start_time or not end_time:
         return jsonify({"error": "缺少 seat / start_time / end_time"}), 400
     if start_time >= end_time:
@@ -990,9 +956,13 @@ def reserve_custom(pid):
         if not seat_ids:
             return jsonify({"error": f"未找到座位「{seat_name}」"}), 400
 
-        today = __import__("datetime").date.today().strftime("%Y-%m-%d")
-        resv_begin = f"{today} {start_time}:00"
-        resv_end   = f"{today} {end_time}:00"
+        import datetime as _datetime
+        target = _datetime.date.today()
+        if day == "tomorrow":
+            target += _datetime.timedelta(days=1)
+        target_str = target.strftime("%Y-%m-%d")
+        resv_begin = f"{target_str} {start_time}:00"
+        resv_end   = f"{target_str} {end_time}:00"
 
         library = LibrarySystem(
             username=pid,
@@ -1010,11 +980,12 @@ def reserve_custom(pid):
         return jsonify({"error": f"预约失败: {str(e)}"}), 500
 
 
-# ==================== Public API (游客模式) ====================
+# ==================== Seats ====================
 
-@app.route("/api/public/seats", methods=["GET"])
-def get_public_seats():
-    """游客可访问的座位列表，无需登录"""
+@app.route("/api/seats", methods=["GET"])
+@app.route("/api/public/seats", methods=["GET"])  # 兼容旧版客户端
+def get_all_seats():
+    """按楼层/区域分组的座位列表。座位表本身不含用户数据，无需登录。"""
     try:
         client, db = get_db()
         devices = list(db.devices.find({}, {"_id": 0, "devId": 1, "devName": 1, "location": 1}))
@@ -1033,26 +1004,6 @@ def get_public_seats():
 
 
 # ==================== Admin API (password-filtered) ====================
-
-@app.route("/api/seats", methods=["GET"])
-@login_required
-def get_all_seats():
-    """已登录用户访问座位列表"""
-    try:
-        client, db = get_db()
-        devices = list(db.devices.find({}, {"_id": 0, "devId": 1, "devName": 1, "location": 1}))
-        client.close()
-        grouped = {}
-        for d in devices:
-            loc = d.get("location", "未知")
-            if loc not in grouped:
-                grouped[loc] = []
-            grouped[loc].append(d["devName"])
-        for loc in grouped:
-            grouped[loc].sort()
-        return jsonify({"seats": grouped}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/users", methods=["GET"])
@@ -1176,6 +1127,65 @@ def _serialize_announcement(doc):
     }
 
 
+# ==================== App version ====================
+# 客户端升级检查。版本信息存单条文档，管理员在后台改，不用每次发版动代码。
+
+_APP_VERSION_DOC = "android_latest"
+
+
+def _serialize_app_version(doc):
+    doc = doc or {}
+    return {
+        "version_code": int(doc.get("version_code", 0) or 0),
+        "version_name": doc.get("version_name", ""),
+        "download_url": doc.get("download_url", ""),
+        "notes": doc.get("notes", ""),
+        "updated_at": doc["updated_at"].strftime("%Y-%m-%d %H:%M:%S")
+            if isinstance(doc.get("updated_at"), datetime) else doc.get("updated_at", ""),
+    }
+
+
+@app.route("/api/app/version", methods=["GET"])
+def get_app_version():
+    """Public: latest Android build info, used by the in-app update check."""
+    client, db = get_db()
+    doc = db.app_versions.find_one({"_id": _APP_VERSION_DOC})
+    client.close()
+    return jsonify(_serialize_app_version(doc)), 200
+
+
+@app.route("/api/admin/app_version", methods=["POST"])
+@admin_required
+def admin_set_app_version():
+    data = request.get_json(silent=True) or {}
+    try:
+        version_code = int(data.get("version_code", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "version_code 必须是整数"}), 400
+    if version_code <= 0:
+        return jsonify({"error": "version_code 必须大于 0"}), 400
+
+    version_name = (data.get("version_name") or "").strip()
+    download_url = (data.get("download_url") or "").strip()
+    if not version_name:
+        return jsonify({"error": "version_name 不能为空"}), 400
+    # 客户端会用它拉起浏览器，限制协议避免存进 javascript: 之类的东西
+    if not download_url.startswith(("http://", "https://")):
+        return jsonify({"error": "download_url 必须是 http(s) 链接"}), 400
+
+    doc = {
+        "version_code": version_code,
+        "version_name": version_name,
+        "download_url": download_url,
+        "notes": (data.get("notes") or "").strip(),
+        "updated_at": datetime.now(),
+    }
+    client, db = get_db()
+    db.app_versions.update_one({"_id": _APP_VERSION_DOC}, {"$set": doc}, upsert=True)
+    client.close()
+    return jsonify(_serialize_app_version(doc)), 200
+
+
 @app.route("/api/announcements", methods=["GET"])
 def list_announcements():
     """Public list of active announcements — visible to guests and logged-in users."""
@@ -1281,6 +1291,24 @@ def admin_delete_announcement(ann_id):
     return jsonify({"error": "公告不存在"}), 404
 
 
+HEATMAP_DAYS = 371  # 53 周，正好铺满一整年的热力图
+
+
+def _visit_totals(db, match):
+    """聚合出次数和分钟数。放在数据库端算，避免把全部日志拉进内存。"""
+    rows = list(db.visit_logs.aggregate([
+        {"$match": match},
+        {"$group": {
+            "_id": None,
+            "visits": {"$sum": 1},
+            "minutes": {"$sum": {"$ifNull": ["$planned_duration_minutes", 0]}},
+        }},
+    ]))
+    if not rows:
+        return 0, 0
+    return rows[0].get("visits", 0), rows[0].get("minutes", 0)
+
+
 @app.route("/api/my/visit_stats", methods=["GET"])
 @login_required
 def my_visit_stats():
@@ -1290,27 +1318,50 @@ def my_visit_stats():
     if not pids:
         client.close()
         return jsonify({"total_visits": 0, "total_minutes": 0,
-                        "this_week_visits": 0, "this_week_minutes": 0, "recent": []}), 200
-
-    logs = list(db.visit_logs.find(
-        {"pid": {"$in": pids}},
-        {"_id": 0, "uuid": 1, "seat_name": 1, "location": 1,
-         "planned_begin": 1, "planned_duration_minutes": 1}
-    ).sort("planned_begin", DESCENDING).limit(200))
+                        "this_week_visits": 0, "this_week_minutes": 0,
+                        "recent": [], "daily": [], "heatmap_days": HEATMAP_DAYS}), 200
 
     now = datetime.now()
     week_start = (now - timedelta(days=now.weekday())).replace(
         hour=0, minute=0, second=0, microsecond=0)
+    heatmap_start = (now - timedelta(days=HEATMAP_DAYS - 1)).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    owned = {"pid": {"$in": pids}}
 
-    total_visits = len(logs)
-    total_minutes = sum(l.get("planned_duration_minutes", 0) for l in logs)
-    week_logs = [l for l in logs if isinstance(l.get("planned_begin"), datetime)
-                 and l["planned_begin"] >= week_start]
-    this_week_visits = len(week_logs)
-    this_week_minutes = sum(l.get("planned_duration_minutes", 0) for l in week_logs)
+    # 累计值必须走聚合：早先的实现只取最近 200 条来求和，
+    # 自习超过 200 次后「累计」就永远停在 200 了。
+    total_visits, total_minutes = _visit_totals(db, owned)
+    this_week_visits, this_week_minutes = _visit_totals(
+        db, {**owned, "planned_begin": {"$gte": week_start}})
+
+    # 热力图按天聚合。planned_begin 存的是本地时间的 naive datetime，
+    # $dateToString 不带 timezone 正好原样取出当初写入的那一天。
+    daily = [
+        {
+            "date": row["_id"],
+            "visits": row.get("visits", 0),
+            "minutes": row.get("minutes", 0),
+        }
+        for row in db.visit_logs.aggregate([
+            {"$match": {
+                **owned,
+                "planned_begin": {"$gte": heatmap_start, "$type": "date"},
+            }},
+            {"$group": {
+                "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$planned_begin"}},
+                "visits": {"$sum": 1},
+                "minutes": {"$sum": {"$ifNull": ["$planned_duration_minutes", 0]}},
+            }},
+            {"$sort": {"_id": 1}},
+        ])
+    ]
 
     recent = []
-    for l in logs[:10]:
+    for l in db.visit_logs.find(
+        owned,
+        {"_id": 0, "seat_name": 1, "location": 1,
+         "planned_begin": 1, "planned_duration_minutes": 1},
+    ).sort("planned_begin", DESCENDING).limit(10):
         pb = l.get("planned_begin")
         recent.append({
             "date": pb.strftime("%Y-%m-%d") if isinstance(pb, datetime) else str(pb)[:10],
@@ -1326,6 +1377,8 @@ def my_visit_stats():
         "this_week_visits": this_week_visits,
         "this_week_minutes": this_week_minutes,
         "recent": recent,
+        "daily": daily,
+        "heatmap_days": HEATMAP_DAYS,
     }), 200
 
 

@@ -156,14 +156,14 @@ function updateAuthUI(){
 
   const profileBtn = $('settings-profile-btn');
   if(state.isGuest){
-    hello.textContent = '你好，同学 ☕';
+    hello.textContent = '您好，同学 ☕';
     $('settings-uid').textContent = '游客';
     $('settings-accounts-meta').textContent = '游客模式 · 仅可浏览，添加学号即登录';
     if(profileBtn) profileBtn.style.display = 'none';
     $('logout-card').style.display = 'none';
   }else{
     const name = state.nickname || state.uid;
-    hello.textContent = `你好，${name} ☕`;
+    hello.textContent = `您好，${name} ☕`;
     $('settings-uid').textContent = name;
     const subMeta = state.nickname
       ? `已登录 · @${state.uid} · ${state.accounts.length} 个学号`
@@ -310,6 +310,16 @@ async function verifyAdd(){
   if(!vres.ok || vres.data.verified !== true){
     btn.disabled = false;
     btn.textContent = '验证并保存';
+    // 学校服务异常时后端可能凭本地缓存放行：仍然进入登录态，只是未验证。
+    if(vres.data.offline && vres.data.logged_in && vres.data.uid){
+      state.isGuest = false;
+      state.uid = vres.data.uid;
+      state.currentPid = pid;
+      toast(vres.data.error || '已使用本地缓存登录','info');
+      closeSheet();
+      await loadAccounts();
+      return;
+    }
     toast(vres.data.error || '验证失败','error');
     return;
   }
@@ -711,6 +721,7 @@ async function saveCfg(options = {}){
     late_protection: $('cfg-toggle-lp').classList.contains('on') ? 'True' : 'False',
   };
   if(!silent) body.vpn_password = $('cfg-vpn').value;
+  if(options.verified) body.verified = true;
 
   const btn = $('btn-save-cfg');
   if(!silent){
@@ -736,7 +747,7 @@ async function saveCfg(options = {}){
     const summary = state.accounts.find(account => account.pid === state.currentPid);
     if(summary) Object.assign(summary, body);
     if(!silent){
-      toast('配置已保存','success');
+      toast(options.verified ? '验证并保存成功' : '配置已保存','success');
       await loadAccounts();
       setTimeout(() => go('home'), 400);
     }
@@ -745,16 +756,43 @@ async function saveCfg(options = {}){
   }
 }
 
+// 改密码后 verified 会被后端重置，这里提供重新验证的入口，
+// 否则配置页只剩一个「未验证」徽章而没有办法把它变回已验证。
+async function verifyAndSaveCfg(){
+  if(!state.currentPid || !state.currentCfg){ toast('请先添加学号','error'); return; }
+  const vpn = $('cfg-vpn').value;
+  if(!vpn){ toast('请填写统一身份认证密码','error'); return; }
+  const btn = $('btn-verify-cfg');
+  btn.disabled = true;
+  btn.textContent = '验证中...';
+  const { ok, data } = await api(
+    `/api/my/accounts/${encodeURIComponent(state.currentPid)}/verify`,
+    { method:'POST', body:{ vpn_password: vpn } },
+  );
+  btn.disabled = false;
+  btn.textContent = '验证并保存';
+  if(!ok || data.verified !== true){
+    toast(data.error || '验证失败','error');
+    return;
+  }
+  state.currentCfg.verified = true;
+  $('cfg-verify-badge').textContent = '✓ 已验证';
+  $('cfg-verify-badge').className = 'pill ok';
+  await saveCfg({ verified: true });
+}
+
 // ---------- reserve-now sheet ----------
 let _rnSeats = null;
 
-async function openReserveNow(defaultSeat){
+async function openReserveNow(defaultSeat, day){
   if(!state.currentPid){ toast('请先添加学号','error'); return; }
   if(!_rnSeats){
-    const { ok, data } = await api('/api/public/seats');
+    const { ok, data } = await api('/api/seats');
     if(!ok || !data.seats){ toast('加载座位列表失败','error'); return; }
     _rnSeats = data.seats;
   }
+  // 弹层由模板重建，目标日期存在 state 里给 submitReserveNow 读
+  state.reserveDay = (day === 'tomorrow') ? 'tomorrow' : 'today';
   openSheet('reserve-now');
   const locSel = $('rn-location');
   if(locSel){
@@ -810,7 +848,8 @@ function showReserveResult(msg, success){
   if(success){
     const time = (msg.match(/(\d{2}:\d{2})-(\d{2}:\d{2})/) || []);
     const timeStr = time[1] ? `${time[1]} – ${time[2]}` : '';
-    const locMatch = msg.match(/新增成功\s+(.+)$/);
+    // 新格式：✅ 姓名 · 08-08 · 08:30-22:00 · 3F-C109 · 预约成功；旧格式：… 新增成功 三层C区 3F-C109
+    const locMatch = msg.match(/(\d+F-[A-Z]\d+)/) || msg.match(/新增成功\s+(.+)$/);
     const loc = locMatch ? locMatch[1].trim() : '';
     body = `
       <div style="text-align:center;font-size:36px;margin:4px 0 12px">✅</div>
@@ -854,7 +893,7 @@ async function submitReserveNow(){
   toast('正在预约…','info');
   const { ok, data } = await api(
     `/api/my/accounts/${encodeURIComponent(state.currentPid)}/reserve_custom`,
-    { method:'POST', body: { seat, start_time: start, end_time: end } }
+    { method:'POST', body: { seat, start_time: start, end_time: end, day: state.reserveDay || 'today' } }
   );
   if(ok){
     closeSheet();
@@ -927,6 +966,19 @@ async function doCancel(){
   toast(data.message || (ok ? '已取消' : '失败'), (ok && data.success) ? 'success' : 'error');
   if(ok && data.success){
     state.todayResv = null;
+    renderHome();
+  }
+}
+
+async function doCancelTomorrow(){
+  closeSheet();
+  if(!state.tomorrowResv){ toast('没有可取消的预约','info'); return; }
+  const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/cancel`, {
+    method:'POST', body:{ uuid: state.tomorrowResv.uuid }
+  });
+  toast(data.message || (ok ? '已取消' : '失败'), (ok && data.success) ? 'success' : 'error');
+  if(ok && data.success){
+    state.tomorrowResv = null;
     renderHome();
   }
 }
@@ -1092,7 +1144,10 @@ function renderTomorrowCard(opt){
       : '自动预约已暂停，去配置页开启';
     empty.innerHTML = `
       <div class="h2" style="color:var(--ink3)">明日暂无预约</div>
-      <div class="sub" style="margin-top:6px">${msg}</div>`;
+      <div class="sub" style="margin-top:6px">${msg}</div>
+      <div class="actions" style="justify-content:center">
+        <button class="btn accent" onclick="openReserveNow(null,'tomorrow')">⚡ 预约明日</button>
+      </div>`;
     return;
   }
 
@@ -1105,6 +1160,7 @@ function renderTomorrowCard(opt){
   const bhm = bt.slice(0,5), ehm = et.slice(0,5);
   const hours = (bhm && ehm) ? (parseInt(ehm,10) - parseInt(bhm,10)) : '';
   const status = fmtResvStatus(resv.resvStatus);
+  const canCancel = [1027, 1093, 3141].includes(resv.resvStatus);
 
   card.style.display = '';
   empty.style.display = 'none';
@@ -1115,6 +1171,7 @@ function renderTomorrowCard(opt){
     <div class="time">${bhm} — ${ehm}${hours ? ` · ${hours}小时` : ''}</div>
     <div class="meta-row">
       <span class="pill ok"><span class="dot"></span>${escHtml(status)}</span>
+      ${canCancel ? `<span class="pill warn" style="cursor:pointer" onclick="openSheet('cancel-tomorrow')">取消</span>` : ''}
     </div>`;
 }
 
@@ -1383,8 +1440,7 @@ function renderNotices(anns, results){
 // ---------- seats ----------
 async function loadSeats(){
   try{
-    const path = state.isGuest ? '/api/public/seats' : '/api/seats';
-    const { ok, data } = await api(path);
+    const { ok, data } = await api('/api/seats');
     state.allSeats = (ok && data.seats) ? data.seats : {};
   }catch(e){
     state.allSeats = {};
@@ -1575,6 +1631,15 @@ const SHEETS = {
       <button class="btn danger grow" onclick="doCancel()">确认取消</button>
     </div>
   `,
+  'cancel-tomorrow': () => `
+    <div class="grab"></div>
+    <h3>取消明日预约？</h3>
+    <div class="desc">取消后座位立即释放，可能被他人抢走。取消完可以在原位置重新预约明天。</div>
+    <div class="row-flex mt">
+      <button class="btn ghost grow" onclick="closeSheet()">再想想</button>
+      <button class="btn danger grow" onclick="doCancelTomorrow()">确认取消</button>
+    </div>
+  `,
   'seat-picker': () => {
     const zones = sortedZones();
     return `
@@ -1710,9 +1775,11 @@ const SHEETS = {
   'reserve-now': () => {
     const seatList = (state.currentCfg && state.currentCfg.seat_list) || [];
     const chips = seatList.slice(0, 3);
+    const forTomorrow = state.reserveDay === 'tomorrow';
     return `
     <div class="grab"></div>
-    <h3>⚡ 立即预约</h3>
+    <h3>⚡ ${forTomorrow ? '预约明日' : '立即预约'}</h3>
+    ${forTomorrow ? '<div class="desc">为明天预约座位，成功后会覆盖自动抢座的结果。</div>' : ''}
     ${chips.length ? `
       <div class="box tight mt" style="background:#dbeafe;border:1px solid #93c5fd">
         <div class="tiny" style="color:#1e40af;margin-bottom:6px;font-weight:600">常用座位 · 点击快速选择</div>
@@ -2058,7 +2125,7 @@ function openSheet(name){
   const tpl = SHEETS[name];
   content.innerHTML = tpl ? tpl() : '<div class="grab"></div><h3>未实现</h3>';
   sc.classList.add('show');
-  if(name === 'lp-info' || name === 'lp-warning' || name === 'cancel' || name === 'nap-info' || name === 'nap-about') sc.classList.add('center');
+  if(name === 'lp-info' || name === 'lp-warning' || name === 'cancel' || name === 'cancel-tomorrow' || name === 'nap-info' || name === 'nap-about') sc.classList.add('center');
   else sc.classList.remove('center');
 }
 function closeSheet(){ $('scrim').classList.remove('show'); }
@@ -2076,9 +2143,99 @@ async function loadVisitStats(){
   }
 }
 
+// 每天的学习时长分 5 档，配色对应 --heat0..4
+function heatLevel(minutes){
+  if(!minutes) return 0;
+  if(minutes <= 120) return 1;
+  if(minutes <= 240) return 2;
+  if(minutes <= 360) return 3;
+  return 4;
+}
+
+function localDateKey(d){
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+// 老版本后端没有 daily 字段，用 recent 兜底才不至于画出一张空图。
+// recent 只有最近 10 条，热力图会不全——服务端更新后就走 daily。
+function dailyFromRecent(recent){
+  const byDate = new Map();
+  (recent || []).forEach(r => {
+    if(!r.date) return;
+    const cur = byDate.get(r.date) || { date: r.date, visits: 0, minutes: 0 };
+    cur.visits += 1;
+    cur.minutes += (r.duration_minutes || 0);
+    byDate.set(r.date, cur);
+  });
+  return [...byDate.values()];
+}
+
+/** 学期起点：上半年从 1 月 1 日算，下半年从 7 月 1 日算。 */
+function semesterStart(today){
+  return new Date(today.getFullYear(), today.getMonth() < 6 ? 0 : 6, 1);
+}
+
+/**
+ * GitHub 贡献图式的热力图：每列一周（周一在最上），从左到右由远及近。
+ * 只画当前学期（下半年 7–12 月 / 上半年 1–6 月），不是"最近一年"——
+ * 铺满整年大多是空格，按学期看也更贴近实际的作息周期。
+ */
+function heatmapHtml(daily){
+  const byDate = new Map((daily || []).map(x => [x.date, x]));
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const start = semesterStart(today);
+  const semesterLabel = `${start.getFullYear()}年${start.getMonth() < 6 ? '上' : '下'}半年`;
+  // 对齐到周一，保证每一列都是完整的一周
+  const startIso = start.getDay() === 0 ? 7 : start.getDay();
+  start.setDate(start.getDate() - (startIso - 1));
+
+  const cells = [];
+  const months = [];
+  let lastMonth = -1;
+  for(let d = new Date(start); d <= today; d.setDate(d.getDate() + 1)){
+    const key = localDateKey(d);
+    const hit = byDate.get(key);
+    const minutes = hit ? hit.minutes : 0;
+    const visits = hit ? hit.visits : 0;
+    const isToday = key === localDateKey(today);
+    const title = visits
+      ? `${key} · ${visits} 次 · ${Math.floor(minutes/60)}h${minutes%60}m`
+      : `${key} · 没有记录`;
+    cells.push(
+      `<div class="cell l${heatLevel(minutes)}${isToday ? ' today' : ''}" title="${title}"></div>`
+    );
+    // 每周一记一次列首，用于标月份
+    if((d.getDay() === 1 || cells.length === 1)){
+      const m = d.getMonth();
+      months.push(m !== lastMonth ? `<span>${m + 1}月</span>` : '<span></span>');
+      lastMonth = m;
+    }
+  }
+  // 末尾补满一列，避免最后一周残缺导致列错位
+  while(cells.length % 7 !== 0) cells.push('<div class="cell void"></div>');
+
+  const columns = cells.length / 7;
+  return `
+    <div class="heatmap-wrap">
+      <div class="heatmap-inner">
+        <div class="heatmap-months" style="grid-template-columns:repeat(${columns},11px)">${months.join('')}</div>
+        <div class="heatmap" style="grid-template-columns:repeat(${columns},11px)">${cells.join('')}</div>
+      </div>
+    </div>
+    <div class="heatmap-legend">
+      <span>少</span>
+      <span class="cell"></span><span class="cell l1"></span><span class="cell l2"></span>
+      <span class="cell l3"></span><span class="cell l4"></span>
+      <span>多</span>
+      <span style="margin-left:auto">${semesterLabel}</span>
+    </div>`;
+}
+
 function renderVisitStats(d){
   const box = $('visit-stats-box');
   if(!box) return;
+  state.visitStats = d;   // 翻月时要用同一份数据重画
   const fmtH = m => {
     const h = Math.floor(m / 60), min = m % 60;
     return h > 0 ? (min > 0 ? `${h}h${min}m` : `${h}h`) : `${min}m`;
@@ -2088,13 +2245,6 @@ function renderVisitStats(d){
       <div class="tiny mt" style="color:var(--ink3);text-align:center">系统检测到签到后自动记录</div>`;
     return;
   }
-  const recentHtml = (d.recent || []).map(r => {
-    const loc = r.location ? escHtml(r.location) : escHtml(r.seat_name);
-    return `<div class="row-between" style="padding:4px 0;border-top:1px solid var(--border)">
-      <div><div class="t" style="font-size:12px">${escHtml(r.date)}</div><div class="sub" style="font-size:13px">${loc}</div></div>
-      <div class="mono" style="font-size:13px;color:var(--ink2)">${fmtH(r.duration_minutes)}</div>
-    </div>`;
-  }).join('');
   box.innerHTML = `
     <div class="row-between" style="margin-bottom:10px">
       <div style="text-align:center;flex:1">
@@ -2114,7 +2264,7 @@ function renderVisitStats(d){
         <div class="tiny">累计时长</div>
       </div>
     </div>
-    ${recentHtml}`;
+    ${heatmapHtml((d.daily && d.daily.length) ? d.daily : dailyFromRecent(d.recent))}`;
 }
 
 // ---------- home loader ----------
@@ -2175,12 +2325,113 @@ function syncThemeUI(){
   btn.setAttribute('aria-label', '主题：' + THEME_LABEL[cur]);
 }
 
+// ---------- demo mode ----------
+// 截图预览专用：URL 带 ?demo=1 时进入演示模式，全部数据为前端随机生成的
+// 假数据（学号 1234567），不发验证请求、不写数据库，正常访问不受影响。
+const DEMO_MODE = new URLSearchParams(location.search).has('demo');
+const DEMO_PID = '1234567';
+
+function demoRand(arr){ return arr[Math.floor(Math.random() * arr.length)]; }
+
+function demoRandomSeat(){
+  const zones = Object.values(state.allSeats || {}).flat();
+  if(zones.length) return demoRand(zones);
+  return demoRand(['2F-A101', '3F-B208', '5F-A315', '7F-A066']);
+}
+
+// 随机一个学习时段：08:00-10:30 开始，17:00-22:00 结束
+function demoRandomRange(){
+  const fmt = n => `${String(Math.floor(n / 60)).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`;
+  const start = (8 + Math.floor(Math.random() * 3)) * 60 + (Math.random() < 0.5 ? 0 : 30);
+  const end = (17 + Math.floor(Math.random() * 5)) * 60 + (Math.random() < 0.5 ? 0 : 30);
+  return [fmt(start), fmt(end)];
+}
+
+function demoReservation(offsetDays, status){
+  const [b, e] = demoRandomRange();
+  const d = localDateStr(offsetDays);
+  return {
+    uuid: 'demo-' + offsetDays,
+    resvBeginTime: `${d} ${b}:00`,
+    resvEndTime: `${d} ${e}:00`,
+    resvStatus: status,
+    devInfo: { devName: demoRandomSeat(), roomName: '图书馆' },
+  };
+}
+
+function demoVisitStats(){
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const daily = [];
+  let totalVisits = 0, totalMinutes = 0;
+  for(let d = semesterStart(today); d <= today; d.setDate(d.getDate() + 1)){
+    const dow = d.getDay();
+    const p = (dow === 0 || dow === 6) ? 0.35 : 0.75; // 工作日常来，周末偶尔
+    if(Math.random() > p) continue;
+    const minutes = (2 + Math.floor(Math.random() * 9)) * 60 + (Math.random() < 0.5 ? 30 : 0);
+    daily.push({ date: localDateKey(d), visits: 1, minutes });
+    totalVisits += 1;
+    totalMinutes += minutes;
+  }
+  const weekStart = new Date(today);
+  weekStart.setDate(weekStart.getDate() - ((today.getDay() + 6) % 7));
+  let weekVisits = 0, weekMinutes = 0;
+  daily.forEach(x => {
+    if(new Date(x.date + 'T00:00:00') >= weekStart){ weekVisits += x.visits; weekMinutes += x.minutes; }
+  });
+  const recent = daily.slice(-10).reverse().map(x => ({
+    date: x.date,
+    seat_name: demoRandomSeat(),
+    location: '图书馆',
+    duration_minutes: x.minutes,
+  }));
+  return {
+    total_visits: totalVisits,
+    total_minutes: totalMinutes,
+    this_week_visits: weekVisits,
+    this_week_minutes: weekMinutes,
+    recent,
+    daily,
+    heatmap_days: 371,
+  };
+}
+
+async function enterDemoMode(){
+  state.isGuest = false;
+  state.uid = DEMO_PID;
+  state.nickname = '';
+  await loadSeats();
+  const seats = [...new Set([demoRandomSeat(), demoRandomSeat(), demoRandomSeat()])];
+  state.accounts = [{ pid: DEMO_PID, is_reserved: 'True', verified: true, seat_list: seats }];
+  state.currentPid = DEMO_PID;
+  state.currentCfg = {
+    pid: DEMO_PID,
+    verified: true,
+    is_reserved: 'True',
+    mode: 'week_time',
+    time: defaultWeekTime(),
+    seat_list: seats,
+    late_protection: 'True',
+    arrived_date: localDateStr(0),
+    result: '',
+  };
+  state.napConfig = { start_time: '14:00', end_time: '', seat: '', auto_daily: true, trigger_time: '12:00' };
+  state.todayResv = demoReservation(0, 1093);   // 使用中
+  state.tomorrowResv = demoReservation(1, 1027); // 已预约
+  renderAllAccountViews();
+  renderConfig();
+  renderHome();
+  loadNotices();
+  renderVisitStats(demoVisitStats());
+}
+
 // ---------- init ----------
 async function init(){
   // Wire scrim click-outside
   $('scrim').addEventListener('click', e => { if(e.target.id === 'scrim') closeSheet(); });
 
   syncThemeUI();
+  if(DEMO_MODE){ await enterDemoMode(); return; }
   await checkAuth();
   // Account configuration comes from MongoDB and must remain visible even if
   // loading the seat catalogue is slow or temporarily unavailable.

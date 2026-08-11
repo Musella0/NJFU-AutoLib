@@ -682,11 +682,12 @@ class LibrarySystem(BaseSystem):
             if result.get('code') == 0:
                 # 预约成功
                 success_info = result['data']
+                dev_info = (success_info.get('resvDevInfoList') or [{}])[0]
                 success_msg = (
-                    f"{success_info['resvName']} 期望预约时间{target_time} "
-                    f"预约成功 {result['message']} "
-                    f"{success_info['resvDevInfoList'][0]['roomName']} "
-                    f"{success_info['resvDevInfoList'][0]['devName']}"
+                    f"✅ {success_info.get('resvName') or self.username} · "
+                    f"{resv_begin_time[5:10]} · "
+                    f"{resv_begin_time[11:16]}-{resv_end_time[11:16]} · "
+                    f"{dev_info.get('devName') or seat_name} · 预约成功"
                 )
                 log_with_user('info', self.username, '预约成功',
                              f"座位 {seat_name}({seat_id}) 预约成功: {success_msg}")

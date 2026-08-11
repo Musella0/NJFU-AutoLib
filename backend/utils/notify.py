@@ -1,9 +1,7 @@
 """
 通知工具模块
 
-支持:
-1. 邮件通知 (SMTP)
-2. Server酱微信推送 (sct.ftqq.com)
+邮件通知：优先走 Resend API，未配置时回退到 SMTP。
 """
 
 import os
@@ -97,60 +95,17 @@ def send_email(to_addr: str, subject: str, content: str) -> bool:
         return False
 
 
-def send_serverchan(key: str, title: str, content: str) -> bool:
-    """
-    Server酱微信推送
-
-    Args:
-        key: Server酱的 SendKey
-        title: 消息标题
-        content: 消息内容（支持 Markdown）
-
-    Returns:
-        bool: 是否发送成功
-    """
-    if not key:
-        return False
-
-    try:
-        url = f"https://sctapi.ftqq.com/{key}.send"
-        resp = requests.post(url, data={"title": title, "desp": content}, timeout=10)
-        result = resp.json()
-        if result.get("code") == 0:
-            logger.info(f"Server酱推送成功")
-            return True
-        else:
-            logger.error(f"Server酱推送失败: {result}")
-            return False
-    except Exception as e:
-        logger.error(f"Server酱推送异常: {e}")
-        return False
-
-
 def notify_user(user_config: dict, title: str, content: str) -> None:
     """
     根据用户配置发送通知
-
-    从用户配置中读取通知渠道并发送
 
     Args:
         user_config: 用户配置字典
         title: 通知标题
         content: 通知内容
     """
-    sent = False
-
-    # 邮件通知
     email = user_config.get("notify_email", "")
-    if email:
-        if send_email(email, title, content):
-            sent = True
-
-    # Server酱
-    sc_key = user_config.get("notify_serverchan_key", "")
-    if sc_key:
-        if send_serverchan(sc_key, title, content):
-            sent = True
-
-    if not sent:
-        logger.info(f"用户 {user_config.get('pid', '?')} 未配置通知渠道，跳过通知")
+    if not email:
+        logger.info(f"用户 {user_config.get('pid', '?')} 未配置通知邮箱，跳过通知")
+        return
+    send_email(email, title, content)
