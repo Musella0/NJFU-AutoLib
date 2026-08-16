@@ -38,6 +38,8 @@ from utils.vpn_system import VPNSystem
 # 获取日志记录器
 logger = logging.getLogger(__name__)
 
+ARRIVAL_CHECK_DELAY_MINUTES = 32
+
 
 class LibraryLoginError(Exception):
     """图书馆登录失败，并保留上游返回的错误码和原始消息。"""
@@ -100,6 +102,48 @@ db = mongo_client.AutoLib
 user_config_info = db.user_config_info  # 存储用户配置和预约记录
 users_col = db.users  # 存储用户基本信息
 devices_col = db.devices  # 存储设备信息
+
+
+def register_arrival_check(
+    pid: str,
+    uuid: str,
+    seat_name: str,
+    resv_begin_time: str,
+    resv_end_time: str,
+) -> None:
+    """持久化预约生效 32 分钟后的到馆复查任务。"""
+    if not pid or not uuid:
+        log_with_user('warning', pid or '未知用户', '到馆复查',
+                      '预约成功响应缺少 uuid，无法注册到馆复查')
+        return
+
+    begin_time = datetime.strptime(resv_begin_time, "%Y-%m-%d %H:%M:%S")
+    now = datetime.now()
+    db.arrival_checks.update_one(
+        {"uuid": uuid},
+        {
+            "$set": {
+                "pid": pid,
+                "seat_name": seat_name,
+                "target_time": (
+                    f"{resv_begin_time[:10]} {resv_begin_time[11:]}-"
+                    f"{resv_end_time[11:]}"
+                ),
+                "check_at": begin_time + timedelta(minutes=ARRIVAL_CHECK_DELAY_MINUTES),
+                "status": "pending",
+                "updated_at": now,
+            },
+            "$setOnInsert": {"created_at": now, "attempts": 0},
+            "$unset": {"next_attempt_at": "", "checked_at": "", "message": ""},
+        },
+        upsert=True,
+    )
+    log_with_user(
+        'info', pid, '到馆复查',
+        f"已注册 {seat_name} 的到馆复查，执行时间 "
+        f"{(begin_time + timedelta(minutes=ARRIVAL_CHECK_DELAY_MINUTES)).strftime('%Y-%m-%d %H:%M:%S')}",
+    )
+
 
 class LibrarySystem(BaseSystem):
     """
@@ -683,14 +727,27 @@ class LibrarySystem(BaseSystem):
                 # 预约成功
                 success_info = result['data']
                 dev_info = (success_info.get('resvDevInfoList') or [{}])[0]
+                actual_seat_name = dev_info.get('devName') or seat_name
                 success_msg = (
                     f"✅ {success_info.get('resvName') or self.username} · "
                     f"{resv_begin_time[5:10]} · "
                     f"{resv_begin_time[11:16]}-{resv_end_time[11:16]} · "
-                    f"{dev_info.get('devName') or seat_name} · 预约成功"
+                    f"{actual_seat_name} · 预约成功"
                 )
                 log_with_user('info', self.username, '预约成功',
                              f"座位 {seat_name}({seat_id}) 预约成功: {success_msg}")
+                try:
+                    register_arrival_check(
+                        str(user_info.get('pid') or self.username),
+                        str(success_info.get('uuid') or ''),
+                        actual_seat_name,
+                        resv_begin_time,
+                        resv_end_time,
+                    )
+                except Exception as exc:
+                    # 复查任务注册失败不能把已经成功的图书馆预约报告成失败。
+                    log_with_user('error', self.username, '到馆复查',
+                                  f"注册到馆复查失败: {exc}")
                 return success_msg
             else:
                 # 预约失败
@@ -794,6 +851,18 @@ class LibrarySystem(BaseSystem):
 
             result = response.json()
             if result.get('code') == 0:
+                try:
+                    db.arrival_checks.update_one(
+                        {"uuid": uuid, "status": "pending"},
+                        {"$set": {
+                            "status": "cancelled",
+                            "checked_at": datetime.now(),
+                            "message": "预约已主动取消",
+                        }},
+                    )
+                except Exception as exc:
+                    log_with_user('warning', self.username, '到馆复查',
+                                  f"取消复查任务失败: {exc}")
                 return True, "删除座位成功"
             return False, f"删除座位失败: {result.get('message')}"
 
@@ -919,6 +988,21 @@ class LibrarySystem(BaseSystem):
             try:
                 # 格式化数据
                 formatted_data, owned_seat = self._format_reservation_data(data_list)
+
+                # get_reservation_info 会重建 owned_seat；保留本地流程元数据，
+                # 否则迟到保护生成的新预约会在下一次查询后丢失标记并被二次保护。
+                existing = user_config_info.find_one(
+                    {"pid": self.user_info['pid']}, {"owned_seat": 1}
+                ) or {}
+                local_metadata = {
+                    seat.get("uuid"): {"by_protection": True}
+                    for seats in (existing.get("owned_seat") or {}).values()
+                    for seat in seats
+                    if seat.get("uuid") and seat.get("by_protection")
+                }
+                for seats in owned_seat.values():
+                    for seat in seats:
+                        seat.update(local_metadata.get(seat.get("uuid"), {}))
                 
                 # 更新数据库
                 if not self.insert_or_update_mongo(

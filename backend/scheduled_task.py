@@ -133,6 +133,9 @@ db = mongo_client.AutoLib
 user_config_info = db.user_config_info  # 存储用户配置和预约记录
 users_col = db.users  # 存储用户基本信息
 
+IN_LIBRARY_STATUSES = {1093, 3141}
+_arrival_checks_backfilled = False
+
 def get_all_active_reservations() -> List[Dict[str, Any]]:
     """
     获取所有正在预约的记录
@@ -456,23 +459,207 @@ def _record_visit_log(pid: str, uuid: str, target_time_str: str, seat_name: str)
         now = datetime.now()
         db.visit_logs.update_one(
             {"uuid": uuid},
-            {"$setOnInsert": {
-                "pid": pid,
-                "uuid": uuid,
-                "seat_name": seat_name,
-                "location": location,
-                "planned_begin": begin_dt,
-                "planned_end": end_dt,
-                "planned_duration_minutes": duration_minutes,
-                "checkin_detected_at": now,
-                "created_at": now,
-            }},
+            {
+                "$set": {
+                    "pid": pid,
+                    "seat_name": seat_name,
+                    "location": location,
+                    "planned_begin": begin_dt,
+                    "planned_end": end_dt,
+                    "planned_duration_minutes": duration_minutes,
+                },
+                "$setOnInsert": {
+                    "uuid": uuid,
+                    "checkin_detected_at": now,
+                    "created_at": now,
+                },
+            },
             upsert=True
         )
+        # 服务端状态已确认到馆时，同步主页的“已到馆”状态。
+        if date_str == now.strftime("%Y-%m-%d"):
+            user_config_info.update_one(
+                {"pid": pid}, {"$set": {"arrived_date": date_str}}
+            )
         log_with_user(logger, 'info', pid, '道馆统计',
                       f"记录道馆 {seat_name} {date_str} 共{duration_minutes}分钟")
     except Exception as e:
         log_with_user(logger, 'warning', pid, '道馆统计', f"记录道馆失败: {str(e)}")
+
+
+def _reservation_target_time(reservation: Dict[str, Any], fallback: str) -> str:
+    """优先使用图书馆实时返回的时段，缺失时回退到任务快照。"""
+    begin_time = reservation.get("resvBeginTime", "")
+    end_time = reservation.get("resvEndTime", "")
+    if begin_time and end_time:
+        return f"{begin_time}-{end_time[-8:]}"
+    return fallback
+
+
+def _finish_arrival_check(
+    uuid: str,
+    status: str,
+    message: str,
+    checked_at: Optional[datetime] = None,
+) -> None:
+    db.arrival_checks.update_one(
+        {"uuid": uuid},
+        {
+            "$set": {
+                "status": status,
+                "message": message,
+                "checked_at": checked_at or datetime.now(),
+            },
+            "$unset": {"next_attempt_at": ""},
+        },
+    )
+
+
+def check_arrival_after_grace(
+    check: Dict[str, Any], now: Optional[datetime] = None
+) -> None:
+    """在预约生效 32 分钟后核验到馆状态，并同步学习记录。"""
+    now = now or datetime.now()
+    pid = str(check.get("pid") or "")
+    uuid = str(check.get("uuid") or "")
+    seat_name = str(check.get("seat_name") or "")
+    target_time = str(check.get("target_time") or "")
+    if not pid or not uuid or not target_time:
+        _finish_arrival_check(uuid, "failed", "复查任务数据不完整", now)
+        return
+
+    user = user_config_info.find_one(
+        {"pid": pid}, {"vpn_password": 1, "verified": 1}
+    )
+    if not user or not user.get("vpn_password"):
+        db.visit_logs.delete_one({"uuid": uuid})
+        _finish_arrival_check(uuid, "failed", "用户配置或凭据不存在", now)
+        log_with_user(logger, 'warning', pid, '到馆复查', "用户配置或凭据不存在")
+        return
+
+    try:
+        library = LibrarySystem(
+            username=pid,
+            password=_dec(user["vpn_password"]),
+            vpn_password=_dec(user["vpn_password"]),
+        )
+        reservations, message = library.get_reservation_info()
+        if reservations is None:
+            raise RuntimeError(message or "图书馆预约查询失败")
+
+        matched = next(
+            (reservation for reservation in reservations
+             if str(reservation.get("uuid") or "") == uuid),
+            None,
+        )
+        try:
+            status_code = int(matched.get("resvStatus")) if matched else None
+        except (TypeError, ValueError):
+            status_code = None
+
+        if matched and status_code in IN_LIBRARY_STATUSES:
+            actual_seat = (
+                (matched.get("devInfo") or {}).get("devName") or seat_name
+            )
+            _record_visit_log(
+                pid,
+                uuid,
+                _reservation_target_time(matched, target_time),
+                actual_seat,
+            )
+            result_message = f"已到馆（状态码: {status_code}），学习时间已同步"
+            _finish_arrival_check(uuid, "arrived", result_message, now)
+            log_with_user(logger, 'info', pid, '到馆复查', result_message)
+            return
+
+        # 32 分钟时仍未签到，或记录已被图书馆服务器释放，均不得计入学习时间。
+        db.visit_logs.delete_one({"uuid": uuid})
+        if matched:
+            result_message = f"未到馆（状态码: {status_code}），已违约，不计学习时间"
+        else:
+            result_message = "预约记录已由图书馆服务器释放，已违约，不计学习时间"
+        _finish_arrival_check(uuid, "violated", result_message, now)
+        log_with_user(logger, 'warning', pid, '到馆复查', result_message)
+    except Exception as exc:
+        # 网络或上游临时故障不应被误判为违约；5 分钟后继续重试。
+        db.arrival_checks.update_one(
+            {"uuid": uuid, "status": "pending"},
+            {
+                "$inc": {"attempts": 1},
+                "$set": {
+                    "next_attempt_at": now + timedelta(minutes=5),
+                    "message": f"复查失败，稍后重试: {exc}",
+                    "updated_at": now,
+                },
+            },
+        )
+        log_with_user(logger, 'warning', pid, '到馆复查',
+                      f"查询失败，5分钟后重试: {exc}")
+
+
+def _backfill_arrival_checks(now: datetime) -> None:
+    """为部署前已存在、但尚无复查任务的预约补建任务。"""
+    users = user_config_info.find(
+        {"owned_seat": {"$exists": True, "$ne": {}}},
+        {"pid": 1, "owned_seat": 1},
+    )
+    earliest_date = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    for user in users:
+        pid = str(user.get("pid") or "")
+        for seat_name, seats in (user.get("owned_seat") or {}).items():
+            for seat in seats:
+                uuid = str(seat.get("uuid") or "")
+                target_time = str(seat.get("target_time") or "")
+                if not pid or not uuid or target_time[:10] < earliest_date:
+                    continue
+                try:
+                    begin_time = datetime.strptime(
+                        target_time[:19], "%Y-%m-%d %H:%M:%S"
+                    )
+                except (TypeError, ValueError):
+                    continue
+                db.arrival_checks.update_one(
+                    {"uuid": uuid},
+                    {"$setOnInsert": {
+                        "pid": pid,
+                        "uuid": uuid,
+                        "seat_name": seat_name,
+                        "target_time": target_time,
+                        "check_at": begin_time + timedelta(minutes=32),
+                        "status": "pending",
+                        "attempts": 0,
+                        "created_at": now,
+                        "updated_at": now,
+                    }},
+                    upsert=True,
+                )
+
+
+def process_due_arrival_checks(now: Optional[datetime] = None) -> None:
+    """处理所有到达预约生效后 32 分钟的持久化复查任务。"""
+    global _arrival_checks_backfilled
+    now = now or datetime.now()
+    if not _arrival_checks_backfilled:
+        try:
+            _backfill_arrival_checks(now)
+            _arrival_checks_backfilled = True
+        except Exception as exc:
+            # 补建失败不能阻断已经持久化的到期任务；下分钟会再次尝试。
+            log_with_user(logger, 'warning', '系统', '到馆复查',
+                          f"补建历史复查任务失败: {exc}")
+    due_checks = list(db.arrival_checks.find({
+        "status": "pending",
+        "check_at": {"$lte": now},
+        "$or": [
+            {"next_attempt_at": {"$exists": False}},
+            {"next_attempt_at": {"$lte": now}},
+        ],
+    }).sort("check_at", 1).limit(100))
+    if due_checks:
+        log_with_user(logger, 'info', '系统', '到馆复查',
+                      f"发现 {len(due_checks)} 条到期任务")
+    for check in due_checks:
+        check_arrival_after_grace(check, now=now)
 
 
 def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str, Any]) -> None:
