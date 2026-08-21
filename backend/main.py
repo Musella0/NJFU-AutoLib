@@ -14,7 +14,7 @@ from bson.errors import InvalidId
 from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
 from utils import config
-from utils.account_config import default_account_config, merge_account_documents
+from utils.account_config import default_account_config
 from utils.admin_credentials import (
     AdminCredentialError,
     load_credentials as load_admin_credentials,
@@ -82,73 +82,24 @@ def _ensure_uid():
     return guest_uid
 
 
-def _is_guest():
-    return "web_uid" not in session
-
-
-def _migrate_guest_data(db, real_uid: str):
-    """将当前浏览器的游客配置合并到真实账号，避免生成重复记录。"""
-    guest_uid = session.get("guest_uid")
-    if not guest_uid:
-        return
-    collection = db.user_config_info
-    guest_documents = list(collection.find({"web_uid": guest_uid}))
-    for guest_document in guest_documents:
-        pid = guest_document.get("pid")
-        if not pid:
-            continue
-        account_documents = list(collection.find({
-            "web_uid": real_uid,
-            "pid": pid,
-        }))
-        if not account_documents:
-            collection.update_one(
-                {"_id": guest_document["_id"]},
-                {
-                    "$set": {"web_uid": real_uid},
-                    "$unset": {"lib_password": ""},
-                },
-            )
-            continue
-
-        all_documents = account_documents + [guest_document]
-        merged = merge_account_documents(
-            all_documents,
-            web_uid=real_uid,
-            pid=pid,
-        )
-        canonical = max(
-            account_documents,
-            key=lambda doc: doc.get("updated_at") or datetime.min,
-        )
-        collection.update_one(
-            {"_id": canonical["_id"]},
-            {"$set": merged, "$unset": {"lib_password": ""}},
-        )
-        duplicate_ids = [
-            document["_id"]
-            for document in all_documents
-            if document["_id"] != canonical["_id"]
-        ]
-        if duplicate_ids:
-            collection.delete_many({"_id": {"$in": duplicate_ids}})
-    session.pop("guest_uid", None)
-
-
 def _ensure_database_indexes() -> None:
-    """Create uniqueness constraints required for cross-device account data."""
+    """Create uniqueness constraints for the one-student-one-account model."""
     client, db = get_db()
     try:
         db.web_users.create_index("uid", unique=True, name="uniq_web_uid")
+        # Create the new invariant before removing the legacy compound index.
+        # If historical duplicates still exist this raises DuplicateKeyError,
+        # leaving the old index intact until migrate_account_configs.py runs.
         db.user_config_info.create_index(
-            [("web_uid", 1), ("pid", 1)],
+            [("pid", 1)],
             unique=True,
-            name="uniq_owner_pid",
+            name="uniq_pid",
             partialFilterExpression={
-                "web_uid": {"$type": "string"},
                 "pid": {"$type": "string"},
             },
         )
+        if "uniq_owner_pid" in db.user_config_info.index_information():
+            db.user_config_info.drop_index("uniq_owner_pid")
     finally:
         client.close()
 
@@ -158,9 +109,31 @@ def _ensure_database_indexes() -> None:
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        # 不再强制登录，自动分配游客 uid
+        if not session.get("web_uid"):
+            return jsonify({"error": "请先验证学号登录", "need_login": True}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+
+def visitor_session_required(f):
+    """Allow credential verification to start from a guest session."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
         _ensure_uid()
         return f(*args, **kwargs)
+    return decorated
+
+
+def own_account_required(f):
+    """Require a real login whose student ID matches the route account."""
+    @wraps(f)
+    def decorated(pid, *args, **kwargs):
+        uid = session.get("web_uid")
+        if not uid:
+            return jsonify({"error": "请先验证学号登录", "need_login": True}), 401
+        if uid != pid:
+            return jsonify({"error": "当前登录学号无权访问该账号"}), 403
+        return f(pid, *args, **kwargs)
     return decorated
 
 
@@ -191,12 +164,16 @@ def _admin_session_valid():
     )
 
 
-def _get_decrypted_cfg(pid: str, uid: str):
+def _account_filter(pid: str):
+    """Canonical filter while web_uid is retained for schema compatibility."""
+    return {"pid": pid, "web_uid": pid}
+
+
+def _get_decrypted_cfg(pid: str):
     """从 DB 读取用户配置并解密密码，返回 cfg 或 None。"""
     client, db = get_db()
     cfg = db.user_config_info.find_one(
-        {"pid": pid, "web_uid": uid},
-        sort=[("updated_at", DESCENDING)],
+        _account_filter(pid),
     )
     client.close()
     if cfg:
@@ -264,12 +241,31 @@ def _cache_identity(db, pid: str, password: str):
 
 
 def _login_as(db, pid: str):
-    """建立会话，并把当前浏览器的游客数据合并到该学号。返回昵称。"""
+    """建立以学号为唯一身份的会话。返回昵称。"""
     session.permanent = True
     session["web_uid"] = pid
-    _migrate_guest_data(db, pid)
+    session.pop("guest_uid", None)
     user = db.web_users.find_one({"uid": pid}) or {}
     return (user.get("nickname") or "").strip()
+
+
+def _upsert_verified_account(db, pid: str, password: str) -> None:
+    """Atomically create/recover the canonical account after school verification."""
+    db.user_config_info.update_one(
+        {"pid": pid},
+        {
+            "$set": {
+                "pid": pid,
+                "web_uid": pid,
+                "vpn_password": _enc(password),
+                "verified": True,
+                "updated_at": datetime.now(),
+            },
+            "$setOnInsert": default_account_config(),
+            "$unset": {"lib_password": ""},
+        },
+        upsert=True,
+    )
 
 
 def _offline_login(pid: str, password: str) -> bool:
@@ -473,18 +469,18 @@ def admin_me():
     }), 200
 
 
-# ==================== User Multi-Account API ====================
+# ==================== Student account API ====================
 
 @app.route("/api/my/accounts", methods=["GET"])
 @login_required
 def get_my_accounts():
-    """Get all library accounts under current web user"""
-    uid = _ensure_uid()
+    """Return the canonical account for the logged-in student."""
+    uid = session["web_uid"]
     client, db = get_db()
     raw_accounts = list(db.user_config_info.find(
-        {"web_uid": uid},
+        _account_filter(uid),
         {"_id": 0, "web_password": 0, "vpn_password": 0, "lib_password": 0}
-    ).sort("updated_at", DESCENDING))
+    ))
     client.close()
     accounts = []
     seen_pids = set()
@@ -501,15 +497,13 @@ def get_my_accounts():
 
 
 @app.route("/api/my/accounts/<pid>", methods=["GET"])
-@login_required
+@own_account_required
 def get_my_account(pid):
     """Get single account config (with passwords, for editing)"""
-    uid = _ensure_uid()
     client, db = get_db()
     cfg = db.user_config_info.find_one(
-        {"web_uid": uid, "pid": pid},
+        _account_filter(pid),
         {"_id": 0, "web_password": 0, "lib_password": 0},
-        sort=[("updated_at", DESCENDING)],
     )
     client.close()
     if not cfg:
@@ -523,14 +517,13 @@ def get_my_account(pid):
 
 
 @app.route("/api/my/accounts/<pid>", methods=["POST"])
-@login_required
+@own_account_required
 def save_my_account(pid):
-    """Save/update a library account config"""
-    uid = _ensure_uid()
+    """Save settings for an already verified canonical account."""
     data = request.get_json(silent=True) or {}
-    allowed = ["vpn_password", "seat_list", "mode", "time",
-               "is_reserved", "late_protection",
-               "notify_email", "verified"]
+    # Credentials and verified status may only be changed by verify_account.
+    allowed = ["seat_list", "mode", "time", "is_reserved",
+               "late_protection", "notify_email"]
     update = {k: v for k, v in data.items() if k in allowed and v is not None}
 
     if "seat_list" in update:
@@ -543,55 +536,26 @@ def save_my_account(pid):
     if "time" in update and not isinstance(update["time"], dict):
         return jsonify({"error": "时间配置格式无效"}), 400
 
-    # 加密敏感字段
-    if "vpn_password" in update:
-        update["vpn_password"] = _enc(update["vpn_password"])
     update["pid"] = pid
-    update["web_uid"] = uid
+    update["web_uid"] = pid
     update["updated_at"] = datetime.now()
 
-    # Check existing record for defaults and password change detection
-    client_tmp, db_tmp = get_db()
-    existing = db_tmp.user_config_info.find_one(
-        {"pid": pid, "web_uid": uid},
-        sort=[("updated_at", DESCENDING)],
-    )
-    client_tmp.close()
-
-    # If frontend explicitly passes "verified" (e.g., right after a successful
-    # verify-before-save), respect it and skip the auto-reset below.
-    explicit_verified = "verified" in update
-
-    if not existing:
-        defaults = default_account_config()
-        defaults.update(update)
-        update = defaults
-        if not explicit_verified:
-            update["verified"] = False
-    else:
-        # Reset verified if passwords actually changed (unless explicitly set)
-        if not explicit_verified:
-            vpn_changed = "vpn_password" in update and _dec(update["vpn_password"]) != _dec(existing.get("vpn_password", ""))
-            if vpn_changed:
-                update["verified"] = False
-
     client, db = get_db()
-    db.user_config_info.update_one(
-        {"pid": pid, "web_uid": uid},
-        {"$set": update, "$unset": {"lib_password": ""}},
-        upsert=True
-    )
+    existing = db.user_config_info.find_one(_account_filter(pid), {"_id": 1})
+    if not existing:
+        client.close()
+        return jsonify({"error": "账号尚未通过验证，请重新验证学号"}), 409
+    db.user_config_info.update_one(_account_filter(pid), {"$set": update})
     client.close()
     return jsonify({"message": "配置已保存"}), 200
 
 
 @app.route("/api/my/accounts/<pid>", methods=["DELETE"])
-@login_required
+@own_account_required
 def delete_my_account(pid):
     """Delete a library account from current web user"""
-    uid = _ensure_uid()
     client, db = get_db()
-    result = db.user_config_info.delete_one({"pid": pid, "web_uid": uid})
+    result = db.user_config_info.delete_one(_account_filter(pid))
     client.close()
     if result.deleted_count:
         return jsonify({"message": f"学号 {pid} 已删除"}), 200
@@ -599,11 +563,10 @@ def delete_my_account(pid):
 
 
 @app.route("/api/my/accounts/<pid>/reservations", methods=["GET"])
-@login_required
+@own_account_required
 def get_account_reservations(pid):
     """Live query reservations for a specific library account"""
-    uid = _ensure_uid()
-    cfg = _get_decrypted_cfg(pid, uid)
+    cfg = _get_decrypted_cfg(pid)
 
     if not cfg or not cfg.get("vpn_password"):
         return jsonify({"error": "请先保存统一身份认证密码"}), 400
@@ -622,16 +585,15 @@ def get_account_reservations(pid):
 
 
 @app.route("/api/my/accounts/<pid>/cancel", methods=["POST"])
-@login_required
+@own_account_required
 def cancel_account_reservation(pid):
     """Cancel a reservation for a specific library account"""
-    uid = _ensure_uid()
     data = request.get_json()
     uuid = data.get("uuid")
     if not uuid:
         return jsonify({"error": "缺少 uuid"}), 400
 
-    cfg = _get_decrypted_cfg(pid, uid)
+    cfg = _get_decrypted_cfg(pid)
 
     if not cfg or not cfg.get("vpn_password"):
         return jsonify({"error": "请先保存统一身份认证密码"}), 400
@@ -650,11 +612,10 @@ def cancel_account_reservation(pid):
 
 
 @app.route("/api/my/accounts/<pid>/nap_config", methods=["GET", "POST"])
-@login_required
+@own_account_required
 def nap_config(pid):
-    uid = _ensure_uid()
     client, db = get_db()
-    cfg = db.user_config_info.find_one({"pid": pid, "web_uid": uid}, {"nap_config": 1})
+    cfg = db.user_config_info.find_one(_account_filter(pid), {"nap_config": 1})
     if not cfg:
         client.close()
         return jsonify({"error": "账号不存在"}), 404
@@ -669,7 +630,7 @@ def nap_config(pid):
     allowed = {"start_time", "end_time", "seat", "auto_daily", "trigger_time"}
     update = {k: v for k, v in body.items() if k in allowed}
     db.user_config_info.update_one(
-        {"pid": pid, "web_uid": uid},
+        _account_filter(pid),
         {"$set": {"nap_config": update}}
     )
     client.close()
@@ -677,11 +638,10 @@ def nap_config(pid):
 
 
 @app.route("/api/my/accounts/<pid>/nap", methods=["POST"])
-@login_required
+@own_account_required
 def do_nap(pid):
     """取消当前预约并立即重新预约下午时段（一键午休）"""
-    uid = _ensure_uid()
-    cfg = _get_decrypted_cfg(pid, uid)
+    cfg = _get_decrypted_cfg(pid)
     if not cfg:
         return jsonify({"error": "未找到该账号配置"}), 404
     if not cfg.get("vpn_password"):
@@ -740,20 +700,19 @@ def do_nap(pid):
 
 
 @app.route("/api/my/accounts/<pid>/arrived", methods=["POST"])
-@login_required
+@own_account_required
 def toggle_arrived(pid):
     """Toggle the 'arrived at library today' flag for late-protection bypass."""
-    uid = _ensure_uid()
     today = datetime.now().strftime("%Y-%m-%d")
     client, db = get_db()
-    cfg = db.user_config_info.find_one({"pid": pid, "web_uid": uid}, {"arrived_date": 1})
+    cfg = db.user_config_info.find_one(_account_filter(pid), {"arrived_date": 1})
     if not cfg:
         client.close()
         return jsonify({"error": "账号不存在"}), 404
     already = cfg.get("arrived_date") == today
     new_val = "" if already else today
     db.user_config_info.update_one(
-        {"pid": pid, "web_uid": uid},
+        _account_filter(pid),
         {"$set": {"arrived_date": new_val}}
     )
     client.close()
@@ -762,7 +721,7 @@ def toggle_arrived(pid):
 
 @app.route("/api/my/accounts/<pid>/verify", methods=["POST"])
 @limiter.limit("5/minute")
-@login_required
+@visitor_session_required
 def verify_account(pid):
     """Verify the unified identity credential and library CAS session.
 
@@ -772,14 +731,13 @@ def verify_account(pid):
     in addAccount flow) or falls back to the saved account config in DB.
     Returns `failed_at` to tell the frontend which step failed.
     """
-    uid = _ensure_uid()
     data = request.get_json(silent=True) or {}
 
     vpn_password = data.get("vpn_password")
 
     # Fall back to DB if the password is not provided in the request body.
     if not vpn_password:
-        cfg = _get_decrypted_cfg(pid, uid) if uid else None
+        cfg = _get_decrypted_cfg(pid) if session.get("web_uid") == pid else None
         if cfg:
             vpn_password = vpn_password or cfg.get("vpn_password")
 
@@ -787,11 +745,13 @@ def verify_account(pid):
         return jsonify({"error": "请填写统一身份认证密码", "verified": False}), 400
 
     def mark_verified(value: bool):
-        """Update verified flag in DB. No-op if account doesn't exist yet."""
+        """Only invalidate the account that is currently authenticated."""
+        if session.get("web_uid") != pid:
+            return
         c, d = get_db()
         d.user_config_info.update_one(
-            {"pid": pid, "web_uid": uid},
-            {"$set": {"verified": value}}
+            _account_filter(pid),
+            {"$set": {"verified": value, "updated_at": datetime.now()}}
         )
         c.close()
 
@@ -808,7 +768,7 @@ def verify_account(pid):
             "failed_at": "vpn",
             "error": f"VPN 登录异常：{str(e)}",
         }
-        if _is_guest() and _offline_login(pid, vpn_password):
+        if _offline_login(pid, vpn_password):
             response["logged_in"] = True
             response["uid"] = pid
             response["offline"] = True
@@ -843,44 +803,39 @@ def verify_account(pid):
         }), 200
 
     # webvpn 与图书馆 CAS SSO 均通过。
-    promoted = False
-    if _is_guest():
-        # 游客验证学号 + 统一身份认证密码成功，即视为以该学号登录：
-        # 数据归属学号而非浏览器，换设备验证一次即可找回。
-        client2, db2 = get_db()
+    # Verification is the login and credential-save transaction. Always switch
+    # to the verified student, even if another student was previously logged in.
+    client2, db2 = get_db()
+    try:
         _cache_identity(db2, pid, vpn_password)
+        _upsert_verified_account(db2, pid, vpn_password)
         _login_as(db2, pid)
-        uid = pid
+    finally:
         client2.close()
-        promoted = True
-    mark_verified(True)
-    resp = {
+    return jsonify({
         "verified": True,
+        "logged_in": True,
+        "uid": pid,
         "message": "统一身份认证及图书馆登录验证成功",
-    }
-    if promoted:
-        resp.update({"logged_in": True, "uid": pid})
-    return jsonify(resp), 200
+    }), 200
 
 
 @app.route("/api/my/accounts/<pid>/result", methods=["GET"])
-@login_required
+@own_account_required
 def get_account_result(pid):
-    uid = _ensure_uid()
     client, db = get_db()
     cfg = db.user_config_info.find_one(
-        {"pid": pid, "web_uid": uid}, {"result": 1, "_id": 0}
+        _account_filter(pid), {"result": 1, "_id": 0}
     )
     client.close()
     return jsonify({"result": cfg.get("result", "") if cfg else ""}), 200
 
 
 @app.route("/api/my/accounts/<pid>/reserve_now", methods=["POST"])
-@login_required
+@own_account_required
 def reserve_now(pid):
     """立即执行预约（非定时任务）"""
-    uid = _ensure_uid()
-    cfg = _get_decrypted_cfg(pid, uid)
+    cfg = _get_decrypted_cfg(pid)
 
     if not cfg:
         return jsonify({"error": "未找到该账号配置"}), 404
@@ -901,7 +856,7 @@ def reserve_now(pid):
         # 获取最新结果
         client, db = get_db()
         updated_cfg = db.user_config_info.find_one(
-            {"pid": pid, "web_uid": uid}, {"result": 1, "_id": 0}
+            _account_filter(pid), {"result": 1, "_id": 0}
         )
         client.close()
         
@@ -917,15 +872,14 @@ def reserve_now(pid):
 
 
 @app.route("/api/my/accounts/<pid>/reserve_custom", methods=["POST"])
-@login_required
+@own_account_required
 def reserve_custom(pid):
     """用指定座位和时间段预约今天或明天
 
     `day` 只接受 today / tomorrow：图书馆系统本身也只开放这两天，
     限定取值顺便挡掉了任意日期的越权预约。
     """
-    uid = _ensure_uid()
-    cfg = _get_decrypted_cfg(pid, uid)
+    cfg = _get_decrypted_cfg(pid)
     if not cfg:
         return jsonify({"error": "未找到该账号配置"}), 404
     if not cfg.get("vpn_password"):
@@ -1312,10 +1266,9 @@ def _visit_totals(db, match):
 @app.route("/api/my/visit_stats", methods=["GET"])
 @login_required
 def my_visit_stats():
-    uid = _ensure_uid()
+    uid = session["web_uid"]
     client, db = get_db()
-    pids = [c["pid"] for c in db.user_config_info.find({"web_uid": uid}, {"pid": 1})]
-    if not pids:
+    if not db.user_config_info.find_one(_account_filter(uid), {"_id": 1}):
         client.close()
         return jsonify({"total_visits": 0, "total_minutes": 0,
                         "this_week_visits": 0, "this_week_minutes": 0,
@@ -1326,7 +1279,7 @@ def my_visit_stats():
         hour=0, minute=0, second=0, microsecond=0)
     heatmap_start = (now - timedelta(days=HEATMAP_DAYS - 1)).replace(
         hour=0, minute=0, second=0, microsecond=0)
-    owned = {"pid": {"$in": pids}}
+    owned = {"pid": uid}
 
     # 累计值必须走聚合：早先的实现只取最近 200 条来求和，
     # 自习超过 200 次后「累计」就永远停在 200 了。
@@ -1385,14 +1338,11 @@ def my_visit_stats():
 @app.route("/api/my/reservation_results", methods=["GET"])
 @login_required
 def my_reservation_results():
-    """Aggregate latest reservation results across all the user's library accounts.
-
-    游客使用 guest_uid session。
-    """
-    uid = _ensure_uid()
+    """Return the latest reservation result for the logged-in student."""
+    uid = session["web_uid"]
     client, db = get_db()
     rows = list(db.user_config_info.find(
-        {"web_uid": uid, "result": {"$exists": True, "$ne": ""}},
+        {**_account_filter(uid), "result": {"$exists": True, "$ne": ""}},
         {"_id": 0, "pid": 1, "result": 1, "updated_at": 1}
     ))
     client.close()

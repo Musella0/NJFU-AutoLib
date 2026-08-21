@@ -39,6 +39,18 @@ def _updated_at(document: Dict[str, Any]) -> datetime:
         if value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
         return value
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed
+        except ValueError:
+            pass
+    object_id = document.get("_id")
+    generation_time = getattr(object_id, "generation_time", None)
+    if isinstance(generation_time, datetime):
+        return generation_time
     return datetime.min.replace(tzinfo=timezone.utc)
 
 

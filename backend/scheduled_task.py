@@ -280,7 +280,7 @@ def update_user_config(pid: str, result: str) -> None:
             {
                 "$set": {
                     "result": result,
-                    "updated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    "updated_at": datetime.now()
                 }
             },
             upsert=True

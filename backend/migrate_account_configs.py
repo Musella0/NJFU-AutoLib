@@ -1,8 +1,8 @@
-"""One-time migration for durable, duplicate-free account configuration."""
+"""One-time migration to one globally unique configuration per student ID."""
 
 import os
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 
 from bson.json_util import dumps
 from pymongo import MongoClient
@@ -39,23 +39,27 @@ def main() -> None:
 
     groups = defaultdict(list)
     for document in documents:
-        web_uid = document.get("web_uid")
         pid = document.get("pid")
-        if isinstance(web_uid, str) and isinstance(pid, str):
-            groups[(web_uid, pid)].append(document)
+        if isinstance(pid, str) and pid:
+            groups[pid].append(document)
 
     merged_groups = 0
     removed_duplicates = 0
-    for (web_uid, pid), group in groups.items():
-        if len(group) < 2:
-            continue
+    reowned_records = 0
+    for pid, group in groups.items():
         canonical = max(
             group,
-            key=lambda doc: doc.get("updated_at") or datetime.min,
+            key=lambda doc: getattr(
+                doc.get("_id"),
+                "generation_time",
+                datetime.min.replace(tzinfo=timezone.utc),
+            ),
         )
-        merged = merge_account_documents(group, web_uid=web_uid, pid=pid)
+        merged = merge_account_documents(group, web_uid=pid, pid=pid)
         replacement = {"_id": canonical["_id"], **merged}
         collection.replace_one({"_id": canonical["_id"]}, replacement)
+        if any(document.get("web_uid") != pid for document in group):
+            reowned_records += 1
         duplicate_ids = [
             document["_id"]
             for document in group
@@ -64,7 +68,8 @@ def main() -> None:
         if duplicate_ids:
             result = collection.delete_many({"_id": {"$in": duplicate_ids}})
             removed_duplicates += result.deleted_count
-        merged_groups += 1
+        if len(group) > 1:
+            merged_groups += 1
 
     defaults = default_account_config()
     backfilled = 0
@@ -84,12 +89,13 @@ def main() -> None:
             backfilled += 1
 
     db.web_users.create_index("uid", unique=True, name="uniq_web_uid")
+    if "uniq_owner_pid" in collection.index_information():
+        collection.drop_index("uniq_owner_pid")
     collection.create_index(
-        [("web_uid", 1), ("pid", 1)],
+        [("pid", 1)],
         unique=True,
-        name="uniq_owner_pid",
+        name="uniq_pid",
         partialFilterExpression={
-            "web_uid": {"$type": "string"},
             "pid": {"$type": "string"},
         },
     )
@@ -98,6 +104,7 @@ def main() -> None:
     print(f"BACKUP={backup_path}")
     print(f"MERGED_GROUPS={merged_groups}")
     print(f"REMOVED_DUPLICATES={removed_duplicates}")
+    print(f"REOWNED_RECORDS={reowned_records}")
     print(f"BACKFILLED_RECORDS={backfilled}")
     print("INDEXES=ready")
 

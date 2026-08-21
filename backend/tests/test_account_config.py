@@ -61,6 +61,49 @@ class AccountConfigTests(unittest.TestCase):
         )
         self.assertEqual(merged["seat_list"], [])
 
+    def test_string_timestamp_is_ordered_with_datetime_values(self):
+        merged = merge_account_documents(
+            [
+                {
+                    "is_reserved": "False",
+                    "updated_at": datetime(2026, 1, 1, 8, 0),
+                },
+                {
+                    "is_reserved": "True",
+                    "updated_at": "2026-01-02 08:00:00",
+                },
+            ],
+            web_uid="123",
+            pid="123",
+        )
+        self.assertEqual(merged["is_reserved"], "True")
+
+    def test_cross_owner_records_are_reowned_to_the_student(self):
+        merged = merge_account_documents(
+            [
+                {
+                    "web_uid": "another-student",
+                    "pid": "123",
+                    "owned_seat": {"2F-A001": [{"uuid": "existing"}]},
+                    "updated_at": datetime(2026, 1, 1),
+                },
+                {
+                    "web_uid": "guest_retry",
+                    "pid": "123",
+                    "verified": True,
+                    "updated_at": datetime(2026, 1, 2),
+                },
+            ],
+            web_uid="123",
+            pid="123",
+        )
+        self.assertEqual(merged["web_uid"], "123")
+        self.assertEqual(merged["pid"], "123")
+        self.assertEqual(
+            merged["owned_seat"]["2F-A001"][0]["uuid"],
+            "existing",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

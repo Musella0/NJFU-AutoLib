@@ -114,6 +114,7 @@ function toast(msg, type='info'){
 
 async function api(path, opts={}){
   const options = Object.assign({}, opts);
+  options.credentials = options.credentials || 'same-origin';
   if(options.body && typeof options.body === 'object'){
     options.headers = Object.assign({'Content-Type':'application/json'}, options.headers || {});
     options.body = JSON.stringify(options.body);
@@ -171,8 +172,8 @@ function updateAuthUI(){
     hello.textContent = `您好，${name} ☕`;
     $('settings-uid').textContent = name;
     const subMeta = state.nickname
-      ? `已登录 · @${state.uid} · ${state.accounts.length} 个学号`
-      : `已登录 · ${state.accounts.length} 个学号`;
+      ? `已登录 · @${state.uid}`
+      : `已登录 · ${state.uid}`;
     $('settings-accounts-meta').textContent = subMeta;
     if(profileBtn) profileBtn.style.display = '';
     $('logout-card').style.display = '';
@@ -329,43 +330,27 @@ async function verifyAdd(){
     return;
   }
 
-  // 游客验证成功即被后端提升为登录态（数据归属学号，换设备可找回）
-  if(vres.data.logged_in && vres.data.uid){
-    state.isGuest = false;
-    state.uid = vres.data.uid;
-    updateAuthUI();
-  }
-
-  // 该学号在云端已有配置 → 直接恢复，绝不用默认值覆盖
-  state.currentPid = pid;
-  await loadAccounts();
-  if(state.accounts.some(a => a.pid === pid)){
+  // 验证接口会原子地登录并创建/恢复配置。再次读取会话，避免 Cookie
+  // 被禁用时继续发保存请求并制造游客数据。
+  const auth = await api('/api/auth/me');
+  if(!auth.ok || !auth.data.logged_in || auth.data.uid !== pid){
     btn.disabled = false;
     btn.textContent = '验证并保存';
-    toast('已恢复学号 ' + pid + ' 的云端配置','success');
-    closeSheet();
+    toast('验证成功，但浏览器未保存登录状态，请启用 Cookie 后重试','error');
     return;
   }
-
-  // Step 2: 首次添加才保存默认配置 (backend defaults: is_reserved=True, late_protection=False)
-  const sres = await api(`/api/my/accounts/${encodeURIComponent(pid)}`, {
-    method:'POST',
-    body:{
-      vpn_password: vpn,
-      seat_list: [],
-      mode: 'week_time',
-      time: defaultWeekTime(),
-      verified: true,
-    }
-  });
+  state.isGuest = false;
+  state.uid = auth.data.uid;
+  state.nickname = auth.data.nickname || '';
+  state.currentPid = pid;
+  await loadAccounts();
   btn.disabled = false;
   btn.textContent = '验证并保存';
-  if(sres.ok){
-    toast('已添加学号 ' + pid,'success');
+  if(state.accounts.some(a => a.pid === pid)){
+    toast('已登录并恢复学号 ' + pid + ' 的配置','success');
     closeSheet();
-    await loadAccounts();
   }else{
-    toast(sres.data.error || '保存失败','error');
+    toast('已登录，但配置恢复失败，请稍后刷新重试','error');
   }
 }
 
@@ -725,9 +710,6 @@ async function saveCfg(options = {}){
     is_reserved: $('cfg-toggle-reserve').classList.contains('on') ? 'True' : 'False',
     late_protection: $('cfg-toggle-lp').classList.contains('on') ? 'True' : 'False',
   };
-  if(!silent) body.vpn_password = $('cfg-vpn').value;
-  if(options.verified) body.verified = true;
-
   const btn = $('btn-save-cfg');
   if(!silent){
     btn.disabled = true;
@@ -761,8 +743,7 @@ async function saveCfg(options = {}){
   }
 }
 
-// 改密码后 verified 会被后端重置，这里提供重新验证的入口，
-// 否则配置页只剩一个「未验证」徽章而没有办法把它变回已验证。
+// 密码只通过学校验证接口更新；普通配置保存永远不接触凭据。
 async function verifyAndSaveCfg(){
   if(!state.currentPid || !state.currentCfg){ toast('请先添加学号','error'); return; }
   const vpn = $('cfg-vpn').value;
@@ -780,6 +761,12 @@ async function verifyAndSaveCfg(){
     toast(data.error || '验证失败','error');
     return;
   }
+  const auth = await api('/api/auth/me');
+  if(!auth.ok || !auth.data.logged_in || auth.data.uid !== state.currentPid){
+    toast('验证成功，但浏览器未保存登录状态，请启用 Cookie 后重试','error');
+    return;
+  }
+  state.currentCfg.vpn_password = vpn;
   state.currentCfg.verified = true;
   $('cfg-verify-badge').textContent = '✓ 已验证';
   $('cfg-verify-badge').className = 'pill ok';
@@ -1584,8 +1571,8 @@ const SHEETS = {
   `,
   accounts: () => `
     <div class="grab"></div>
-    <h3>切换学号</h3>
-    <div class="desc">多学号用户可以在这里快速切换。</div>
+    <h3>当前学号</h3>
+    <div class="desc">每个学号的数据独立保存；验证其他学号会切换登录身份。</div>
     <div class="col gap-sm">
       ${state.accounts.map(a => {
         const active = a.pid === state.currentPid;
@@ -1606,13 +1593,13 @@ const SHEETS = {
         </div>`;
       }).join('')}
       <div class="box tight ghost clickable" style="text-align:center" onclick="openSheet('add-pid')">
-        <div class="sub" style="color:var(--ink3)">+ 添加学号</div>
+        <div class="sub" style="color:var(--ink3)">切换登录学号</div>
       </div>
     </div>
   `,
   'add-pid': () => `
     <div class="grab"></div>
-    <h3>添加学号</h3>
+    <h3>验证学号</h3>
     <div class="desc">填写学号和统一身份认证（网上办事大厅）密码，验证通过后即完成登录并绑定。</div>
     <div class="box tight" style="margin-top:4px">
       <div class="t">🔒 你的学号和密码会<strong>加密保存在服务器上</strong>，仅用于每天自动预约时登录学校系统，管理员也无法看到明文。</div>

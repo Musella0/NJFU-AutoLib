@@ -61,7 +61,11 @@ def upsert_collection(collection, key_filter: dict, new_values: dict):
 
 def update_field(collection, pid, field_name, field_value):
     """更新单个字段并记录更新时间"""
-    record = {field_name: field_value, "updated_at": datetime.utcnow()}
+    record = {
+        field_name: field_value,
+        "web_uid": pid,
+        "updated_at": datetime.utcnow(),
+    }
     return upsert_collection(collection, {"pid": pid}, record)
 
 
@@ -92,6 +96,7 @@ def insert_full_reservation():
         return jsonify(*err)
     if 'pid' not in data:
         return jsonify({"error": "缺少 pid"}), 400
+    data["web_uid"] = data["pid"]
     data.pop("lib_password", None)
 
     # 获取原有数据
@@ -161,6 +166,7 @@ def insert_or_update_reservation():
 
     rec = {
         "pid": data["pid"],
+        "web_uid": data["pid"],
         "vpn_password": _enc(data["vpn_password"]),
         "seat_list": data["seat_list"],
     }
@@ -192,6 +198,7 @@ def set_time_reservation():
         return jsonify({"error": "timeSlot 格式应为 '开始-结束'"}), 400
 
     rec = {
+        "web_uid": data["pid"],
         "mode": data["mode"],
         "time": {"begin": begin, "end": end},
     }
