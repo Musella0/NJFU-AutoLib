@@ -15,6 +15,7 @@ const state = {
   tomorrowResv: null, // tomorrow's live reservation (if any)
   cfgMode: 'week',    // UI: 'week' or 'simple'
   napConfig: { start_time: '14:00', end_time: '', seat: '', auto_daily: false, trigger_time: '12:00' },
+  pendingAnnouncementPopup: null,
 };
 
 // 首次使用的欢迎弹窗。key 带版本号：以后加了大功能把 v1 改成 v2，老用户会再看到一次。
@@ -110,6 +111,29 @@ function toast(msg, type='info'){
   el.textContent = msg;
   box.appendChild(el);
   setTimeout(()=>{ el.style.opacity='0'; setTimeout(()=>el.remove(), 300); }, 2800);
+}
+
+async function copyContact(){
+  const el = $('contact-email');
+  const mail = (el ? el.textContent : '').trim();
+  if(!mail) return;
+  try{
+    if(navigator.clipboard && window.isSecureContext){
+      await navigator.clipboard.writeText(mail);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = mail;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    }
+    toast('邮箱已复制：' + mail, 'success');
+  }catch(e){
+    location.href = 'mailto:' + mail;
+  }
 }
 
 async function api(path, opts={}){
@@ -1385,6 +1409,7 @@ async function loadNotices(){
     const anns = (res[0] && res[0].ok) ? await res[0].json() : [];
     const results = (res[1] && res[1].ok) ? await res[1].json() : [];
     renderNotices(anns, results);
+    queueSchoolNoticePopup(anns);
   }catch(e){
     $('notice-list').innerHTML = '<div class="empty">通知加载失败</div>';
   }
@@ -1407,6 +1432,7 @@ function renderNotices(anns, results){
           <div class="sub" style="font-weight:700">${escHtml(a.title)}</div>
         </div>
         <div class="t" style="margin-top:4px;white-space:pre-wrap">${escHtml(a.content)}</div>
+        ${a.source_url ? `<div class="tiny" style="margin-top:6px"><a href="${escHtml(a.source_url)}" target="_blank" rel="noopener noreferrer">查看学校原公告</a></div>` : ''}
         <div class="tiny" style="margin-top:6px">${escHtml(a.updated_at || a.created_at || '')}</div>
       </div>`);
   });
@@ -1427,6 +1453,32 @@ function renderNotices(anns, results){
   });
 
   list.innerHTML = items.length ? items.join('') : '<div class="empty">暂无通知</div>';
+}
+
+function schoolNoticeAckKey(a){
+  const sourceId = a.source_review_id || a.id || 'unknown';
+  return `autolib_school_notice_ack_${sourceId}_r${a.revision || 1}`;
+}
+
+function schoolNoticeDismissed(a){
+  try{ return localStorage.getItem(schoolNoticeAckKey(a)) === '1'; }
+  catch(e){ return false; }
+}
+
+function queueSchoolNoticePopup(announcements){
+  const notice = (announcements || []).find(a => a.popup_required && !schoolNoticeDismissed(a));
+  if(!notice) return;
+  state.pendingAnnouncementPopup = notice;
+  if(!$('scrim').classList.contains('show')) openSheet('school-notice');
+}
+
+function dismissSchoolNotice(){
+  const notice = state.pendingAnnouncementPopup;
+  if(notice){
+    try{ localStorage.setItem(schoolNoticeAckKey(notice), '1'); }catch(e){}
+  }
+  state.pendingAnnouncementPopup = null;
+  closeSheet();
 }
 
 // ---------- seats ----------
@@ -1664,6 +1716,18 @@ const SHEETS = {
       <button class="btn accent grow" onclick="saveEmail()">保存</button>
     </div>
   `,
+  'school-notice': () => {
+    const a = state.pendingAnnouncementPopup || {};
+    return `
+      <div class="grab"></div>
+      <h3>⚠️ ${escHtml(a.title || '图书馆闭馆公告')}</h3>
+      <div class="desc" style="white-space:pre-wrap">${escHtml(a.content || '')}</div>
+      ${a.display_from && a.display_until ? `<div class="box tight" style="border-left:4px solid var(--danger)"><div class="sub" style="font-weight:700">预约暂停时段</div><div class="t">${escHtml(a.display_from)} 至 ${escHtml(a.display_until)}</div></div>` : ''}
+      <div class="row-flex mt-lg">
+        ${a.source_url ? `<a class="btn ghost grow" href="${escHtml(a.source_url)}" target="_blank" rel="noopener noreferrer">查看学校原文</a>` : ''}
+        <button class="btn accent grow" onclick="dismissSchoolNotice()">永久关闭本条提示</button>
+      </div>`;
+  },
   'welcome': () => `
     <div class="grab"></div>
     <h3>👋 欢迎使用 AutoLib</h3>
@@ -2143,10 +2207,15 @@ function openSheet(name){
   const tpl = SHEETS[name];
   content.innerHTML = tpl ? tpl() : '<div class="grab"></div><h3>未实现</h3>';
   sc.classList.add('show');
-  if(name === 'welcome' || name === 'lp-info' || name === 'lp-warning' || name === 'cancel' || name === 'cancel-tomorrow' || name === 'nap-info' || name === 'nap-about') sc.classList.add('center');
+  if(name === 'welcome' || name === 'school-notice' || name === 'lp-info' || name === 'lp-warning' || name === 'cancel' || name === 'cancel-tomorrow' || name === 'nap-info' || name === 'nap-about') sc.classList.add('center');
   else sc.classList.remove('center');
 }
-function closeSheet(){ $('scrim').classList.remove('show'); }
+function closeSheet(){
+  $('scrim').classList.remove('show');
+  if(state.pendingAnnouncementPopup && !schoolNoticeDismissed(state.pendingAnnouncementPopup)){
+    setTimeout(() => openSheet('school-notice'), 0);
+  }
+}
 
 // ---------- welcome ----------
 // 演示模式默认跳过，免得挡住截图（?demo=1&welcome=1 可以强制显示）

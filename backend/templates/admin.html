@@ -189,6 +189,12 @@
       <div class="stat-card"><div class="stat-label">保护触发次数</div><div class="stat-value" style="color:var(--purple)" id="s-lp-count">-</div></div>
     </div>
     <div class="section-bar">
+      <div class="section-title">学校闭馆审核</div>
+      <button class="btn btn-blue btn-sm" onclick="loadSchoolReviews()">↻ 刷新审核</button>
+    </div>
+    <div class="ann-grid" id="school-review-grid"><div class="loading" style="padding:24px 0"><div>加载中...</div></div></div>
+
+    <div class="section-bar">
       <div class="section-title">公告管理</div>
       <button class="btn btn-green btn-sm" onclick="openAnnForm()">+ 新建公告</button>
     </div>
@@ -198,6 +204,28 @@
       <div class="section-title">用户列表</div>
     </div>
     <div class="user-grid" id="grid"><div class="loading"><div class="spinner"></div><div>加载中...</div></div></div>
+  </div>
+</div>
+
+<!-- School Notice Review Modal -->
+<div class="modal-overlay" id="m-school-review">
+  <div class="modal" style="width:680px">
+    <div class="modal-header"><div class="modal-title" id="school-review-title">学校闭馆审核</div><button class="modal-close" onclick="closeM('m-school-review')">✕</button></div>
+    <div class="modal-body">
+      <div class="modal-field"><label>学校原文</label><textarea id="school-review-content" readonly style="min-height:180px"></textarea></div>
+      <div class="modal-field"><label>原始网址</label><a id="school-review-url" target="_blank" rel="noopener noreferrer" style="color:var(--accent);word-break:break-all"></a></div>
+      <div class="modal-field"><label>AI 证据 / 不确定项</label><textarea id="school-review-evidence" readonly></textarea></div>
+      <div class="modal-field"><label>影响类型</label><select id="school-review-effect"><option value="venue_closed">全馆闭馆</option><option value="partial_closure">部分闭馆</option></select></div>
+      <div class="modal-field"><label>暂停预约时间（北京时间）</label><input type="datetime-local" id="school-review-from"></div>
+      <div class="modal-field"><label>恢复预约时间（北京时间）</label><input type="datetime-local" id="school-review-until"></div>
+      <div class="modal-field"><label>影响范围</label><input type="text" id="school-review-scope" value="all_seats" readonly></div>
+      <div id="school-review-conflicts" style="color:var(--red);font-size:12px"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-red" id="school-review-cancel" onclick="cancelSchoolReview()">取消规则</button>
+      <button class="btn btn-ghost" onclick="closeM('m-school-review')">关闭</button>
+      <button class="btn btn-green" id="school-review-save" onclick="saveSchoolReview()">确认并启用</button>
+    </div>
   </div>
 </div>
 
@@ -302,7 +330,7 @@
 <div class="toast-box" id="tbox"></div>
 
 <script>
-let users=[],editPid=null,announcements=[],editAnnId=null;
+let users=[],editPid=null,announcements=[],editAnnId=null,schoolReviews=[],editSchoolReviewId=null;
 function toast(m,t='info'){const b=document.getElementById('tbox'),e=document.createElement('div');e.className='toast toast-'+({success:'ok',error:'err'}[t]||'info');e.textContent=m;b.appendChild(e);setTimeout(()=>{e.style.opacity='0';setTimeout(()=>e.remove(),300)},3000)}
 function openM(id){document.getElementById(id).classList.add('show')}
 function closeM(id){document.getElementById(id).classList.remove('show')}
@@ -319,7 +347,7 @@ async function adminLogin(){
 async function adminLogout(){await fetch('/api/admin/logout',{method:'POST'});location.reload();}
 function showAdminLogin(){document.getElementById('password-reset').style.display='none';document.getElementById('admin-main').style.display='none';document.getElementById('admin-nav').style.display='none';document.getElementById('admin-login').style.display='';}
 function showPasswordReset(){document.getElementById('reset-username').value=document.getElementById('adm-username').value.trim();document.getElementById('admin-login').style.display='none';document.getElementById('password-reset').style.display='';}
-function showAdminMain(){document.getElementById('admin-login').style.display='none';document.getElementById('password-reset').style.display='none';document.getElementById('admin-main').style.display='';document.getElementById('admin-nav').style.display='flex';loadUsers();loadAnnouncements();}
+function showAdminMain(){document.getElementById('admin-login').style.display='none';document.getElementById('password-reset').style.display='none';document.getElementById('admin-main').style.display='';document.getElementById('admin-nav').style.display='flex';loadUsers();loadSchoolReviews();loadAnnouncements();}
 async function requestResetCode(){
   const username=document.getElementById('reset-username').value.trim();
   if(!username)return toast('请输入管理员账号','error');
@@ -431,6 +459,81 @@ async function saveProtect(){
 function del(pid){document.getElementById('del-text').innerHTML=`删除 <span class="confirm-pid">${pid}</span> 的所有配置？<br>不可恢复。`;document.getElementById('btn-del').onclick=async()=>{try{const r=await fetch(`/api/users/${pid}`,{method:'DELETE'});if(r.ok){toast('已删除','success');closeM('m-del');loadUsers();}else toast('失败','error');}catch(e){toast('失败','error')}};openM('m-del');}
 
 // ===== Announcements =====
+function schoolStatus(r){
+  if(r.status==='cancelled'&&r.cancel_reason==='ai_irrelevant')return 'AI 三次判定无关';
+  return {pending_review:'待审核',confirmed_upcoming:'已确认·未生效',active:'拦截中',expired:'已过期',cancelled:'已取消',invalid:'时间无效'}[r.effective_status||r.status]||r.status;
+}
+function schoolStatusClass(r){
+  const s=r.effective_status||r.status;
+  return s==='active'?'danger':s==='pending_review'?'warning':s==='cancelled'||s==='expired'?'off':'info';
+}
+async function loadSchoolReviews(){
+  const g=document.getElementById('school-review-grid');
+  try{
+    g.innerHTML='<div style="color:var(--text3);text-align:center;padding:20px">加载中…</div>';
+    const r=await fetch('/api/admin/school_notice_reviews');
+    const d=await r.json().catch(()=>[]);
+    if(!r.ok||!Array.isArray(d)){g.innerHTML='<div style="color:var(--red);text-align:center;padding:20px">审核记录加载失败</div>';return;}
+    schoolReviews=d;renderSchoolReviews();
+    const hash=location.hash.replace('#school-notice-','');
+    if(hash&&schoolReviews.some(x=>x.id===hash))openSchoolReview(hash);
+  }catch(e){g.innerHTML=`<div style="color:var(--red);text-align:center;padding:20px">加载失败：${esc(e.message||e)}</div>`;}
+}
+function renderSchoolReviews(){
+  const g=document.getElementById('school-review-grid');
+  if(!schoolReviews.length){g.innerHTML='<div style="color:var(--text3);text-align:center;padding:24px">暂无学校公告审核记录</div>';return;}
+  g.innerHTML=schoolReviews.map(r=>{
+    const conflicts=(r.existing_reservation_conflicts||[]).length;
+    const checks=r.ai_checks||{};
+    return `<div class="ann-card" id="school-notice-${r.id}">
+      <div class="ann-main">
+        <div class="ann-head"><span class="ann-badge ${schoolStatusClass(r)}">${esc(schoolStatus(r))}</span><span class="ann-title">${esc(r.source_title||'未命名公告')}</span></div>
+        <div class="ann-content">${esc(r.ai_summary||'无 AI 摘要')}</div>
+        <div class="ann-meta">建议 ${esc(r.proposed_pause_from||'未确定')} → ${esc(r.proposed_pause_until||'未确定')}　·　A ${esc(checks.extractor_a||'-')} / B ${esc(checks.extractor_b||'-')} / C ${esc(checks.reviewer_c||'-')}　·　revision ${r.revision}${conflicts?`　·　冲突 ${conflicts} 条`:''}</div>
+      </div>
+      <div class="ann-actions"><button class="btn btn-blue btn-sm" onclick="openSchoolReview('${r.id}')">审核 / 查看</button></div>
+    </div>`;
+  }).join('');
+}
+function dtLocal(v){return(v||'').replace(' ','T').substring(0,16)}
+function openSchoolReview(id){
+  const r=schoolReviews.find(x=>x.id===id);if(!r)return;
+  editSchoolReviewId=id;
+  document.getElementById('school-review-title').textContent=`${schoolStatus(r)} · ${r.source_title||'学校公告'}`;
+  document.getElementById('school-review-content').value=r.source_content||'';
+  const link=document.getElementById('school-review-url');link.href=r.source_url||'#';link.textContent=r.source_url||'无链接';
+  document.getElementById('school-review-evidence').value=`证据：${(r.ai_evidence||[]).join('；')||'无'}\n不确定：${(r.ai_ambiguities||[]).join('；')||'无'}`;
+  document.getElementById('school-review-effect').value=['venue_closed','partial_closure'].includes(r.effect_type)?r.effect_type:'venue_closed';
+  document.getElementById('school-review-from').value=dtLocal(r.approved_pause_from||r.proposed_pause_from);
+  document.getElementById('school-review-until').value=dtLocal(r.approved_pause_until||r.proposed_pause_until);
+  document.getElementById('school-review-scope').value=r.affected_scope||'all_seats';
+  const conflicts=r.existing_reservation_conflicts||[];
+  document.getElementById('school-review-conflicts').textContent=conflicts.length?`⚠ 已发现 ${conflicts.length} 条已有预约冲突，系统不会自动取消。`:'';
+  document.getElementById('school-review-save').textContent=r.status==='confirmed'?'保存修改并重新通知':r.cancel_reason==='ai_irrelevant'?'人工改判并启用':'确认并启用';
+  document.getElementById('school-review-save').style.display=r.status==='cancelled'&&r.cancel_reason!=='ai_irrelevant'?'none':'';
+  document.getElementById('school-review-cancel').style.display=r.status==='cancelled'?'none':'';
+  openM('m-school-review');
+}
+async function saveSchoolReview(){
+  const r=schoolReviews.find(x=>x.id===editSchoolReviewId);if(!r)return;
+  const body={expected_revision:r.revision,effect_type:document.getElementById('school-review-effect').value,pause_from:document.getElementById('school-review-from').value,pause_until:document.getElementById('school-review-until').value,affected_scope:document.getElementById('school-review-scope').value};
+  if(!body.pause_from||!body.pause_until)return toast('请填写暂停和恢复时间','error');
+  const url=r.status==='confirmed'?`/api/admin/school_notice_reviews/${r.id}`:`/api/admin/school_notice_reviews/${r.id}/confirm`;
+  const method=r.status==='confirmed'?'PUT':'POST';
+  const resp=await fetch(url,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const d=await resp.json().catch(()=>({}));
+  if(!resp.ok){toast(d.error||'保存失败','error');if(resp.status===409)loadSchoolReviews();return;}
+  toast(r.status==='confirmed'?'规则已修改并重新通知':'闭馆拦截已启用','success');closeM('m-school-review');loadSchoolReviews();loadAnnouncements();
+}
+async function cancelSchoolReview(){
+  const r=schoolReviews.find(x=>x.id===editSchoolReviewId);if(!r)return;
+  if(!confirm('确认取消这条闭馆拦截规则？'))return;
+  const resp=await fetch(`/api/admin/school_notice_reviews/${r.id}/cancel`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({expected_revision:r.revision,reason:'管理员取消'})});
+  const d=await resp.json().catch(()=>({}));
+  if(!resp.ok){toast(d.error||'取消失败','error');if(resp.status===409)loadSchoolReviews();return;}
+  toast('闭馆规则已取消','success');closeM('m-school-review');loadSchoolReviews();loadAnnouncements();
+}
+
 async function loadAnnouncements(){
   try{
     document.getElementById('ann-grid').innerHTML='<div style="color:var(--text3);text-align:center;padding:20px">加载中…</div>';

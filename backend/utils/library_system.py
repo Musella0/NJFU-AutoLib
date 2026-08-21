@@ -30,7 +30,7 @@ from pymongo import MongoClient, ASCENDING, DESCENDING
 import time
 import logging
 
-from utils.base_system import BaseSystem
+from utils.base_system import BaseSystem, TimeoutSession
 from utils.password_encryptor import PasswordEncryptor
 from utils import config
 from utils.vpn_system import VPNSystem
@@ -196,11 +196,11 @@ class LibrarySystem(BaseSystem):
         self.user_info: Optional[Dict[str, Any]] = None
         self.vpn: Optional[VPNSystem] = None
 
-        # 使用共享会话或创建新会话
+        # 使用共享会话或创建新会话（新建的同样要带默认超时）
         if session:
             self.session = session
         else:
-            self.session = requests.Session()
+            self.session = TimeoutSession()
 
         # 如果提供了VPN密码，先登录VPN
         if vpn_password:

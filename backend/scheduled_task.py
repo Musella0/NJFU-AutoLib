@@ -35,6 +35,7 @@
 import os
 import time
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Tuple, Optional
 
@@ -47,6 +48,7 @@ from utils.library_system import LibrarySystem
 from utils.notify import notify_user
 from utils.crypto import decrypt as _dec
 from utils import config
+from utils.reservation_blackout import find_any_reservation_conflict, find_reservation_conflict
 
 # 日志配置
 def setup_logging() -> logging.Logger:
@@ -135,6 +137,18 @@ users_col = db.users  # 存储用户基本信息
 
 IN_LIBRARY_STATUSES = {1093, 3141}
 _arrival_checks_backfilled = False
+
+# 并发抢座：7:00 时所有账号并行执行，避免串行排队让靠后的用户错过黄金窗口。
+# 上限不宜过高，webvpn 网关和图书馆接口都扛不住太猛的并发。
+RESERVE_CONCURRENCY = int(os.getenv("RESERVE_CONCURRENCY", "8"))
+
+
+def _blackout_message(conflict: Dict[str, Any]) -> str:
+    return (
+        f"学校闭馆，已跳过预约：{conflict.get('title', '图书馆闭馆通知')}；"
+        f"暂停 {conflict.get('pause_from', '')} 至 {conflict.get('pause_until', '')}；"
+        f"原文 {conflict.get('source_url', '')}"
+    )
 
 def get_all_active_reservations() -> List[Dict[str, Any]]:
     """
@@ -325,6 +339,12 @@ def reservation(res_item: Dict[str, Any]) -> None:
             log_with_user(logger, 'error', pid, '预约时间', "未找到有效的预约时间段")
             handle_reservation_error(pid, "未配置有效的预约时间段")
             return
+        conflict = find_any_reservation_conflict(db.school_notice_reviews, segments)
+        if conflict:
+            message = _blackout_message(conflict)
+            log_with_user(logger, 'info', pid, '闭馆保护', message)
+            update_user_config(pid, message)
+            return
         log_with_user(logger, 'info', pid, '预约时间',
                      f"共 {len(segments)} 段: " + "; ".join([f"{b}~{e}" for b, e in segments]))
 
@@ -400,27 +420,57 @@ def reservation(res_item: Dict[str, Any]) -> None:
         log_with_user(logger, 'error', pid, '预约异常', error_msg)
         handle_reservation_error(pid, error_msg)
 
+def _run_reservation_safely(res_item: Dict[str, Any]) -> None:
+    """线程入口：包住 reservation()，任何逃逸异常都不能拖垮整个线程池。"""
+    pid = res_item.get("pid", "?")
+    try:
+        reservation(res_item)
+    except Exception as exc:
+        log_with_user(logger, 'error', pid, '预约异常', f"预约线程异常: {exc}")
+
+
 def process_reservations() -> None:
     """
-    处理所有预约请求
+    并发处理所有预约请求
 
     工作流程：
-    1. 获取所有活动预约记录
-    2. 按优先级顺序处理每个预约
+    1. 获取所有活动预约记录（已按优先级降序排列）
+    2. 用线程池并发执行，每个账号一条独立的 VPN + 图书馆会话
     3. 记录处理结果
 
-    每个预约都是独立处理的，一个预约的失败不会影响其他预约。
+    为什么要并发：单个账号跑完「VPN 登录 → CAS SSO → 逐段抢座」通常要好几秒，
+    串行执行会让排在后面的用户错过 7:00 开抢的黄金窗口。线程池按提交顺序取任务，
+    所以高优先级账号仍然先出发，只是不再需要等前一个人跑完。
+
+    并发度由 RESERVE_CONCURRENCY 控制，别调太高——webvpn 网关和图书馆接口都有限流。
+    每个账号仍然互相独立，一个失败不影响其他账号。
     """
     active_list = get_all_active_reservations()
     if not active_list:
         log_with_user(logger, 'info', '系统', '预约处理', "没有正在预约中的记录")
         return
 
-    log_with_user(logger, 'info', '系统', '预约处理', f"开始处理预约列表，共 {len(active_list)} 条")
-    for item in active_list:
-        log_with_user(logger, 'info', item['pid'], '预约处理', f"预约学号: {item['pid']}, 优先级: {item['priority']}")
-        reservation(item)
-    log_with_user(logger, 'info', '系统', '预约处理', "预约处理结束")
+    workers = max(1, min(RESERVE_CONCURRENCY, len(active_list)))
+    log_with_user(logger, 'info', '系统', '预约处理',
+                  f"开始处理预约列表，共 {len(active_list)} 条，并发度 {workers}")
+
+    started = time.time()
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="reserve") as pool:
+        futures = {}
+        for item in active_list:
+            log_with_user(logger, 'info', item['pid'], '预约处理',
+                          f"排入预约队列: {item['pid']}, 优先级: {item.get('priority', 0)}")
+            futures[pool.submit(_run_reservation_safely, item)] = item['pid']
+        for future in as_completed(futures):
+            pid = futures[future]
+            try:
+                future.result()
+            except Exception as exc:
+                log_with_user(logger, 'error', pid, '预约异常', f"预约任务未正常结束: {exc}")
+
+    elapsed = time.time() - started
+    log_with_user(logger, 'info', '系统', '预约处理', f"预约处理结束，耗时 {elapsed:.1f} 秒")
+
 
 def _mark_seat_by_protection(pid: str, dev_name: str) -> None:
     """
@@ -700,6 +750,27 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
         log_with_user(logger, 'info', pid, '迟到保护',
                      f"开始处理座位 {dev_name} 的迟到保护（配置: {protection_minutes}min, 黑名单: {blacklisted}）")
 
+        # 闭馆判断必须早于登录和取消。即使配置为“仅取消”，闭馆日也不应让
+        # 自动保护流程改动已有预约；用户仍可通过单纯取消接口自行处理。
+        target_time = seat_dict['target_time']
+        date_str, time_range = target_time.split(' ')
+        begin_time_str, end_time_str = time_range.split('-')
+        begin_time = datetime.strptime(f"{date_str} {begin_time_str}", "%Y-%m-%d %H:%M:%S")
+        end_time = datetime.strptime(f"{date_str} {end_time_str}", "%Y-%m-%d %H:%M:%S")
+        shift_minutes = 60 if protection_minutes == -1 else max(0, protection_minutes)
+        new_begin = begin_time + timedelta(minutes=shift_minutes)
+        new_end = max(end_time, new_begin + timedelta(hours=2))
+        new_begin_str = f"{date_str} {new_begin.strftime('%H:%M:%S')}"
+        new_end_str = f"{date_str} {new_end.strftime('%H:%M:%S')}"
+        conflict = find_reservation_conflict(
+            db.school_notice_reviews,
+            new_begin_str if not (blacklisted or protection_minutes == 0) else begin_time,
+            new_end_str if not (blacklisted or protection_minutes == 0) else end_time,
+        )
+        if conflict:
+            log_with_user(logger, 'info', pid, '闭馆保护', _blackout_message(conflict))
+            return
+
         library = LibrarySystem(
             username=user["pid"],
             password=_dec(user["vpn_password"]),
@@ -746,24 +817,6 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
             log_with_user(logger, 'info', pid, '迟到保护',
                          "已列入黑名单或保护时长为0，预约已取消，不重新预约")
             return
-
-        # 计算新的预约时间
-        target_time = seat_dict['target_time']
-        date_str, time_range = target_time.split(' ')
-        begin_time_str, end_time_str = time_range.split('-')
-
-        begin_time = datetime.strptime(f"{date_str} {begin_time_str}", "%Y-%m-%d %H:%M:%S")
-        end_time = datetime.strptime(f"{date_str} {end_time_str}", "%Y-%m-%d %H:%M:%S")
-
-        # 确定延迟分钟数：-1(永久)固定推迟60min，否则按配置值
-        shift_minutes = 60 if protection_minutes == -1 else protection_minutes
-
-        new_begin = begin_time + timedelta(minutes=shift_minutes)
-        # 确保重约时长不低于 120 分钟（图书馆最低限制）
-        new_end = max(end_time, new_begin + timedelta(hours=2))
-
-        new_begin_str = f"{date_str} {new_begin.strftime('%H:%M:%S')}"
-        new_end_str = f"{date_str} {new_end.strftime('%H:%M:%S')}"
 
         log_with_user(logger, 'info', pid, '迟到保护',
                      f"调整后的预约时间: {new_begin_str} - {new_end_str}")
@@ -935,6 +988,27 @@ def auto_nap_action(pid: str) -> None:
         nap_end = nap_cfg.get("end_time") or ""
         nap_seat_name = (nap_cfg.get("seat") or "").strip()
 
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        preflight_end = nap_end
+        if not preflight_end:
+            for seats in (cfg.get("owned_seat") or {}).values():
+                for seat in seats or []:
+                    target_time = str(seat.get("target_time") or "")
+                    if target_time.startswith(today_str) and "-" in target_time:
+                        preflight_end = target_time.rsplit("-", 1)[-1][:5]
+                        break
+                if preflight_end:
+                    break
+        preflight_end = preflight_end or "23:59"
+        conflict = find_reservation_conflict(
+            db.school_notice_reviews,
+            f"{today_str} {nap_start}:00",
+            f"{today_str} {preflight_end}:00",
+        )
+        if conflict:
+            log_with_user(logger, 'info', pid, '闭馆保护', _blackout_message(conflict))
+            return
+
         vpn_password = _dec(cfg["vpn_password"])
 
         library = LibrarySystem(
@@ -948,7 +1022,6 @@ def auto_nap_action(pid: str) -> None:
             log_with_user(logger, 'info', pid, '自动午休', "今日无预约，跳过")
             return
 
-        today_str = datetime.now().strftime("%Y-%m-%d")
         active_statuses = {1027, 1093, 3141}
         target = None
         for r in reservations:
@@ -966,6 +1039,15 @@ def auto_nap_action(pid: str) -> None:
         seat_name = nap_seat_name or current_seat
         if not nap_end:
             nap_end = (target.get("resvEndTime") or "")[-8:-3] or "18:00"
+
+        conflict = find_reservation_conflict(
+            db.school_notice_reviews,
+            f"{today_str} {nap_start}:00",
+            f"{today_str} {nap_end}:00",
+        )
+        if conflict:
+            log_with_user(logger, 'info', pid, '闭馆保护', _blackout_message(conflict))
+            return
 
         log_with_user(logger, 'info', pid, '自动午休', f"取消预约 {uuid}，将重约 {seat_name} {nap_start}-{nap_end}")
 

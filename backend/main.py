@@ -7,7 +7,7 @@ from flask import Flask, render_template, jsonify, request, session
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
-from pymongo import MongoClient, DESCENDING
+from pymongo import MongoClient, DESCENDING, ReturnDocument
 from pymongo.errors import DuplicateKeyError
 from bson import ObjectId
 from bson.errors import InvalidId
@@ -23,7 +23,15 @@ from utils.admin_credentials import (
     verify_login as verify_admin_login,
 )
 from utils.crypto import encrypt as _enc, decrypt as _dec
-from utils.notify import send_email
+from utils.notify import queue_email, send_email
+from utils.reservation_blackout import (
+    BEIJING_TZ,
+    ReservationBlackoutError,
+    find_any_reservation_conflict,
+    find_reservation_conflict,
+    parse_beijing_datetime,
+    validate_pause_range,
+)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", os.urandom(32).hex())
@@ -68,6 +76,16 @@ def get_db():
     return client, client.AutoLib
 
 
+def _manual_reservation_blackout(segments):
+    """Return a stable HTTP payload before any manual reservation mutation."""
+    client, db = get_db()
+    try:
+        conflict = find_any_reservation_conflict(db.school_notice_reviews, segments)
+    finally:
+        client.close()
+    return ReservationBlackoutError(conflict).to_payload() if conflict else None
+
+
 def _ensure_uid():
     """确保 session 中有 uid：已登录返回真实 uid，否则分配游客 uid。"""
     uid = session.get("web_uid")
@@ -100,6 +118,11 @@ def _ensure_database_indexes() -> None:
         )
         if "uniq_owner_pid" in db.user_config_info.index_information():
             db.user_config_info.drop_index("uniq_owner_pid")
+        db.school_notice_reviews.create_index(
+            [("source_id", 1), ("content_hash", 1)],
+            unique=True,
+            name="uniq_school_notice_revision",
+        )
     finally:
         client.close()
 
@@ -535,6 +558,10 @@ def save_my_account(pid):
         update["seat_list"] = list(dict.fromkeys(seat.strip() for seat in seats))
     if "time" in update and not isinstance(update["time"], dict):
         return jsonify({"error": "时间配置格式无效"}), 400
+    # 开关一律落成 "True"/"False"，避免任意 JSON 值被原样写进配置文档。
+    for flag in ("is_reserved", "late_protection"):
+        if flag in update:
+            update[flag] = "True" if str(update[flag]).strip().lower() == "true" else "False"
 
     update["pid"] = pid
     update["web_uid"] = pid
@@ -658,6 +685,13 @@ def do_nap(pid):
     if start_time >= end_time:
         return jsonify({"error": "结束时间必须晚于开始时间"}), 400
 
+    today = datetime.now().strftime("%Y-%m-%d")
+    blocked = _manual_reservation_blackout([
+        (f"{today} {start_time}:00", f"{today} {end_time}:00")
+    ])
+    if blocked:
+        return jsonify(blocked), 409
+
     try:
         from scheduled_task import get_seat_ids
         from utils.library_system import LibrarySystem
@@ -683,7 +717,6 @@ def do_nap(pid):
                 "result": f"取消成功，但未找到座位「{seat_name}」，请手动预约"
             }), 200
 
-        today = __import__("datetime").date.today().strftime("%Y-%m-%d")
         msg, _ = library.reserve_seat(
             seat_list=seat_ids,
             resv_begin_time=f"{today} {start_time}:00",
@@ -848,7 +881,12 @@ def reserve_now(pid):
 
     # 导入预约逻辑
     try:
-        from scheduled_task import reservation, update_user_config
+        from scheduled_task import calculate_reservation_time, reservation, update_user_config
+
+        segments = calculate_reservation_time(cfg)
+        blocked = _manual_reservation_blackout(segments)
+        if blocked:
+            return jsonify(blocked), 409
         
         # 执行预约
         reservation(cfg)
@@ -917,6 +955,10 @@ def reserve_custom(pid):
         target_str = target.strftime("%Y-%m-%d")
         resv_begin = f"{target_str} {start_time}:00"
         resv_end   = f"{target_str} {end_time}:00"
+
+        blocked = _manual_reservation_blackout([(resv_begin, resv_end)])
+        if blocked:
+            return jsonify(blocked), 409
 
         library = LibrarySystem(
             username=pid,
@@ -1074,11 +1116,270 @@ def _serialize_announcement(doc):
         "level": doc.get("level", "info"),
         "pinned": bool(doc.get("pinned", False)),
         "active": bool(doc.get("active", True)),
+        "source_review_id": doc.get("source_review_id", ""),
+        "source_url": doc.get("source_url", ""),
+        "popup_required": bool(doc.get("popup_required", False)),
+        "revision": int(doc.get("revision", 1) or 1),
+        "display_from": doc["display_from"].strftime("%Y-%m-%d %H:%M:%S")
+            if isinstance(doc.get("display_from"), datetime) else doc.get("display_from", ""),
+        "display_until": doc["display_until"].strftime("%Y-%m-%d %H:%M:%S")
+            if isinstance(doc.get("display_until"), datetime) else doc.get("display_until", ""),
         "created_at": doc["created_at"].strftime("%Y-%m-%d %H:%M:%S")
             if isinstance(doc.get("created_at"), datetime) else doc.get("created_at", ""),
         "updated_at": doc["updated_at"].strftime("%Y-%m-%d %H:%M:%S")
             if isinstance(doc.get("updated_at"), datetime) else doc.get("updated_at", ""),
     }
+
+
+def _announcement_visible(doc, now=None):
+    """Manual announcements remain visible; scheduled ones use [from, until)."""
+    current = now or datetime.now()
+    start = doc.get("display_from")
+    end = doc.get("display_until")
+    try:
+        if isinstance(start, str) and start:
+            start = parse_beijing_datetime(start).replace(tzinfo=None)
+        elif isinstance(start, datetime) and start.tzinfo is not None:
+            start = start.astimezone(BEIJING_TZ).replace(tzinfo=None)
+        if isinstance(end, str) and end:
+            end = parse_beijing_datetime(end).replace(tzinfo=None)
+        elif isinstance(end, datetime) and end.tzinfo is not None:
+            end = end.astimezone(BEIJING_TZ).replace(tzinfo=None)
+    except ValueError:
+        return False
+    if current.tzinfo is not None:
+        current = current.astimezone(BEIJING_TZ).replace(tzinfo=None)
+    return (not start or current >= start) and (not end or current < end)
+
+
+_SCHOOL_NOTICE_EFFECTS = {
+    "venue_closed", "partial_closure", "reservation_system_unavailable",
+    "irrelevant", "uncertain",
+}
+_SCHOOL_NOTICE_STATUSES = {"pending_review", "confirmed", "cancelled"}
+
+
+def _review_effective_status(doc, now=None):
+    status = doc.get("status", "pending_review")
+    if status != "confirmed":
+        return status
+    try:
+        start, end = validate_pause_range(
+            doc.get("approved_pause_from"), doc.get("approved_pause_until")
+        )
+    except ValueError:
+        return "invalid"
+    current = now or datetime.now(BEIJING_TZ)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=BEIJING_TZ)
+    current = current.astimezone(BEIJING_TZ)
+    if current < start:
+        return "confirmed_upcoming"
+    if current >= end:
+        return "expired"
+    return "active"
+
+
+def _serialize_school_notice_review(doc):
+    result = {k: v for k, v in doc.items() if k != "_id"}
+    result["id"] = str(doc.get("_id", ""))
+    result["status"] = doc.get("status", "pending_review")
+    result["effective_status"] = _review_effective_status(doc)
+    result["revision"] = int(doc.get("revision", 1) or 1)
+    return result
+
+
+def _review_oid(review_id):
+    try:
+        return ObjectId(review_id)
+    except (InvalidId, TypeError):
+        return None
+
+
+def _normalize_review_range(data):
+    start_raw = data.get("pause_from") or data.get("approved_pause_from")
+    end_raw = data.get("pause_until") or data.get("approved_pause_until")
+    start, end = validate_pause_range(start_raw, end_raw)
+    return start.isoformat(timespec="minutes"), end.isoformat(timespec="minutes")
+
+
+def _school_announcement_content(review):
+    start = review.get("approved_pause_from", "")
+    end = review.get("approved_pause_until", "")
+    return "\n".join([
+        review.get("ai_summary") or "学校发布闭馆相关通知。",
+        f"暂停预约：{start}",
+        f"恢复预约：{end}",
+        "AutoLib 已拦截与该时段冲突的自动和手动预约。",
+        f"学校原文：{review.get('source_url', '')}",
+    ])
+
+
+def _publish_school_announcement(db, review):
+    now = datetime.now()
+    display_until = parse_beijing_datetime(review["approved_pause_until"]).replace(tzinfo=None)
+    ann_doc = {
+        "title": f"⚠ {review.get('source_title', '图书馆闭馆通知')}",
+        "content": _school_announcement_content(review),
+        "level": "danger",
+        "pinned": True,
+        "active": True,
+        "source_review_id": str(review["_id"]),
+        "source_url": review.get("source_url", ""),
+        "display_from": now,
+        "display_until": display_until,
+        "popup_required": True,
+        "revision": int(review.get("revision", 1) or 1),
+        "updated_at": now,
+    }
+    existing = db.announcements.find_one({"source_review_id": str(review["_id"])})
+    if existing:
+        db.announcements.update_one({"_id": existing["_id"]}, {"$set": ann_doc})
+        return existing["_id"]
+    ann_doc["created_at"] = now
+    return db.announcements.insert_one(ann_doc).inserted_id
+
+
+def _deactivate_school_announcement(db, review):
+    query = {"source_review_id": str(review["_id"])}
+    db.announcements.update_many(query, {"$set": {"active": False, "updated_at": datetime.now()}})
+
+
+def _queue_admin_status_email(subject, content):
+    try:
+        credentials = load_admin_credentials()
+        if credentials and credentials.get("email"):
+            queue_email(credentials["email"], subject, content)
+    except AdminCredentialError:
+        app.logger.error("管理员凭据损坏，无法发送学校公告状态邮件")
+
+
+def _queue_user_notice_emails(db, review):
+    emails = db.user_config_info.distinct("notify_email", {
+        "notify_email": {"$type": "string", "$ne": ""},
+    })
+    subject = f"[AutoLib] {review.get('source_title', '图书馆闭馆通知')}"
+    content = _school_announcement_content(review)
+    for email in sorted({str(value).strip() for value in emails if str(value).strip()}):
+        queue_email(email, subject, content)
+
+
+def _owned_seat_interval(target_time):
+    try:
+        date_part, time_part = str(target_time).split(" ", 1)
+        start_part, end_part = time_part.split("-", 1)
+        return f"{date_part} {start_part}", f"{date_part} {end_part}"
+    except ValueError:
+        return None
+
+
+def _find_local_reservation_conflicts(db, review):
+    start, end = validate_pause_range(
+        review.get("approved_pause_from"), review.get("approved_pause_until")
+    )
+    conflicts = []
+    cursor = db.user_config_info.find(
+        {"owned_seat": {"$exists": True, "$ne": {}}},
+        {"pid": 1, "notify_email": 1, "owned_seat": 1},
+    )
+    for cfg in cursor:
+        for seat_name, seats in (cfg.get("owned_seat") or {}).items():
+            for seat in seats or []:
+                interval = _owned_seat_interval(seat.get("target_time"))
+                if not interval:
+                    continue
+                try:
+                    begin = parse_beijing_datetime(interval[0])
+                    finish = parse_beijing_datetime(interval[1])
+                except ValueError:
+                    continue
+                if begin < end and finish > start:
+                    conflicts.append({
+                        "pid": cfg.get("pid", ""),
+                        "seat": seat_name,
+                        "target_time": seat.get("target_time", ""),
+                    })
+                    email = str(cfg.get("notify_email") or "").strip()
+                    if email:
+                        queue_email(
+                            email,
+                            "[紧急] 已有预约与学校闭馆时间冲突",
+                            "\n".join([
+                                f"学号：{cfg.get('pid', '')}",
+                                f"预约：{seat_name} {seat.get('target_time', '')}",
+                                f"闭馆：{review.get('approved_pause_from')} 至 {review.get('approved_pause_until')}",
+                                f"学校原文：{review.get('source_url', '')}",
+                                "AutoLib 不会自动取消已有预约，请人工处理。",
+                            ]),
+                        )
+    return conflicts
+
+
+def _apply_school_notice_confirmation(db, review_id, data, require_confirmed=False):
+    oid = _review_oid(review_id)
+    if not oid:
+        return None, ({"error": "无效的审核记录 ID"}, 400)
+    try:
+        expected_revision = int(data.get("expected_revision"))
+    except (TypeError, ValueError):
+        return None, ({"error": "expected_revision 必须是整数"}, 400)
+    effect_type = data.get("effect_type")
+    if effect_type not in {"venue_closed", "partial_closure"}:
+        return None, ({"error": "只有闭馆或部分闭馆规则可以启用预约拦截"}, 400)
+    try:
+        pause_from, pause_until = _normalize_review_range(data)
+    except (TypeError, ValueError) as exc:
+        return None, ({"error": str(exc)}, 400)
+    query = {"_id": oid, "revision": expected_revision}
+    if require_confirmed:
+        query["status"] = "confirmed"
+    updated = db.school_notice_reviews.find_one_and_update(
+        query,
+        {"$set": {
+            "effect_type": effect_type,
+            "affected_scope": (data.get("affected_scope") or "all_seats").strip(),
+            "approved_pause_from": pause_from,
+            "approved_pause_until": pause_until,
+            "status": "confirmed",
+            "reviewed_at": datetime.now(BEIJING_TZ).isoformat(timespec="seconds"),
+            "updated_at": datetime.now(BEIJING_TZ).isoformat(timespec="seconds"),
+        }, "$inc": {"revision": 1}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if not updated:
+        return None, ({"error": "记录已被修改，请刷新后重试", "code": "REVISION_CONFLICT"}, 409)
+
+    # 新修订确认后，旧修订不应继续拦截或展示。
+    old_reviews = list(db.school_notice_reviews.find({
+        "source_id": updated.get("source_id"),
+        "_id": {"$ne": updated["_id"]},
+        "status": "confirmed",
+    }))
+    for old in old_reviews:
+        db.school_notice_reviews.update_one(
+            {"_id": old["_id"]},
+            {"$set": {"status": "cancelled", "cancel_reason": "superseded", "updated_at": datetime.now(BEIJING_TZ).isoformat(timespec="seconds")}},
+        )
+        _deactivate_school_announcement(db, old)
+
+    announcement_id = _publish_school_announcement(db, updated)
+    conflicts = _find_local_reservation_conflicts(db, updated)
+    db.school_notice_reviews.update_one(
+        {"_id": updated["_id"]},
+        {"$set": {
+            "announcement_id": str(announcement_id),
+            "existing_reservation_conflicts": conflicts,
+        }},
+    )
+    updated["announcement_id"] = str(announcement_id)
+    updated["existing_reservation_conflicts"] = conflicts
+    _queue_user_notice_emails(db, updated)
+    _queue_admin_status_email(
+        f"[已启用] {updated.get('source_title', '图书馆闭馆通知')}",
+        _school_announcement_content(updated)
+        + (f"\n\n发现 {len(conflicts)} 条已有预约冲突，请人工处理。" if conflicts else ""),
+    )
+    return updated, None
 
 
 # ==================== App version ====================
@@ -1144,12 +1445,102 @@ def admin_set_app_version():
 def list_announcements():
     """Public list of active announcements — visible to guests and logged-in users."""
     client, db = get_db()
-    docs = list(
+    docs = [doc for doc in
         db.announcements.find({"active": True})
         .sort([("pinned", DESCENDING), ("created_at", DESCENDING)])
-    )
+        if _announcement_visible(doc)
+    ]
     client.close()
     return jsonify([_serialize_announcement(d) for d in docs]), 200
+
+
+@app.route("/api/admin/school_notice_reviews", methods=["GET"])
+@admin_required
+def admin_list_school_notice_reviews():
+    client, db = get_db()
+    docs = list(db.school_notice_reviews.find({}).sort("created_at", DESCENDING))
+    client.close()
+    return jsonify([_serialize_school_notice_review(doc) for doc in docs]), 200
+
+
+@app.route("/api/admin/school_notice_reviews/<review_id>", methods=["GET"])
+@admin_required
+def admin_get_school_notice_review(review_id):
+    oid = _review_oid(review_id)
+    if not oid:
+        return jsonify({"error": "无效的审核记录 ID"}), 400
+    client, db = get_db()
+    doc = db.school_notice_reviews.find_one({"_id": oid})
+    client.close()
+    if not doc:
+        return jsonify({"error": "审核记录不存在"}), 404
+    return jsonify(_serialize_school_notice_review(doc)), 200
+
+
+@app.route("/api/admin/school_notice_reviews/<review_id>/confirm", methods=["POST"])
+@admin_required
+def admin_confirm_school_notice_review(review_id):
+    data = request.get_json(silent=True) or {}
+    client, db = get_db()
+    try:
+        updated, error = _apply_school_notice_confirmation(db, review_id, data)
+        if error:
+            payload, status = error
+            return jsonify(payload), status
+        return jsonify(_serialize_school_notice_review(updated)), 200
+    finally:
+        client.close()
+
+
+@app.route("/api/admin/school_notice_reviews/<review_id>", methods=["PUT"])
+@admin_required
+def admin_update_school_notice_review(review_id):
+    data = request.get_json(silent=True) or {}
+    client, db = get_db()
+    try:
+        updated, error = _apply_school_notice_confirmation(
+            db, review_id, data, require_confirmed=True
+        )
+        if error:
+            payload, status = error
+            return jsonify(payload), status
+        return jsonify(_serialize_school_notice_review(updated)), 200
+    finally:
+        client.close()
+
+
+@app.route("/api/admin/school_notice_reviews/<review_id>/cancel", methods=["POST"])
+@admin_required
+def admin_cancel_school_notice_review(review_id):
+    oid = _review_oid(review_id)
+    if not oid:
+        return jsonify({"error": "无效的审核记录 ID"}), 400
+    data = request.get_json(silent=True) or {}
+    try:
+        expected_revision = int(data.get("expected_revision"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "expected_revision 必须是整数"}), 400
+    client, db = get_db()
+    try:
+        updated = db.school_notice_reviews.find_one_and_update(
+            {"_id": oid, "revision": expected_revision},
+            {"$set": {
+                "status": "cancelled",
+                "cancel_reason": (data.get("reason") or "管理员取消").strip(),
+                "updated_at": datetime.now(BEIJING_TZ).isoformat(timespec="seconds"),
+            }, "$inc": {"revision": 1}},
+            return_document=ReturnDocument.AFTER,
+        )
+        if not updated:
+            return jsonify({"error": "记录已被修改，请刷新后重试", "code": "REVISION_CONFLICT"}), 409
+        _deactivate_school_announcement(db, updated)
+        _queue_admin_status_email(
+            f"[已取消] {updated.get('source_title', '图书馆闭馆通知')}",
+            f"预约暂停规则已取消。\n学校原文：{updated.get('source_url', '')}",
+        )
+        return jsonify(_serialize_school_notice_review(updated)), 200
+    finally:
+        client.close()
 
 
 @app.route("/api/admin/announcements", methods=["GET"])

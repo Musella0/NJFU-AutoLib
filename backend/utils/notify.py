@@ -7,12 +7,21 @@
 import os
 import logging
 import smtplib
+import time
+from concurrent.futures import ThreadPoolExecutor
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 import requests
 
 logger = logging.getLogger(__name__)
+
+# 抢座改成并发之后，几十封结果邮件会在同一秒里发出去，而 Resend 免费额度是
+# 每秒 2 封，超出的直接被丢掉。单线程队列既做串行化又做限流，抢座线程只投递
+# 不等待，不会因为发信被拖慢——发信慢一点无所谓，抢座慢一秒座位就没了。
+NOTIFY_MIN_INTERVAL = float(os.getenv("NOTIFY_MIN_INTERVAL", "0.6"))
+_notify_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="notify")
+_last_sent_at = 0.0
 
 # SMTP 配置（从环境变量读取，管理员统一配置）
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.qq.com")
@@ -95,9 +104,28 @@ def send_email(to_addr: str, subject: str, content: str) -> bool:
         return False
 
 
+def _send_paced(to_addr: str, subject: str, content: str) -> None:
+    """队列 worker：两封之间至少隔 NOTIFY_MIN_INTERVAL 秒。单线程独占，无需加锁。"""
+    global _last_sent_at
+    wait = NOTIFY_MIN_INTERVAL - (time.monotonic() - _last_sent_at)
+    if wait > 0:
+        time.sleep(wait)
+    try:
+        send_email(to_addr, subject, content)
+    except Exception as exc:
+        logger.error("通知发送异常: %s", exc)
+    finally:
+        _last_sent_at = time.monotonic()
+
+
+def queue_email(to_addr: str, subject: str, content: str):
+    """Queue a paced email and return the Future for optional observation."""
+    return _notify_pool.submit(_send_paced, to_addr, subject, content)
+
+
 def notify_user(user_config: dict, title: str, content: str) -> None:
     """
-    根据用户配置发送通知
+    根据用户配置发送通知（异步投递，不阻塞调用方）
 
     Args:
         user_config: 用户配置字典
@@ -108,4 +136,4 @@ def notify_user(user_config: dict, title: str, content: str) -> None:
     if not email:
         logger.info(f"用户 {user_config.get('pid', '?')} 未配置通知邮箱，跳过通知")
         return
-    send_email(email, title, content)
+    queue_email(email, title, content)

@@ -5,8 +5,9 @@
 预约完成后自动启动迟到保护服务。
 
 环境变量:
-  SCHEDULE_HOUR   - 预约执行的小时 (默认 7)
-  SCHEDULE_MINUTE - 预约执行的分钟 (默认 0)
+  SCHEDULE_HOUR         - 预约执行的小时 (默认 7)
+  SCHEDULE_MINUTE       - 预约执行的分钟 (默认 0)
+  RESERVE_CONCURRENCY   - 抢座并发度 (默认 8)
 """
 
 import os
@@ -46,6 +47,15 @@ def run_arrival_check():
         process_due_arrival_checks()
     except Exception as e:
         logger.error(f"到馆复查异常: {e}", exc_info=True)
+
+
+def run_school_notice_check():
+    """20:00 检查学校公告；20:05/20:15 只在前次失败时继续。"""
+    try:
+        from utils.school_notice_monitor import run_school_notice_scan
+        run_school_notice_scan()
+    except Exception as e:
+        logger.error(f"学校公告检查异常: {e}", exc_info=True)
 
 def run_reservation_task():
     """执行一次完整的预约 + 迟到保护流程"""
@@ -102,6 +112,16 @@ def main():
         hour='8,10,12,14,16,18,20,22',
         minute=0,
         id='visit_check',
+        replace_existing=True
+    )
+    scheduler.add_job(
+        run_school_notice_check,
+        'cron',
+        hour=20,
+        minute='0,5,15',
+        id='school_notice_check',
+        coalesce=True,
+        max_instances=1,
         replace_existing=True
     )
 

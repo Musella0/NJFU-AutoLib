@@ -1,4 +1,22 @@
+import os
+
 import  requests
+
+# (连接超时, 读取超时)，单位秒。requests 默认不设超时，一个不响应的上游
+# 能把调用线程永久挂住；并发抢座时几条线程一起卡死，线程池 join 不完，
+# 当天的定时任务就再也结束不了，后面几天的抢座也跟着停摆。
+CONNECT_TIMEOUT = float(os.getenv("HTTP_CONNECT_TIMEOUT", "10"))
+READ_TIMEOUT = float(os.getenv("HTTP_READ_TIMEOUT", "30"))
+DEFAULT_TIMEOUT = (CONNECT_TIMEOUT, READ_TIMEOUT)
+
+
+class TimeoutSession(requests.Session):
+    """给每个请求兜一个默认超时；显式传了 timeout 的调用仍按自己的值走。"""
+
+    def request(self, *args, **kwargs):
+        kwargs.setdefault("timeout", DEFAULT_TIMEOUT)
+        return super().request(*args, **kwargs)
+
 
 def log(*args):
     """
@@ -20,7 +38,7 @@ class BaseSystem:
         :param base_url: 基础 URL
         :param vpn_suffix: VPN 后缀
         """
-        self.session = requests.Session()
+        self.session = TimeoutSession()
         self.username = username
         self.password = password
         self.base_url = base_url
