@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="primary">#FF5C3A</color>
+    <color name="primary_variant">#E84A2A</color>
+    <color name="on_primary">#FFFFFF</color>
+    <color name="background">#FAFAF7</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="surface_alt">#F3F1EA</color>
+    <color name="text_primary">#1D1D1F</color>
+    <color name="text_secondary">#4A4A4F</color>
+    <color name="text_muted">#8A8A90</color>
+    <color name="success">#10B981</color>
+    <color name="success_soft">#EAF9F3</color>
+    <color name="danger">#E11D48</color>
+    <color name="danger_soft">#FDECF0</color>
+    <color name="tomorrow">#3B82F6</color>
+    <color name="tomorrow_soft">#EEF5FF</color>
+    <color name="accent_soft">#FFF1ED</color>
+    <color name="stroke">#2A2A2C</color>
+    <color name="stroke_muted">#C7C7CC</color>
+    <!-- 学习热力图 5 档，与网页端 heat0..heat4 变量对应 -->
+    <color name="heat0">#EFECE3</color>
+    <color name="heat1">#3DFF5C3A</color>
+    <color name="heat2">#73FF5C3A</color>
+    <color name="heat3">#B3FF5C3A</color>
+    <color name="heat4">#FF5C3A</color>
+</resources>
