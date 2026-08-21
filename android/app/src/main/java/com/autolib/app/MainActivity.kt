@@ -3,10 +3,12 @@ package com.autolib.app
 import android.annotation.SuppressLint
 import android.appwidget.AppWidgetManager
 import android.content.ComponentName
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -55,6 +57,8 @@ class MainActivity : AppCompatActivity() {
     private var tomorrowReservation: JSONObject? = null
     private var currentPage = PAGE_HOME
     private var tomorrowEditorOpen = false
+    private var schoolNoticeCheckInFlight = false
+    private var schoolNoticeDialogShowing = false
 
     /** 配置页当前控件的取值器；离开配置页时为 null。 */
     private var collectConfigBody: (() -> JSONObject)? = null
@@ -98,16 +102,64 @@ class MainActivity : AppCompatActivity() {
      * 再弹是骚扰，设置页的开关仍然可以手动打开。
      */
     private fun setupNotifications() {
-        if (!ReservationAlarm.isEnabled(this)) return
+        SchoolAnnouncementAlarm.schedule(this)
         if (ReservationSync.hasPermission(this)) {
             ReservationSync.ensureChannel(this)
-            ReservationAlarm.schedule(this)
+            SchoolAnnouncementSync.ensureChannel(this)
+            if (ReservationAlarm.isEnabled(this)) ReservationAlarm.schedule(this)
             return
         }
         val prefs = getPreferences(MODE_PRIVATE)
         if (prefs.getBoolean(PREF_NOTIFY_ASKED, false)) return
         prefs.edit().putBoolean(PREF_NOTIFY_ASKED, true).apply()
         requestNotificationPermission()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        checkSchoolAnnouncements()
+    }
+
+    private fun checkSchoolAnnouncements() {
+        if (schoolNoticeCheckInFlight || schoolNoticeDialogShowing) return
+        schoolNoticeCheckInFlight = true
+        api.get("/api/announcements") { response ->
+            schoolNoticeCheckInFlight = false
+            val announcements = response.jsonArray ?: return@get
+            SchoolAnnouncementSync.notifyNew(this, announcements)
+            val item = SchoolAnnouncementSync.firstUndismissed(this, announcements) ?: return@get
+            showSchoolNoticeDialog(item)
+        }
+    }
+
+    private fun showSchoolNoticeDialog(item: JSONObject) {
+        if (schoolNoticeDialogShowing || isFinishing || isDestroyed) return
+        schoolNoticeDialogShowing = true
+        val sourceUrl = item.optString("source_url")
+        val message = buildString {
+            append(item.optString("content"))
+            val from = item.optString("display_from")
+            val until = item.optString("display_until")
+            if (from.isNotBlank() && until.isNotBlank()) {
+                append("\n\n预约暂停时段：\n$from 至 $until")
+            }
+        }
+        val builder = AlertDialog.Builder(this)
+            .setTitle(item.optString("title").ifBlank { "图书馆闭馆公告" })
+            .setMessage(message)
+            .setCancelable(false)
+            .setPositiveButton("永久关闭本条提示") { _, _ ->
+                SchoolAnnouncementSync.dismissPopup(this, item)
+            }
+        if (sourceUrl.startsWith("https://") || sourceUrl.startsWith("http://")) {
+            builder.setNeutralButton("查看学校原文") { _, _ ->
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(sourceUrl)))
+            }
+        }
+        builder.create().apply {
+            setOnDismissListener { schoolNoticeDialogShowing = false }
+            show()
+        }
     }
 
     override fun onNewIntent(intent: android.content.Intent?) {
@@ -1303,6 +1355,15 @@ class MainActivity : AppCompatActivity() {
             addView(action("迟到保护是什么？") { showLateProtectionInfo() })
             addView(action("午休是什么？") { showNapInfo() })
         }))
+        host.addView(cardBlock("联系方式", vertical(0).apply {
+            addView(text("遇到 bug、想加功能，或者预约异常，都可以发邮件找我。", 12)
+                .apply { setTextColor(color(R.color.text_muted)) })
+            addView(text(CONTACT_EMAIL, 15, true))
+            addView(horizontal().apply {
+                addView(action("发邮件", 1f, accent = true) { sendContactMail() })
+                addView(action("复制邮箱", 1f) { copyContactEmail() })
+            })
+        }))
 
         if (loggedIn()) {
             host.addView(section("其他"))
@@ -1558,6 +1619,8 @@ class MainActivity : AppCompatActivity() {
         val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
         if (granted) {
             ReservationSync.ensureChannel(this)
+            SchoolAnnouncementSync.ensureChannel(this)
+            SchoolAnnouncementAlarm.schedule(this)
             ReservationAlarm.setEnabled(this, true)
             toast("已开启，${ReservationAlarm.describe()}")
         } else {
@@ -1605,6 +1668,23 @@ class MainActivity : AppCompatActivity() {
         // 没有浏览器时直接 startActivity 会抛 ActivityNotFoundException
         if (intent.resolveActivity(packageManager) != null) startActivity(intent)
         else toast("没有可用的浏览器，请手动访问：$url")
+    }
+
+    private fun copyContactEmail() {
+        val clipboard = getSystemService(android.content.ClipboardManager::class.java)
+        if (clipboard == null) return toast("复制失败，邮箱：$CONTACT_EMAIL")
+        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("AutoLib 反馈邮箱", CONTACT_EMAIL))
+        // Android 13 起系统自己会弹复制提示，再 toast 一次就重了
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) toast("已复制：$CONTACT_EMAIL")
+    }
+
+    private fun sendContactMail() {
+        val intent = android.content.Intent(android.content.Intent.ACTION_SENDTO, android.net.Uri.parse("mailto:$CONTACT_EMAIL")).apply {
+            putExtra(android.content.Intent.EXTRA_SUBJECT, "AutoLib 反馈（${BuildConfig.VERSION_NAME}）")
+        }
+        // 没装邮件客户端的机器不少，退回复制比崩掉强
+        if (intent.resolveActivity(packageManager) != null) startActivity(intent)
+        else copyContactEmail()
     }
 
     private fun checkUpdateManually() {
@@ -2202,6 +2282,8 @@ class MainActivity : AppCompatActivity() {
         /** 预约结果的复用窗口：切页返回不再重查，超过才自动刷新。 */
         private const val RESERVATION_TTL_MS = 3 * 60 * 1000L
         private const val PREF_THEME = "theme"
+        /** 反馈邮箱：以前只写在公告里，公告过期就没人找得到了。 */
+        private const val CONTACT_EMAIL = "msl0314_1@proton.me"
         private const val THEME_SYSTEM = "system"
         private const val THEME_LIGHT = "light"
         private const val THEME_DARK = "dark"

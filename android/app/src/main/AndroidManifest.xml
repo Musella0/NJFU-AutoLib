@@ -7,6 +7,19 @@
     <!-- AlarmManager 的排程不跨重启，开机后要重新设置 -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!-- Android 11+ 的包可见性：不声明这些，resolveActivity 一律返回 null，
+         「发邮件」和更新下载会误判成「没有可用应用」而白白退化。 -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.SENDTO" />
+            <data android:scheme="mailto" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
+        </intent>
+    </queries>
+
     <application
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
@@ -31,6 +44,14 @@
             android:exported="false">
             <intent-filter>
                 <action android:name="com.autolib.app.CHECK_RESERVATION" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".SchoolAnnouncementReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.autolib.app.CHECK_SCHOOL_ANNOUNCEMENTS" />
             </intent-filter>
         </receiver>
 
