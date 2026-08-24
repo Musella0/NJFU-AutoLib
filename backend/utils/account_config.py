@@ -15,6 +15,13 @@ DEFAULT_WEEK_SEGMENTS = {
     "7": ["08:00-22:00"],
 }
 
+CLIENT_SENSITIVE_FIELDS = {
+    "_id",
+    "web_password",
+    "vpn_password",
+    "lib_password",
+}
+
 
 def default_time_config() -> Dict[str, Any]:
     """Return an independent copy of the UI's default weekly schedule."""
@@ -31,6 +38,14 @@ def default_account_config() -> Dict[str, Any]:
         "late_protection": "False",
         "priority": 0,
     }
+
+
+def account_config_for_client(document: Dict[str, Any]) -> Dict[str, Any]:
+    """Return an independent account document with all credentials removed."""
+    public_document = deepcopy(document)
+    for field in CLIENT_SENSITIVE_FIELDS:
+        public_document.pop(field, None)
+    return public_document
 
 
 def _updated_at(document: Dict[str, Any]) -> datetime:

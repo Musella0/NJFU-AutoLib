@@ -14,7 +14,7 @@ from bson.errors import InvalidId
 from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
 from utils import config
-from utils.account_config import default_account_config
+from utils.account_config import account_config_for_client, default_account_config
 from utils.admin_credentials import (
     AdminCredentialError,
     load_credentials as load_admin_credentials,
@@ -522,18 +522,18 @@ def get_my_accounts():
 @app.route("/api/my/accounts/<pid>", methods=["GET"])
 @own_account_required
 def get_my_account(pid):
-    """Get single account config (with passwords, for editing)"""
+    """Get a single account configuration without stored credentials."""
     client, db = get_db()
     cfg = db.user_config_info.find_one(
         _account_filter(pid),
-        {"_id": 0, "web_password": 0, "lib_password": 0},
+        {"_id": 0, "web_password": 0, "vpn_password": 0, "lib_password": 0},
     )
     client.close()
     if not cfg:
         return jsonify({}), 200
-    # 解密敏感字段返回前端
-    if cfg.get("vpn_password"):
-        cfg["vpn_password"] = _dec(cfg["vpn_password"])
+    # Defense in depth: never serialize credentials even if the DB projection
+    # is changed or bypassed in a future refactor.
+    cfg = account_config_for_client(cfg)
     if isinstance(cfg.get("updated_at"), datetime):
         cfg["updated_at"] = cfg["updated_at"].strftime("%Y-%m-%d %H:%M:%S")
     return jsonify(cfg), 200

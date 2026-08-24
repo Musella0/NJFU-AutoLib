@@ -417,8 +417,8 @@ function renderConfig(){
   $('cfg-toggle-lp').classList.toggle('on', cfg.late_protection === 'True');
   $('cfg-toggle-nap').classList.toggle('on', !!(state.napConfig && state.napConfig.auto_daily));
 
-  // Unified identity credential
-  $('cfg-vpn').value = cfg.vpn_password || '';
+  // Stored credentials are never returned by the API or kept in page state.
+  $('cfg-vpn').value = '';
 
   $('cfg-pid-label').textContent = cfg.pid;
   $('cfg-verify-badge').textContent = cfg.verified ? '✓ 已验证' : '⚠ 未验证';
@@ -790,7 +790,7 @@ async function verifyAndSaveCfg(){
     toast('验证成功，但浏览器未保存登录状态，请启用 Cookie 后重试','error');
     return;
   }
-  state.currentCfg.vpn_password = vpn;
+  $('cfg-vpn').value = '';
   state.currentCfg.verified = true;
   $('cfg-verify-badge').textContent = '✓ 已验证';
   $('cfg-verify-badge').className = 'pill ok';
@@ -864,7 +864,7 @@ function showReserveResult(msg, success){
   if(success){
     const time = (msg.match(/(\d{2}:\d{2})-(\d{2}:\d{2})/) || []);
     const timeStr = time[1] ? `${time[1]} – ${time[2]}` : '';
-    // 新格式：✅ 姓名 · 08-08 · 08:30-22:00 · 3F-C109 · 预约成功；旧格式：… 新增成功 三层C区 3F-C109
+    // 新格式：✅ 08-08 · 08:30-22:00 · 3F-C109 · 预约成功；旧格式：… 新增成功 三层C区 3F-C109
     const locMatch = msg.match(/(\d+F-[A-Z]\d+)/) || msg.match(/新增成功\s+(.+)$/);
     const loc = locMatch ? locMatch[1].trim() : '';
     body = `

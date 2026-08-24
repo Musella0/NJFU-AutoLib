@@ -379,7 +379,7 @@ def reservation(res_item: Dict[str, Any]) -> None:
                 if "成功" in res_message or "预约成功" in res_message:
                     log_with_user(logger, 'info', pid, '预约结果', f"{seg_label} 成功: {res_message}")
                     any_success = True
-                    # res_message 已是「✅ 姓名 · 08-08 · 08:30-22:00 · 3F-C109 · 预约成功」格式
+                    # res_message 已是「✅ 08-08 · 08:30-22:00 · 3F-C109 · 预约成功」格式
                     segment_results.append(res_message)
                     if user_info:
                         library.insert_or_update_mongo(

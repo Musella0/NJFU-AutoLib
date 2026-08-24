@@ -43,6 +43,7 @@ from utils.library_system import (
     LibraryCredentialsError,
     LibraryLoginError,
     LibrarySystem,
+    _is_transient_login_error,
     register_arrival_check,
 )
 from scheduled_task import check_arrival_after_grace
@@ -96,6 +97,53 @@ class LibraryLoginErrorTests(unittest.TestCase):
         self.assertEqual(str(raised.exception), "登录请求失败：HTTP 503")
 
 
+class LibraryLoginRetryTests(unittest.TestCase):
+    def make_library(self):
+        library = LibrarySystem.__new__(LibrarySystem)
+        library.username = "12345678"
+        library.user_info = None
+        return library
+
+    def test_system_busy_is_retried_with_exponential_delay(self):
+        library = self.make_library()
+        attempts = iter([False, False, True])
+
+        def login():
+            result = next(attempts)
+            if not result:
+                library._sso_error = "SSO后仍未登录: 系统繁忙，请稍后重试"
+            return result
+
+        library._login_via_cas_sso = Mock(side_effect=login)
+
+        with patch("utils.library_system.LIBRARY_LOGIN_MAX_ATTEMPTS", 3), \
+             patch("utils.library_system.LIBRARY_LOGIN_RETRY_DELAY_SECONDS", 2), \
+             patch("utils.library_system.time.sleep") as sleep:
+            library._initialize_login()
+
+        self.assertEqual(library._login_via_cas_sso.call_count, 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 4])
+
+    def test_permanent_sso_error_falls_back_without_retry(self):
+        library = self.make_library()
+        library._login_via_cas_sso = Mock(return_value=False)
+        library._sso_error = "SSO入口参数无效"
+        library._get_initial_cookie = Mock(return_value=False)
+
+        with patch("utils.library_system.LIBRARY_LOGIN_MAX_ATTEMPTS", 3), \
+             patch("utils.library_system.time.sleep") as sleep:
+            with self.assertRaisesRegex(Exception, "SSO入口参数无效"):
+                library._initialize_login()
+
+        library._login_via_cas_sso.assert_called_once_with()
+        sleep.assert_not_called()
+
+    def test_transient_error_classifier(self):
+        self.assertTrue(_is_transient_login_error("系统繁忙，请稍后重试"))
+        self.assertTrue(_is_transient_login_error("SSO跳转返回HTTP 503"))
+        self.assertFalse(_is_transient_login_error("用户名或密码错误"))
+
+
 class ArrivalCheckRegistrationTests(unittest.TestCase):
     @patch("utils.library_system.register_arrival_check")
     def test_success_response_registers_arrival_check(self, register):
@@ -122,7 +170,8 @@ class ArrivalCheckRegistrationTests(unittest.TestCase):
             "2026-08-17 22:00:00",
         )
 
-        self.assertIn("预约成功", result)
+        self.assertEqual(result, "✅ 08-17 · 08:00-22:00 · 2F-A001 · 预约成功")
+        self.assertNotIn("测试用户", result)
         register.assert_called_once_with(
             "12345678",
             "reservation-uuid",

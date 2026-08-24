@@ -2,6 +2,7 @@ import unittest
 from datetime import datetime, timedelta
 
 from utils.account_config import (
+    account_config_for_client,
     default_account_config,
     default_time_config,
     merge_account_documents,
@@ -103,6 +104,26 @@ class AccountConfigTests(unittest.TestCase):
             merged["owned_seat"]["2F-A001"][0]["uuid"],
             "existing",
         )
+
+    def test_client_config_excludes_all_stored_credentials(self):
+        stored = {
+            "_id": "database-id",
+            "pid": "123",
+            "seat_list": ["二楼A区001"],
+            "web_password": "web-secret",
+            "vpn_password": "encrypted-vpn-secret",
+            "lib_password": "encrypted-library-secret",
+        }
+
+        public = account_config_for_client(stored)
+
+        self.assertEqual(public["pid"], "123")
+        self.assertEqual(public["seat_list"], ["二楼A区001"])
+        self.assertNotIn("_id", public)
+        self.assertNotIn("web_password", public)
+        self.assertNotIn("vpn_password", public)
+        self.assertNotIn("lib_password", public)
+        self.assertIn("vpn_password", stored)
 
 
 if __name__ == "__main__":

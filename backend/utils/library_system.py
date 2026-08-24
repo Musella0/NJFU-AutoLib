@@ -21,6 +21,7 @@
 
 from datetime import datetime, timedelta
 import html
+import os
 import re
 from typing import Dict, List, Optional, Tuple, Any, Union
 from urllib.parse import urljoin, urlparse
@@ -39,6 +40,37 @@ from utils.vpn_system import VPNSystem
 logger = logging.getLogger(__name__)
 
 ARRIVAL_CHECK_DELAY_MINUTES = 32
+LIBRARY_LOGIN_MAX_ATTEMPTS = max(
+    1, int(os.getenv("LIBRARY_LOGIN_MAX_ATTEMPTS", "3"))
+)
+LIBRARY_LOGIN_RETRY_DELAY_SECONDS = max(
+    0.0, float(os.getenv("LIBRARY_LOGIN_RETRY_DELAY_SECONDS", "2"))
+)
+
+
+def _is_transient_login_error(message: str) -> bool:
+    """判断图书馆登录失败是否适合在短时间内自动重试。"""
+    normalized = message.lower().replace(" ", "")
+    markers = (
+        "系统繁忙",
+        "稍后重试",
+        "超时",
+        "timeout",
+        "timedout",
+        "连接失败",
+        "connection",
+        "remotedisconnected",
+        "nameresolution",
+        "resolve",
+        "dns",
+        "temporarilyunavailable",
+        "http429",
+        "http500",
+        "http502",
+        "http503",
+        "http504",
+    )
+    return any(marker in normalized for marker in markers)
 
 
 class LibraryLoginError(Exception):
@@ -463,10 +495,27 @@ class LibrarySystem(BaseSystem):
         图书馆密码。若 SSO 失败，则保留旧版 RSA 密码登录作为
         兼容回退，并在最终异常中同时报告两条路径的失败原因。
         """
-        if self._login_via_cas_sso():
-            return
+        sso_error = "未知错误"
+        for attempt in range(1, LIBRARY_LOGIN_MAX_ATTEMPTS + 1):
+            if self._login_via_cas_sso():
+                return
 
-        sso_error = getattr(self, "_sso_error", "未知错误")
+            sso_error = getattr(self, "_sso_error", "未知错误")
+            should_retry = (
+                attempt < LIBRARY_LOGIN_MAX_ATTEMPTS
+                and _is_transient_login_error(sso_error)
+            )
+            if not should_retry:
+                break
+
+            delay = LIBRARY_LOGIN_RETRY_DELAY_SECONDS * (2 ** (attempt - 1))
+            log_with_user(
+                'warning',
+                self.username,
+                'CAS登录重试',
+                f"第{attempt}次登录失败（{sso_error}），{delay:g}秒后重试",
+            )
+            time.sleep(delay)
 
         try:
             if not self._get_initial_cookie():
@@ -729,8 +778,7 @@ class LibrarySystem(BaseSystem):
                 dev_info = (success_info.get('resvDevInfoList') or [{}])[0]
                 actual_seat_name = dev_info.get('devName') or seat_name
                 success_msg = (
-                    f"✅ {success_info.get('resvName') or self.username} · "
-                    f"{resv_begin_time[5:10]} · "
+                    f"✅ {resv_begin_time[5:10]} · "
                     f"{resv_begin_time[11:16]}-{resv_end_time[11:16]} · "
                     f"{actual_seat_name} · 预约成功"
                 )
