@@ -47,6 +47,13 @@ LIBRARY_LOGIN_RETRY_DELAY_SECONDS = max(
     0.0, float(os.getenv("LIBRARY_LOGIN_RETRY_DELAY_SECONDS", "2"))
 )
 
+# 会话有效性校验的超时。这个请求跑在 7:00:00 的关键路径上，卡住比失败更糟——
+# 失败只是回退到现场登录，卡住会把整个抢座窗口拖没，所以给得比默认超时紧得多。
+SESSION_VERIFY_TIMEOUT = (
+    float(os.getenv("SESSION_VERIFY_CONNECT_TIMEOUT", "3")),
+    float(os.getenv("SESSION_VERIFY_READ_TIMEOUT", "5")),
+)
+
 
 def _is_transient_login_error(message: str) -> bool:
     """判断图书馆登录失败是否适合在短时间内自动重试。"""
@@ -550,6 +557,41 @@ class LibrarySystem(BaseSystem):
         if not self.user_info:
             self._initialize_login()
         return self.user_info
+
+    def verify_session(self) -> bool:
+        """
+        轻量校验当前会话在服务端是否仍然有效。
+
+        ensure_login() 只看本地的 self.user_info 有没有值，判断不了服务端那边
+        会话是不是已经过期。预登录会话要放上十分钟，用前必须真的问一次。
+
+        Returns:
+            bool: 会话有效返回 True；顺带刷新 user_info 和 cookie。
+        """
+        try:
+            resp = self.session.get(
+                f"{self.base_url}ic-web/auth/userInfo{self.vpn_suffix}",
+                timeout=SESSION_VERIFY_TIMEOUT,
+            )
+            if resp.status_code != 200:
+                log_with_user('warning', self.username, '会话校验',
+                              f"userInfo 返回 HTTP {resp.status_code}")
+                return False
+
+            result = resp.json()
+            if result.get("code") != 0 or not result.get("data"):
+                log_with_user('warning', self.username, '会话校验',
+                              f"会话已失效: {result.get('message', '未知错误')}")
+                return False
+
+            user_info = result["data"]
+            self._set_user_cookie(user_info)
+            self.user_info = user_info
+            return True
+
+        except Exception as e:
+            log_with_user('warning', self.username, '会话校验', f"校验会话异常: {str(e)}")
+            return False
 
     def _get_initial_cookie(self) -> bool:
         """

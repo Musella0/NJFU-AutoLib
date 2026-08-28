@@ -47,6 +47,7 @@ from utils.vpn_system import VPNSystem
 from utils.library_system import LibrarySystem
 from utils.notify import notify_user
 from utils.crypto import decrypt as _dec
+from utils import prelogin
 from utils import config
 from utils.reservation_blackout import find_any_reservation_conflict, find_reservation_conflict
 
@@ -356,12 +357,19 @@ def reservation(res_item: Dict[str, Any]) -> None:
             return
 
         # 初始化图书馆系统（多段共享同一会话）
-        log_with_user(logger, 'info', pid, '系统初始化', "开始初始化图书馆系统")
-        library = LibrarySystem(
-            username=pid,
-            password=vpn_password,
-            vpn_password=vpn_password
-        )
+        # 优先复用预登录好的会话：webvpn + CAS 那 4~8 秒已经在 6:50 付过了，
+        # 这里直接就能发预约请求。取不到（没预登录、会话过期、校验失败）
+        # 就照旧现场登录，行为与加这个功能之前完全一致。
+        library = prelogin.take(pid)
+        if library is not None:
+            log_with_user(logger, 'info', pid, '系统初始化', "复用预登录会话")
+        else:
+            log_with_user(logger, 'info', pid, '系统初始化', "开始初始化图书馆系统")
+            library = LibrarySystem(
+                username=pid,
+                password=vpn_password,
+                vpn_password=vpn_password
+            )
 
         # 逐段预约
         any_success = False
@@ -429,6 +437,96 @@ def _run_reservation_safely(res_item: Dict[str, Any]) -> None:
         log_with_user(logger, 'error', pid, '预约异常', f"预约线程异常: {exc}")
 
 
+def _prelogin_one(res_item: Dict[str, Any]) -> None:
+    """
+    给单个账号提前建好登录会话。
+
+    失败只写日志、不通知用户——预登录是纯粹的加速手段，失败的后果仅仅是
+    这个账号 7:00 时退回现场登录，跟没有这个功能时一模一样。
+    """
+    pid = res_item["pid"]
+    try:
+        vpn_password = _dec(res_item["vpn_password"])
+        library = LibrarySystem(
+            username=pid,
+            password=vpn_password,
+            vpn_password=vpn_password
+        )
+        prelogin.store(pid, library)
+        log_with_user(logger, 'info', pid, '预登录', "预登录成功，会话已就绪")
+    except Exception as exc:
+        prelogin.discard(pid)
+        log_with_user(logger, 'warning', pid, '预登录',
+                      f"预登录失败，抢座时将回退到现场登录: {exc}")
+
+
+def _collect_dead_sessions(active_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    并发校验池中会话，返回需要重新登录的账号。
+
+    必须并发：单次校验最坏要等满超时，串行校验 N 个账号可能一路拖到 7:00
+    之后，反而把抢座窗口吃掉。
+    """
+    workers = max(1, min(RESERVE_CONCURRENCY, len(active_list)))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="prelogin-check") as pool:
+        alive = list(pool.map(lambda item: prelogin.is_alive(item['pid']), active_list))
+    return [item for item, ok in zip(active_list, alive) if not ok]
+
+
+def process_prelogin(refresh: bool = False) -> None:
+    """
+    提前完成登录，把 webvpn + CAS 的 4~8 秒挪出抢座窗口。
+
+    图书馆 7:00 才开放预约，但认证接口全天可用，所以登录可以提前跑。
+    真正的 reserve 请求仍然等到 7:00 才发，这条没有变。
+
+    分两次执行：
+    - 抢座前 10 分钟：全量预登录
+    - 抢座前 30 秒：只复查，把已经失效的会话重登一遍（这时候重登还来得及）
+
+    Args:
+        refresh: True 表示复查模式，只处理会话已失效的账号
+    """
+    if not prelogin.ENABLED:
+        return
+
+    stage = '预登录复查' if refresh else '预登录'
+    try:
+        active_list = get_all_active_reservations()
+    except Exception as exc:
+        log_with_user(logger, 'warning', '系统', stage, f"读取预约列表失败，跳过预登录: {exc}")
+        return
+
+    if not active_list:
+        log_with_user(logger, 'info', '系统', stage, "没有正在预约中的记录，跳过预登录")
+        return
+
+    if refresh:
+        pending = _collect_dead_sessions(active_list)
+        if not pending:
+            log_with_user(logger, 'info', '系统', stage,
+                          f"{len(active_list)} 个预登录会话全部有效")
+            return
+        log_with_user(logger, 'info', '系统', stage,
+                      f"{len(pending)}/{len(active_list)} 个会话已失效，重新登录")
+    else:
+        # 全量预登录前先清干净，避免上一轮的残留会话被当成新鲜的。
+        prelogin.clear()
+        pending = active_list
+        log_with_user(logger, 'info', '系统', stage, f"开始预登录，共 {len(pending)} 个账号")
+
+    started = time.time()
+    workers = max(1, min(RESERVE_CONCURRENCY, len(pending)))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="prelogin") as pool:
+        # _prelogin_one 自己吞掉所有异常，这里不会有 future 抛出来。
+        list(pool.map(_prelogin_one, pending))
+
+    elapsed = time.time() - started
+    log_with_user(logger, 'info', '系统', stage,
+                  f"预登录结束，{len(prelogin.pooled_pids())}/{len(active_list)} 个会话就绪，"
+                  f"耗时 {elapsed:.1f} 秒")
+
+
 def process_reservations() -> None:
     """
     并发处理所有预约请求
@@ -455,18 +553,23 @@ def process_reservations() -> None:
                   f"开始处理预约列表，共 {len(active_list)} 条，并发度 {workers}")
 
     started = time.time()
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="reserve") as pool:
-        futures = {}
-        for item in active_list:
-            log_with_user(logger, 'info', item['pid'], '预约处理',
-                          f"排入预约队列: {item['pid']}, 优先级: {item.get('priority', 0)}")
-            futures[pool.submit(_run_reservation_safely, item)] = item['pid']
-        for future in as_completed(futures):
-            pid = futures[future]
-            try:
-                future.result()
-            except Exception as exc:
-                log_with_user(logger, 'error', pid, '预约异常', f"预约任务未正常结束: {exc}")
+    try:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="reserve") as pool:
+            futures = {}
+            for item in active_list:
+                log_with_user(logger, 'info', item['pid'], '预约处理',
+                              f"排入预约队列: {item['pid']}, 优先级: {item.get('priority', 0)}")
+                futures[pool.submit(_run_reservation_safely, item)] = item['pid']
+            for future in as_completed(futures):
+                pid = futures[future]
+                try:
+                    future.result()
+                except Exception as exc:
+                    log_with_user(logger, 'error', pid, '预约异常', f"预约任务未正常结束: {exc}")
+    finally:
+        # 没被取走的预登录会话到这里就作废了，留着只会被后面的午休/到馆复查
+        # 任务当成有效会话误用。
+        prelogin.clear()
 
     elapsed = time.time() - started
     log_with_user(logger, 'info', '系统', '预约处理', f"预约处理结束，耗时 {elapsed:.1f} 秒")

@@ -8,12 +8,15 @@
   SCHEDULE_HOUR         - 预约执行的小时 (默认 7)
   SCHEDULE_MINUTE       - 预约执行的分钟 (默认 0)
   RESERVE_CONCURRENCY   - 抢座并发度 (默认 8)
+  PRELOGIN_ENABLED      - 是否提前登录 (默认 1，设 0 关闭)
+  PRELOGIN_LEAD_MINUTES - 提前多少分钟预登录 (默认 10)
+  PRELOGIN_REFRESH_LEAD_SECONDS - 提前多少秒复查会话 (默认 30)
 """
 
 import os
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 # 设置基础日志
@@ -57,6 +60,25 @@ def run_school_notice_check():
     except Exception as e:
         logger.error(f"学校公告检查异常: {e}", exc_info=True)
 
+def run_prelogin_task():
+    """抢座前提前完成 webvpn + CAS 登录，把 4~8 秒的登录挪出抢座窗口。"""
+    try:
+        from scheduled_task import process_prelogin
+        process_prelogin()
+    except Exception as e:
+        # 预登录纯粹是加速，失败了 7:00 照旧现场登录，不能让异常影响调度器。
+        logger.error(f"预登录异常（抢座将回退到现场登录）: {e}", exc_info=True)
+
+
+def run_prelogin_refresh_task():
+    """抢座前 30 秒复查预登录会话，失效的趁还来得及重登一遍。"""
+    try:
+        from scheduled_task import process_prelogin
+        process_prelogin(refresh=True)
+    except Exception as e:
+        logger.error(f"预登录复查异常（抢座将回退到现场登录）: {e}", exc_info=True)
+
+
 def run_reservation_task():
     """执行一次完整的预约 + 迟到保护流程"""
     logger.info("========== 开始执行预约任务 ==========")
@@ -81,6 +103,18 @@ def main():
     hour = int(os.getenv("SCHEDULE_HOUR", "7"))
     minute = int(os.getenv("SCHEDULE_MINUTE", "0"))
 
+    prelogin_enabled = os.getenv("PRELOGIN_ENABLED", "1").strip().lower() not in (
+        "0", "false", "no", "off"
+    )
+    lead_minutes = max(1, int(os.getenv("PRELOGIN_LEAD_MINUTES", "10")))
+    refresh_lead = max(5, int(os.getenv("PRELOGIN_REFRESH_LEAD_SECONDS", "30")))
+
+    # 相对抢座时间倒推，SCHEDULE_HOUR/MINUTE 改了这两个点会跟着走。
+    # 日期部分只是个占位，实际只取 hour/minute/second。
+    reserve_at = datetime(2000, 1, 2, hour, minute)
+    warm_at = reserve_at - timedelta(minutes=lead_minutes)
+    refresh_at = reserve_at - timedelta(seconds=refresh_lead)
+
     logger.info(f"定时预约调度器启动，每天 {hour:02d}:{minute:02d} 执行预约")
 
     scheduler = BlockingScheduler(timezone="Asia/Shanghai")
@@ -92,6 +126,39 @@ def main():
         id='daily_reservation',
         replace_existing=True
     )
+    if prelogin_enabled:
+        logger.info(
+            f"预登录已启用：{warm_at:%H:%M:%S} 全量预登录，"
+            f"{refresh_at:%H:%M:%S} 复查会话"
+        )
+        scheduler.add_job(
+            run_prelogin_task,
+            'cron',
+            hour=warm_at.hour,
+            minute=warm_at.minute,
+            second=warm_at.second,
+            id='reservation_prelogin',
+            coalesce=True,
+            max_instances=1,
+            # 迟到超过 1 分钟就别跑了，否则可能和 7:00 的抢座撞在一起抢网关。
+            misfire_grace_time=60,
+            replace_existing=True
+        )
+        scheduler.add_job(
+            run_prelogin_refresh_task,
+            'cron',
+            hour=refresh_at.hour,
+            minute=refresh_at.minute,
+            second=refresh_at.second,
+            id='reservation_prelogin_refresh',
+            coalesce=True,
+            max_instances=1,
+            # 复查只在抢座前那几十秒有意义，错过了就跳过。
+            misfire_grace_time=max(5, refresh_lead - 5),
+            replace_existing=True
+        )
+    else:
+        logger.info("预登录已关闭（PRELOGIN_ENABLED=0），抢座时现场登录")
     scheduler.add_job(
         run_auto_nap_check,
         'interval',
