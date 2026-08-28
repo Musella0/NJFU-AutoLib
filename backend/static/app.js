@@ -104,6 +104,12 @@ function friCap(seg){
 function $(id){ return document.getElementById(id); }
 function escHtml(s){ return (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
+// 公告正文走 Markdown（markdown.js），渲染器没加载上就退回纯文本
+function mdHtml(s){
+  if(typeof renderMarkdown === 'function') return renderMarkdown(s);
+  return `<div style="white-space:pre-wrap">${escHtml(s)}</div>`;
+}
+
 function toast(msg, type='info'){
   const box = $('toasts');
   const el = document.createElement('div');
@@ -134,6 +140,10 @@ async function copyContact(){
   }catch(e){
     location.href = 'mailto:' + mail;
   }
+}
+
+function openGithub(){
+  window.open('https://github.com/Musella0/NJFU-AutoLib', '_blank', 'noopener');
 }
 
 async function api(path, opts={}){
@@ -1431,7 +1441,7 @@ function renderNotices(anns, results){
           <span class="pill ${pill}">公告</span>${pin}
           <div class="sub" style="font-weight:700">${escHtml(a.title)}</div>
         </div>
-        <div class="t" style="margin-top:4px;white-space:pre-wrap">${escHtml(a.content)}</div>
+        <div class="t md" style="margin-top:4px">${mdHtml(a.content)}</div>
         ${a.source_url ? `<div class="tiny" style="margin-top:6px"><a href="${escHtml(a.source_url)}" target="_blank" rel="noopener noreferrer">查看学校原公告</a></div>` : ''}
         <div class="tiny" style="margin-top:6px">${escHtml(a.updated_at || a.created_at || '')}</div>
       </div>`);
@@ -1721,7 +1731,7 @@ const SHEETS = {
     return `
       <div class="grab"></div>
       <h3>⚠️ ${escHtml(a.title || '图书馆闭馆公告')}</h3>
-      <div class="desc" style="white-space:pre-wrap">${escHtml(a.content || '')}</div>
+      <div class="desc md">${mdHtml(a.content)}</div>
       ${a.display_from && a.display_until ? `<div class="box tight" style="border-left:4px solid var(--danger)"><div class="sub" style="font-weight:700">预约暂停时段</div><div class="t">${escHtml(a.display_from)} 至 ${escHtml(a.display_until)}</div></div>` : ''}
       <div class="row-flex mt-lg">
         ${a.source_url ? `<a class="btn ghost grow" href="${escHtml(a.source_url)}" target="_blank" rel="noopener noreferrer">查看学校原文</a>` : ''}

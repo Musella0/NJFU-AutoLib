@@ -124,7 +124,17 @@
   .ann-badge.danger{background:var(--red-dim);color:var(--red)}
   .ann-badge.pinned{background:rgba(188,140,255,.15);color:var(--purple)}
   .ann-badge.off{background:var(--bg3);color:var(--text3)}
-  .ann-content{font-size:12px;color:var(--text2);line-height:1.6;white-space:pre-wrap;word-break:break-word;max-height:72px;overflow:hidden}
+  .ann-content{font-size:12px;color:var(--text2);line-height:1.6;word-break:break-word;max-height:72px;overflow:hidden}
+  .ann-content.md p{margin:0 0 4px}
+  .ann-content.md > *:first-child{margin-top:0}
+  .ann-content.md h3,.ann-content.md h4,.ann-content.md h5,.ann-content.md h6{font-size:13px;color:var(--text);margin:4px 0 2px}
+  .ann-content.md ul,.ann-content.md ol{margin:0 0 4px;padding-left:18px}
+  .ann-content.md a{color:var(--accent)}
+  .ann-content.md code,.ann-content.md pre{font-family:var(--mono);background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:0 4px}
+  .ann-content.md pre{padding:6px 8px;overflow-x:auto}
+  .ann-content.md pre code{border:0;padding:0;background:none}
+  .ann-content.md blockquote{margin:0 0 4px;padding-left:8px;border-left:2px solid var(--border2);color:var(--text3)}
+  .ann-content.md hr{border:0;border-top:1px solid var(--border);margin:6px 0}
   .ann-meta{font-size:10px;color:var(--text3);margin-top:6px;font-family:var(--mono)}
   .ann-actions{display:flex;gap:6px;flex-shrink:0}
   .modal-field textarea{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:var(--sans);outline:none;min-height:100px;resize:vertical}
@@ -235,7 +245,7 @@
     <div class="modal-header"><div class="modal-title" id="ann-title">新建公告</div><button class="modal-close" onclick="closeM('m-ann')">✕</button></div>
     <div class="modal-body">
       <div class="modal-field"><label>标题</label><input type="text" id="ann-f-title" placeholder="公告标题"></div>
-      <div class="modal-field"><label>内容</label><textarea id="ann-f-content" placeholder="支持换行"></textarea></div>
+      <div class="modal-field"><label>内容</label><textarea id="ann-f-content" placeholder="支持 Markdown：**粗体**、- 列表、[文字](链接)、> 引用"></textarea></div>
       <div class="modal-field">
         <label>级别</label>
         <select id="ann-f-level">
@@ -329,6 +339,7 @@
 
 <div class="toast-box" id="tbox"></div>
 
+<script src="{{ url_for('static', filename='markdown.js') }}?v={{ static_v }}"></script>
 <script>
 let users=[],editPid=null,announcements=[],editAnnId=null,schoolReviews=[],editSchoolReviewId=null;
 function toast(m,t='info'){const b=document.getElementById('tbox'),e=document.createElement('div');e.className='toast toast-'+({success:'ok',error:'err'}[t]||'info');e.textContent=m;b.appendChild(e);setTimeout(()=>{e.style.opacity='0';setTimeout(()=>e.remove(),300)},3000)}
@@ -554,7 +565,7 @@ function renderAnnouncements(){
     return `<div class="ann-card">
       <div class="ann-main">
         <div class="ann-head"><span class="ann-badge ${lvl}">${lvl}</span>${pinned}${off}<span class="ann-title">${esc(a.title)}</span></div>
-        <div class="ann-content">${esc(a.content)}</div>
+        <div class="ann-content md">${renderMarkdown(a.content)}</div>
         <div class="ann-meta">创建 ${a.created_at||'-'}${a.updated_at&&a.updated_at!==a.created_at?`　·　更新 ${a.updated_at}`:''}</div>
       </div>
       <div class="ann-actions">

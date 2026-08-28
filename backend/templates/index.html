@@ -335,7 +335,14 @@
         </div>
         <div class="sub" style="color:var(--ink3)">复制</div>
       </div>
-      <div class="tiny" style="color:var(--ink3);margin-top:6px">遇到 bug、想加功能，或者预约异常，都可以发邮件找我。</div>
+      <div class="toggle-row" style="cursor:pointer" onclick="openGithub()">
+        <div class="info">
+          <div class="t1">GitHub</div>
+          <div class="t2">github.com/Musella0/NJFU-AutoLib</div>
+        </div>
+        <div class="sub" style="color:var(--ink3)">打开</div>
+      </div>
+      <div class="tiny" style="color:var(--ink3);margin-top:6px">遇到 bug、想加功能，或者预约异常，都可以发邮件找我，也欢迎来 GitHub 提 issue。</div>
     </div>
 
     <div class="box pad" id="logout-card" style="display:none">
@@ -363,6 +370,9 @@
 
 <!-- =============== TOASTS =============== -->
 <div class="toasts" id="toasts"></div>
+
+<!-- 公告栏 Markdown 渲染 -->
+<script src="{{ url_for('static', filename='markdown.js') }}?v={{ static_v }}"></script>
 
 <!-- 演示模式：仅 ?demo=1 时接管接口返回假数据，必须排在 app.js 之前 -->
 <script src="{{ url_for('static', filename='demo.js') }}?v={{ static_v }}"></script>
