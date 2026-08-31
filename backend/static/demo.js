@@ -158,6 +158,7 @@
     time: { week_time: weekTime, tomorrow: '' },
     seat_list: seatList,
     notify_email: EMAIL,
+    notify_mode: 'simple',
     vpn_password: '',
     arrived_date: dateKey(today),
   };

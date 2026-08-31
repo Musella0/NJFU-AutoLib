@@ -434,7 +434,7 @@ function renderConfig(){
   $('cfg-verify-badge').textContent = cfg.verified ? '✓ 已验证' : '⚠ 未验证';
   $('cfg-verify-badge').className = 'pill ' + (cfg.verified ? 'ok' : 'warn');
 
-  $('email-label').textContent = cfg.notify_email || '未设置';
+  $('email-label').textContent = emailLabelText(cfg.notify_email, cfg.notify_mode);
 }
 
 function segmentRowHtml(seg, isoDay, disabled){
@@ -1565,15 +1565,26 @@ function addSeat(){
 }
 
 // ---------- notify ----------
+function notifyMode(cfg){
+  return (cfg && cfg.notify_mode === 'full') ? 'full' : 'simple';
+}
+
+function emailLabelText(email, mode){
+  if(!email) return '未设置';
+  return `${email} · ${mode === 'full' ? '全部通知' : '仅异常'}`;
+}
+
 async function saveEmail(){
   if(!state.currentPid || !state.currentCfg){ toast('请先添加学号','error'); return; }
   const v = $('em-input').value.trim();
-  const body = { notify_email: v };
+  const mode = $('em-mode').value === 'full' ? 'full' : 'simple';
+  const body = { notify_email: v, notify_mode: mode };
   const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}`, { method:'POST', body });
   if(ok){
     toast('邮箱已保存','success');
     state.currentCfg.notify_email = v;
-    $('email-label').textContent = v || '未设置';
+    state.currentCfg.notify_mode = mode;
+    $('email-label').textContent = emailLabelText(v, mode);
     closeSheet();
   }else{
     toast(data.error || '保存失败','error');
@@ -1716,16 +1727,26 @@ const SHEETS = {
       <button class="btn accent grow" onclick="addSeat()">添加</button>
     </div>`;
   },
-  email: () => `
+  email: () => {
+    const mode = notifyMode(state.currentCfg);
+    return `
     <div class="grab"></div>
     <h3>邮箱通知</h3>
     <div class="desc">预约结果通过邮件推送。留空即不发送。</div>
     <div class="field"><label>邮箱地址</label><input type="email" id="em-input" value="${escHtml((state.currentCfg && state.currentCfg.notify_email) || '')}"></div>
+    <div class="field"><label>通知范围</label>
+      <select id="em-mode">
+        <option value="simple"${mode === 'simple' ? ' selected' : ''}>仅异常 — 预约失败、午休失败时才发</option>
+        <option value="full"${mode === 'full' ? ' selected' : ''}>全部 — 每天成功也发，含座位号和时段</option>
+      </select>
+    </div>
+    <div class="desc">图书馆闭馆公告、预约冲突提醒两种模式都会发送。</div>
     <div class="row-flex mt-lg">
       <button class="btn ghost grow" onclick="closeSheet()">取消</button>
       <button class="btn accent grow" onclick="saveEmail()">保存</button>
     </div>
-  `,
+  `;
+  },
   'school-notice': () => {
     const a = state.pendingAnnouncementPopup || {};
     return `

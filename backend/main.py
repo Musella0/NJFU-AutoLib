@@ -14,7 +14,11 @@ from bson.errors import InvalidId
 from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
 from utils import config
-from utils.account_config import account_config_for_client, default_account_config
+from utils.account_config import (
+    NOTIFY_MODES,
+    account_config_for_client,
+    default_account_config,
+)
 from utils.admin_credentials import (
     AdminCredentialError,
     load_credentials as load_admin_credentials,
@@ -546,7 +550,7 @@ def save_my_account(pid):
     data = request.get_json(silent=True) or {}
     # Credentials and verified status may only be changed by verify_account.
     allowed = ["seat_list", "mode", "time", "is_reserved",
-               "late_protection", "notify_email"]
+               "late_protection", "notify_email", "notify_mode"]
     update = {k: v for k, v in data.items() if k in allowed and v is not None}
 
     if "seat_list" in update:
@@ -558,6 +562,8 @@ def save_my_account(pid):
         update["seat_list"] = list(dict.fromkeys(seat.strip() for seat in seats))
     if "time" in update and not isinstance(update["time"], dict):
         return jsonify({"error": "时间配置格式无效"}), 400
+    if "notify_mode" in update and update["notify_mode"] not in NOTIFY_MODES:
+        return jsonify({"error": "通知范围配置无效"}), 400
     # 开关一律落成 "True"/"False"，避免任意 JSON 值被原样写进配置文档。
     for flag in ("is_reserved", "late_protection"):
         if flag in update:

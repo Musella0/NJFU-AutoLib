@@ -15,12 +15,23 @@ DEFAULT_WEEK_SEGMENTS = {
     "7": ["08:00-22:00"],
 }
 
+# 通知范围：simple 只在异常时发信（预约失败、午休失败等），full 连每天的
+# 预约成功回执一起发。闭馆类通知不受此开关影响，两种模式都会收到。
+NOTIFY_MODES = ("simple", "full")
+DEFAULT_NOTIFY_MODE = "simple"
+
 CLIENT_SENSITIVE_FIELDS = {
     "_id",
     "web_password",
     "vpn_password",
     "lib_password",
 }
+
+
+def normalize_notify_mode(value: Any) -> str:
+    """Map missing or unknown values onto the quiet default."""
+    text = str(value or "").strip().lower()
+    return text if text in NOTIFY_MODES else DEFAULT_NOTIFY_MODE
 
 
 def default_time_config() -> Dict[str, Any]:
@@ -36,6 +47,7 @@ def default_account_config() -> Dict[str, Any]:
         "time": default_time_config(),
         "is_reserved": "True",
         "late_protection": "False",
+        "notify_mode": DEFAULT_NOTIFY_MODE,
         "priority": 0,
     }
 

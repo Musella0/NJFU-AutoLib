@@ -408,7 +408,7 @@ def reservation(res_item: Dict[str, Any]) -> None:
         update_user_config(pid, combined)
         if any_success:
             notify_user(res_item, "✅ 预约完成" if len(segments) == 1 else f"✅ 多段预约 ({len(segments)}段)",
-                        combined)
+                        f"学号 {pid}\n{combined}")
             try:
                 reservations, message = library.get_reservation_info()
                 if reservations:
@@ -421,7 +421,7 @@ def reservation(res_item: Dict[str, Any]) -> None:
             except Exception:
                 pass
         else:
-            notify_user(res_item, "❌ 预约失败", f"学号 {pid}\n{combined}")
+            notify_user(res_item, "❌ 预约失败", f"学号 {pid}\n{combined}", always=True)
 
     except Exception as e:
         error_msg = f"预约过程发生异常: {str(e)}"
@@ -1157,7 +1157,8 @@ def auto_nap_action(pid: str) -> None:
         cancel_ok, cancel_msg = library.delete_seat(uuid)
         if not cancel_ok:
             log_with_user(logger, 'error', pid, '自动午休', f"取消失败：{cancel_msg}")
-            notify_user(cfg, "❌ 自动午休失败", f"学号 {pid}\n取消原预约失败：{cancel_msg}")
+            notify_user(cfg, "❌ 自动午休失败", f"学号 {pid}\n取消原预约失败：{cancel_msg}",
+                        always=True)
             return
 
         time.sleep(0.5)
@@ -1166,7 +1167,7 @@ def auto_nap_action(pid: str) -> None:
         if not seat_ids:
             msg = f"取消成功，但未找到座位「{seat_name}」，请手动预约下午时段"
             log_with_user(logger, 'error', pid, '自动午休', msg)
-            notify_user(cfg, "⚠ 自动午休部分失败", f"学号 {pid}\n{msg}")
+            notify_user(cfg, "⚠ 自动午休部分失败", f"学号 {pid}\n{msg}", always=True)
             return
 
         resv_msg, _ = library.reserve_seat(
@@ -1179,7 +1180,9 @@ def auto_nap_action(pid: str) -> None:
             notify_user(cfg, "✅ 自动午休完成", f"学号 {pid}\n已重新预约 {seat_name} {nap_start}-{nap_end}")
         else:
             log_with_user(logger, 'error', pid, '自动午休', f"重新预约失败：{resv_msg}")
-            notify_user(cfg, "⚠ 自动午休部分失败", f"学号 {pid}\n取消成功，但重新预约失败：{resv_msg}\n请手动预约下午时段")
+            notify_user(cfg, "⚠ 自动午休部分失败",
+                        f"学号 {pid}\n取消成功，但重新预约失败：{resv_msg}\n请手动预约下午时段",
+                        always=True)
 
     except Exception as e:
         log_with_user(logger, 'error', pid, '自动午休', f"异常：{str(e)}")

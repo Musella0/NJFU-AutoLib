@@ -14,6 +14,8 @@ from email.mime.multipart import MIMEMultipart
 
 import requests
 
+from utils.account_config import normalize_notify_mode
+
 logger = logging.getLogger(__name__)
 
 # 抢座改成并发之后，几十封结果邮件会在同一秒里发出去，而 Resend 免费额度是
@@ -123,7 +125,7 @@ def queue_email(to_addr: str, subject: str, content: str):
     return _notify_pool.submit(_send_paced, to_addr, subject, content)
 
 
-def notify_user(user_config: dict, title: str, content: str) -> None:
+def notify_user(user_config: dict, title: str, content: str, *, always: bool = False) -> None:
     """
     根据用户配置发送通知（异步投递，不阻塞调用方）
 
@@ -131,9 +133,15 @@ def notify_user(user_config: dict, title: str, content: str) -> None:
         user_config: 用户配置字典
         title: 通知标题
         content: 通知内容
+        always: 异常类通知置 True，精简模式下也照发；成功回执用默认值，
+            只有 notify_mode 为 full 的用户才收得到。
     """
+    pid = user_config.get("pid", "?")
     email = user_config.get("notify_email", "")
     if not email:
-        logger.info(f"用户 {user_config.get('pid', '?')} 未配置通知邮箱，跳过通知")
+        logger.info(f"用户 {pid} 未配置通知邮箱，跳过通知")
+        return
+    if not always and normalize_notify_mode(user_config.get("notify_mode")) != "full":
+        logger.info(f"用户 {pid} 为精简通知模式，跳过成功通知: {title}")
         return
     queue_email(email, title, content)

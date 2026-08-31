@@ -6,6 +6,7 @@ from utils.account_config import (
     default_account_config,
     default_time_config,
     merge_account_documents,
+    normalize_notify_mode,
 )
 
 
@@ -16,6 +17,15 @@ class AccountConfigTests(unittest.TestCase):
         self.assertEqual(defaults["mode"], "week_time")
         self.assertEqual(defaults["time"]["week_time"]["5"], ["08:00-20:00"])
         self.assertEqual(defaults["time"]["week_time"]["7"], ["08:00-22:00"])
+        self.assertEqual(defaults["notify_mode"], "simple")
+
+    def test_unknown_notify_modes_fall_back_to_the_quiet_default(self):
+        self.assertEqual(normalize_notify_mode("full"), "full")
+        self.assertEqual(normalize_notify_mode(" FULL "), "full")
+        self.assertEqual(normalize_notify_mode("simple"), "simple")
+        # 老账号没有这个字段，按精简处理，不再收每天的成功回执。
+        self.assertEqual(normalize_notify_mode(None), "simple")
+        self.assertEqual(normalize_notify_mode("verbose"), "simple")
 
     def test_merge_retains_fields_missing_from_newer_document(self):
         old_time = datetime.now() - timedelta(days=1)
