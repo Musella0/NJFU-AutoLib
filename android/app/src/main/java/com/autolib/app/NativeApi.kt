@@ -55,6 +55,29 @@ class NativeApi(context: Context) {
     fun postBlocking(path: String, body: JSONObject = JSONObject(), readTimeoutMs: Int = 20_000): ApiResponse =
         execute("POST", path, body, readTimeoutMs)
 
+    /**
+     * 取二进制资源（平面图底图）。失败一律回 null——底图缺失只是让选座图不可用，
+     * 不该像接口错误那样弹提示，所以这里不复用 ApiResponse 的错误通道。
+     * 调用方必须已经在后台线程。
+     */
+    fun getBytesBlocking(path: String, readTimeoutMs: Int = 30_000): ByteArray? {
+        var connection: HttpURLConnection? = null
+        return try {
+            connection = (URL(baseUrl + path).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 15_000
+                readTimeout = readTimeoutMs
+                setRequestProperty("User-Agent", "AutoLib-Android/${BuildConfig.VERSION_NAME}")
+            }
+            if (connection.responseCode !in 200..299) return null
+            connection.inputStream.use { it.readBytes() }
+        } catch (error: Exception) {
+            null
+        } finally {
+            connection?.disconnect()
+        }
+    }
+
     private fun request(
         method: String,
         path: String,

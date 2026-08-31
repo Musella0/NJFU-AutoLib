@@ -22,8 +22,8 @@ android {
         targetSdk = 34
         // versionCode 只增不减：降回去会让已装用户无法覆盖安装，与展示用的 versionName 无关。
         // 升级检查也按它比大小，发版必须 +1，否则客户端认不出新版本。
-        versionCode = 6
-        versionName = "0.2.2"
+        versionCode = 7
+        versionName = "0.2.3"
 
         buildConfigField("String", "SERVER_URL", "\"https://xn--1jq43jfrduzxh22d.xn--fiqs8s\"")
     }

@@ -73,6 +73,9 @@ class MainActivity : AppCompatActivity() {
     /** 已自动补过到馆记录的日期，防止重复提交。 */
     private var autoArrivedFor: String? = null
 
+    /** 座位号 → 除我以外把它放进优先级的人数，只在选座图上当参考色用。 */
+    private var seatHeat: Map<String, Int> = emptyMap()
+
     /**
      * 上次真正拉取预约的时刻与所属学号；查询会触发学校系统登录，很贵，所以要节流。
      * 带上 pid 是为了切换账号后缓存自动失效，不会把上一个学号的预约显示出来。
@@ -706,13 +709,14 @@ class MainActivity : AppCompatActivity() {
         val max = dayMax(iso)
         val start = spinner(timeOptions("08:00", max))
         val end = spinner(timeOptions("10:00", max)).apply { setSelection(adapter.count - 1) }
-        val favourites = (currentConfig?.optJSONArray("seat_list")?.let { jsonArrayStrings(it) } ?: emptyList()).take(3)
-        if (favourites.isNotEmpty()) {
-            body.addView(text("常用座位 · 点击快速选择", 12, true).apply { setTextColor(color(R.color.text_muted)) })
-            val chips = horizontal()
-            favourites.forEach { name -> chips.addView(action(name, compact = true) { selectSeat(zone, seat, name) }) }
-            body.addView(chips)
-        }
+        val favourites = configuredSeats().take(3)
+        favouriteChips(zone, seat)?.let { body.addView(it) }
+        // 选座图开在这个对话框之上，选完回填两个下拉，预约的时段不会丢
+        body.addView(wide(action("🗺️ 按图选座") {
+            showSeatMapDialog(seat.selectedItem?.toString(), forReserve = true) { name ->
+                selectSeat(zone, seat, name)
+            }
+        }))
         body.addView(labeled("区域", zone)); body.addView(labeled("座位", seat))
         body.addView(labeled("开始时间", start)); body.addView(labeled("结束时间", end))
         val dialog = AlertDialog.Builder(this)
@@ -837,6 +841,7 @@ class MainActivity : AppCompatActivity() {
         val seatPick = spinner(emptyList())
         bindZoneToSeats(zone, seatPick)
         val customBlock = vertical(0).apply {
+            favouriteChips(zone, seatPick)?.let { addView(it) }
             addView(labeled("楼层 / 区域", zone)); addView(labeled("座位号", seatPick))
             isVisible = savedSeat.isNotBlank()
         }
@@ -1314,10 +1319,7 @@ class MainActivity : AppCompatActivity() {
         host.addView(cardBlock("预约结果通知", vertical(0).apply {
             addView(text("每天抢座的成败、自动午休的结果都会发到邮箱。", 12)
                 .apply { setTextColor(color(R.color.text_muted)) })
-            addView(notifyRow(
-                "邮箱",
-                currentConfig?.optString("notify_email").orEmpty(),
-            ) { showEmailDialog() })
+            addView(notifyRow("邮箱", emailLabel(currentConfig)) { showEmailDialog() })
         }))
 
         host.addView(section("午休"))
@@ -1533,19 +1535,48 @@ class MainActivity : AppCompatActivity() {
             setText(cfg.optString("notify_email"))
         }
         body.addView(email)
-        AlertDialog.Builder(this).setTitle("邮箱通知").setView(body).setNegativeButton("取消", null).setPositiveButton("保存") { _, _ ->
+        val mode = spinner(NOTIFY_MODE_LABELS)
+            .apply { setSelection(if (notifyMode(cfg) == NOTIFY_MODE_FULL) 1 else 0) }
+        body.addView(labeled("通知范围", mode))
+        body.addView(text("「仅异常」只在预约失败、午休失败时来信；「全部」每天成功也发，含座位号和时段。闭馆公告和预约冲突提醒两种模式都会收到。", 12)
+            .apply { setTextColor(color(R.color.text_muted)) })
+        AlertDialog.Builder(this).setTitle("邮箱通知").setView(scrolled(body)).setNegativeButton("取消", null).setPositiveButton("保存") { _, _ ->
             val value = email.text.toString().trim()
             if (value.isNotBlank() && !value.contains('@')) return@setPositiveButton toast("邮箱地址格式不正确")
-            saveNotifyField(cfg, "notify_email", value, "邮箱已保存")
+            saveNotifyFields(
+                cfg,
+                JSONObject()
+                    .put("notify_email", value)
+                    .put("notify_mode", if (mode.selectedItemPosition == 1) NOTIFY_MODE_FULL else NOTIFY_MODE_SIMPLE),
+                "邮箱已保存",
+            )
         }.show()
     }
 
-    private fun saveNotifyField(cfg: JSONObject, field: String, value: String, success: String) {
-        api.post("/api/my/accounts/${api.encoded(currentPid)}", JSONObject().put(field, value)) { response ->
+    /** 服务端没配置过 notify_mode 的老账号按「仅异常」算，与后端默认值一致。 */
+    private fun notifyMode(cfg: JSONObject?) =
+        if (cfg?.optString("notify_mode") == NOTIFY_MODE_FULL) NOTIFY_MODE_FULL else NOTIFY_MODE_SIMPLE
+
+    private fun emailLabel(cfg: JSONObject?): String {
+        val email = cfg?.optString("notify_email").orEmpty()
+        if (email.isBlank()) return ""
+        return "$email · " + if (notifyMode(cfg) == NOTIFY_MODE_FULL) "全部通知" else "仅异常"
+    }
+
+    /**
+     * 一次提交多个通知字段。邮箱和通知范围要一起落库——拆成两次请求会多一趟往返，
+     * 中间失败还会留下「邮箱改了范围没改」的半截状态。
+     */
+    private fun saveNotifyFields(cfg: JSONObject, fields: JSONObject, success: String) {
+        api.post("/api/my/accounts/${api.encoded(currentPid)}", fields) { response ->
             toast(response.message(success))
             if (response.ok) {
-                cfg.put(field, value)
-                accountSummary(currentPid)?.put(field, value)
+                val summary = accountSummary(currentPid)
+                fields.keys().forEach { key ->
+                    val value = fields.get(key)
+                    cfg.put(key, value)
+                    summary?.put(key, value)
+                }
                 renderCurrentPage()
             }
         }
@@ -1569,6 +1600,7 @@ class MainActivity : AppCompatActivity() {
         val seatPick = spinner(emptyList())
         bindZoneToSeats(zone, seatPick)
         val customBlock = vertical(0).apply {
+            favouriteChips(zone, seatPick)?.let { addView(it) }
             addView(labeled("楼层 / 区域", zone)); addView(labeled("座位号", seatPick))
             isVisible = savedSeat.isNotBlank()
         }
@@ -2079,11 +2111,168 @@ class MainActivity : AppCompatActivity() {
         if (seats.length() == 0) return toast("没有可用座位数据")
         val body = vertical(); val zone = spinner(sortedZones()); val seat = spinner(emptyList())
         bindZoneToSeats(zone, seat)
+        val dialog = AlertDialog.Builder(this).setTitle("添加座位").setView(body)
+            .setNegativeButton("取消", null).setPositiveButton("添加") { _, _ ->
+                val name = seat.selectedItem?.toString().orEmpty()
+                if (name.isBlank()) toast("请先选择") else selected(name)
+            }.create()
+        // 不确定坐哪就翻平面图。图和下拉是二选一，所以点开图就把这个对话框收掉
+        body.addView(wide(action("🗺️ 按图选座") {
+            dialog.dismiss()
+            // 默认翻到第一优先座位所在的楼层，和网页端一样——多数人是想在熟悉的区域旁边再挑一个
+            showSeatMapDialog(configuredSeats().firstOrNull(), forReserve = false, onPick = selected)
+        }))
         body.addView(labeled("楼层 / 区域", zone)); body.addView(labeled("座位号", seat))
-        AlertDialog.Builder(this).setTitle("添加座位").setView(body).setNegativeButton("取消", null).setPositiveButton("添加") { _, _ ->
-            val name = seat.selectedItem?.toString().orEmpty()
-            if (name.isBlank()) toast("请先选择") else selected(name)
-        }.show()
+        dialog.show()
+    }
+
+    /**
+     * 按图选座，对应网页端的 `openSeatMap()`。平面图是随服务端发布的静态资源，
+     * 首次打开要下载 100KB 上下的底图，所以先把对话框立起来再异步填图。
+     *
+     * [forReserve] 只改文案和可用规则：加候选座位不能挑已经在优先级里的，
+     * 填预约表单则随便选哪个都行。
+     */
+    private fun showSeatMapDialog(preset: String?, forReserve: Boolean, onPick: (String) -> Unit) {
+        val body = vertical()
+        body.addView(text("拖动看图，双指捏合或双击放大。点图上任意位置，会选中离它最近的那个座位。", 12)
+            .apply { setTextColor(color(R.color.text_muted)) })
+        val areaSpinner = spinner(emptyList())
+        body.addView(labeled("楼层 / 区域", areaSpinner))
+        val map = SeatMapView(this).apply {
+            chosen = configuredSeats()
+            // 图太矮就只能看见几十个座位，太高会把下面的图例和座位名顶出对话框
+            val height = minOf(dp(240), (resources.displayMetrics.heightPixels * 0.30f).toInt())
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, height)
+                .apply { topMargin = dp(4) }
+        }
+        body.addView(map)
+        body.addView(seatMapLegend { map.reset() })
+        val picked = text("正在加载平面图…", 14, true)
+        body.addView(picked)
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("按图选座")
+            .setView(scrolled(body))
+            .setNegativeButton("取消", null)
+            .setPositiveButton(if (forReserve) "用这个座位" else "添加", null)
+            .create()
+
+        var confirm: android.widget.Button? = null
+        fun refresh() {
+            val seat = map.picked
+            val ordinal = if (seat == null) -1 else map.chosen.indexOf(seat)
+            val crowd = seatHeat[seat] ?: 0
+            picked.text = when {
+                seat == null -> "点图上任意位置选座"
+                ordinal >= 0 -> "$seat（已在优先级第 ${ordinal + 1} 位）"
+                crowd > 0 -> "$seat · 另有 $crowd 人也选了"
+                else -> seat
+            }
+            picked.setTextColor(color(if (seat == null) R.color.text_muted else R.color.text_primary))
+            confirm?.isEnabled = seat != null && (forReserve || ordinal < 0)
+        }
+        map.onPicked = { refresh() }
+
+        // 换区域时底图是异步来的，回来时用户可能已经翻到别的区域，按 roomId 认领
+        fun showArea(area: SeatLayout.Area) {
+            map.show(area, null)
+            SeatLayout.image(this, api, area) { bitmap ->
+                if (!dialog.isShowing || map.roomId != area.roomId) return@image
+                if (bitmap == null) map.placeholder = "底图下载失败，检查下网络" else map.show(area, bitmap)
+            }
+        }
+
+        dialog.setOnShowListener {
+            confirm = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+            confirm?.setOnClickListener {
+                val seat = map.picked ?: return@setOnClickListener
+                dialog.dismiss()
+                onPick(seat)
+            }
+            refresh()
+        }
+        dialog.show()
+
+        loadSeatHeat { map.heat = it; refresh() }
+        SeatLayout.areas(this, api) { areas ->
+            if (!dialog.isShowing) return@areas
+            if (areas.isEmpty()) {
+                map.placeholder = "平面图数据缺失"
+                picked.text = "平面图暂时用不了，回上一步用下拉选座吧"
+                return@areas
+            }
+            areaSpinner.adapter = arrayAdapter(areas.map { it.label })
+            // 预选的座位得先落到 map 上，再切区域——show() 会把不属于新区域的选中清掉
+            val home = preset?.let { SeatLayout.areaOfSeat(it) }
+            if (preset != null && home != null) map.select(preset)
+            areaSpinner.onItemSelectedListener = simpleSelection {
+                areas.getOrNull(areaSpinner.selectedItemPosition)?.let { showArea(it) }
+            }
+            // Spinner 的首次 onItemSelected 是布局后异步触发的，showArea 交给它去调
+            areaSpinner.setSelection(areas.indexOf(home ?: areas.first()).coerceAtLeast(0))
+        }
+    }
+
+    /** 选座图图例 + 复位，对应网页端 .seatmap-legend。 */
+    private fun seatMapLegend(onReset: () -> Unit): View = vertical(0).apply {
+        addView(horizontal().apply {
+            addView(legendDot(R.color.primary, "当前选中"))
+            addView(legendDot(R.color.success, "我的优先级"))
+            addView(legendDot(R.color.warn, "别人也选了"))
+        })
+        addView(horizontal().apply {
+            addView(legendDot(R.color.danger, "3 人以上"))
+            addView(
+                legendDot(R.color.stroke_muted, "没人预定"),
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+            )
+            addView(action("复位 ⟲", compact = true) { onReset() })
+        })
+    }
+
+    private fun legendDot(colorId: Int, label: String) = horizontal().apply {
+        addView(View(this@MainActivity).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(color(colorId))
+                setStroke(dp(1), color(R.color.stroke_muted))
+            }
+            layoutParams = LinearLayout.LayoutParams(dp(9), dp(9)).apply { marginEnd = dp(4) }
+        })
+        addView(text(label, 11).apply { setTextColor(color(R.color.text_muted)) })
+        setPadding(0, 0, dp(10), 0)
+    }
+
+    /** 座位热度只是张参考色，取不到就当没人选，不该挡住选座。 */
+    private fun loadSeatHeat(callback: (Map<String, Int>) -> Unit) {
+        if (seatHeat.isNotEmpty()) return callback(seatHeat)
+        api.get("/api/seat_popularity") { response ->
+            val counts = response.jsonObject?.optJSONObject("counts")
+            seatHeat = counts?.let { obj -> jsonKeys(obj).associateWith { obj.optInt(it) } }.orEmpty()
+            callback(seatHeat)
+        }
+    }
+
+    private fun configuredSeats(): List<String> =
+        jsonArrayStrings(currentConfig?.optJSONArray("seat_list"))
+
+    /** 常用座位快捷选择，对应网页端 frequentSeatChips()：取优先级的前三个。 */
+    private fun favouriteChips(zone: Spinner, seat: Spinner): View? {
+        val favourites = configuredSeats().take(3)
+        if (favourites.isEmpty()) return null
+        return vertical(0).apply {
+            addView(text("常用座位 · 点击快速选择", 12, true).apply { setTextColor(color(R.color.text_muted)) })
+            addView(horizontal().apply {
+                favourites.forEach { name -> addView(action(name, compact = true) { selectSeat(zone, seat, name) }) }
+            })
+        }
+    }
+
+    /** action() 默认是内容宽，选座这类块级按钮要撑满一行。 */
+    private fun wide(button: MaterialButton) = button.apply {
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48))
+            .apply { setMargins(dp(3), dp(6), dp(3), dp(4)) }
     }
 
     /**
@@ -2282,6 +2471,10 @@ class MainActivity : AppCompatActivity() {
         /** 预约结果的复用窗口：切页返回不再重查，超过才自动刷新。 */
         private const val RESERVATION_TTL_MS = 3 * 60 * 1000L
         private const val PREF_THEME = "theme"
+        /** 通知范围，取值与后端 NOTIFY_MODES 一致：simple 只发异常，full 连成功回执一起发。 */
+        private const val NOTIFY_MODE_SIMPLE = "simple"
+        private const val NOTIFY_MODE_FULL = "full"
+        private val NOTIFY_MODE_LABELS = listOf("仅异常 — 失败时才来信", "全部 — 每天成功也发")
         /** 反馈邮箱：以前只写在公告里，公告过期就没人找得到了。 */
         private const val CONTACT_EMAIL = "msl0314_1@proton.me"
         private const val THEME_SYSTEM = "system"

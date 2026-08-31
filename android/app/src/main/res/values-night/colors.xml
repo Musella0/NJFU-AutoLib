@@ -18,6 +18,8 @@
     <color name="accent_soft">#382F1F</color>
     <color name="stroke">#5B5144</color>
     <color name="stroke_muted">#4A4135</color>
+    <!-- 选座图上「别人也把它放进了优先级」的提示色，与网页端 warn 变量同值 -->
+    <color name="warn">#FFA94D</color>
     <!-- 学习热力图 5 档，与网页端 heat0..heat4 变量对应 -->
     <color name="heat0">#2A241C</color>
     <color name="heat1">#33FFD06B</color>
