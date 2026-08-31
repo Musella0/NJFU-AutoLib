@@ -1005,6 +1005,32 @@ def get_all_seats():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/seat_popularity", methods=["GET"])
+@login_required
+def get_seat_popularity():
+    """每个座位被多少人放进了抢座优先级。
+
+    只回聚合数字，不带学号，用来在选座图上避开一堆人盯着的位置。
+    自己的账号不计入——图上另有标记，这里的数字读作「除我以外还有几个人」。
+    """
+    try:
+        uid = session["web_uid"]
+        client, db = get_db()
+        counts = {
+            row["_id"]: row["n"]
+            for row in db.user_config_info.aggregate([
+                {"$match": {"pid": {"$ne": uid}, "seat_list": {"$type": "array"}}},
+                {"$unwind": "$seat_list"},
+                {"$group": {"_id": "$seat_list", "n": {"$sum": 1}}},
+            ])
+            if isinstance(row.get("_id"), str)
+        }
+        client.close()
+        return jsonify({"counts": counts}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ==================== Admin API (password-filtered) ====================
 
 

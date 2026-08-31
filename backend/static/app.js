@@ -820,6 +820,7 @@ async function openReserveNow(defaultSeat, day){
   // 弹层由模板重建，目标日期存在 state 里给 submitReserveNow 读
   state.reserveDay = (day === 'tomorrow') ? 'tomorrow' : 'today';
   openSheet('reserve-now');
+  state.rnTimes = null;   // 只用来接住「去看图再回来」这一趟，下次开弹层还是默认时段
   const locSel = $('rn-location');
   if(locSel){
     locSel.innerHTML = '<option value="">选择区域</option>' +
@@ -828,6 +829,14 @@ async function openReserveNow(defaultSeat, day){
   const seatList = (state.currentCfg && state.currentCfg.seat_list) || [];
   const pick = defaultSeat || seatList[0];
   if(pick) selectRnSeat(pick);
+}
+
+function openSeatMapForReserve(){
+  // 弹层是整块重建的，先把已经填好的时间记下来，选完座位回来照旧
+  const start = $('rn-start'), end = $('rn-end');
+  state.rnTimes = { start: start ? start.value : '', end: end ? end.value : '' };
+  const seat = $('rn-seat');
+  openSeatMap('reserve', seat ? seat.value : '');
 }
 
 function selectRnSeat(seatName){
@@ -1564,6 +1573,286 @@ function addSeat(){
   closeSheet();
 }
 
+// ---------- 平面图选座 ----------
+// 平面图和座位坐标是 utils/fetch_seat_layout.py 抓下来的静态数据（座位一年也不挪一次），
+// 抢座流程本身用不到，纯粹是让人挑座位时知道自己坐在哪、靠不靠窗。
+let _layout = null;
+let _seatHeat = {};   // 座位号 → 除我以外把它放进优先级的人数
+
+// 圆点直径，和 styles.css 里的 --seat-dot 必须一致：
+// 坐标记的是圆点左上角（跟官方一致），判距离时要用它换算出圆心
+const SEAT_DOT_PX = 6;
+
+// 当前地图的状态：区域、选中的座位、平移缩放
+const _sm = { area:null, picked:null, scale:1, x:0, y:0, mode:'add', ratio:1 };
+
+// 别人的优先级里有没有这个座位。失败就当没有——这只是个参考色，不该挡住选座
+async function loadSeatHeat(){
+  try{
+    const { ok, data } = await api('/api/seat_popularity');
+    _seatHeat = (ok && data && data.counts) ? data.counts : {};
+  }catch(e){
+    _seatHeat = {};
+  }
+}
+
+async function loadSeatLayout(){
+  if(_layout) return _layout;
+  try{
+    const resp = await fetch('/static/floorplans/seat_layout.json');
+    _layout = resp.ok ? await resp.json() : { areas: [] };
+  }catch(e){
+    _layout = { areas: [] };
+  }
+  return _layout;
+}
+
+function hasSeatLayout(){
+  return !!(_layout && _layout.areas && _layout.areas.length);
+}
+
+function seatMapArea(roomId){
+  return (_layout.areas || []).find(a => String(a.roomId) === String(roomId)) || null;
+}
+
+// 座位号 → 所在区域，用来把已选的座位直接定位到图上
+function areaOfSeat(seatName){
+  if(!hasSeatLayout() || !seatName) return null;
+  return (_layout.areas || []).find(a => a.seats.some(s => s[0] === seatName)) || null;
+}
+
+// mode: 'add' 加进座位优先级；'reserve' 回填立即预约的表单
+async function openSeatMap(mode, seatName){
+  await loadSeatLayout();
+  if(!hasSeatLayout()){ toast('平面图数据缺失','error'); return; }
+  await loadSeatHeat();
+  _sm.mode = (mode === 'reserve') ? 'reserve' : 'add';
+  const preset = seatName || (state.currentCfg && (state.currentCfg.seat_list || [])[0]);
+  const area = areaOfSeat(preset) || _layout.areas[0];
+  _sm.picked = areaOfSeat(preset) ? preset : null;
+  openSheet('seat-map');
+  renderSeatMapArea(area.roomId);
+}
+
+// 换区域：整块重建，图片 onload 之后再复位视图
+function renderSeatMapArea(roomId){
+  const area = seatMapArea(roomId);
+  const stage = $('sm-stage');
+  if(!area || !stage) return;
+  _sm.area = area;
+  const sel = $('sm-area');
+  if(sel) sel.value = String(area.roomId);
+  if(_sm.picked && !area.seats.some(s => s[0] === _sm.picked)) _sm.picked = null;
+  stage.innerHTML = `<img src="/static/floorplans/${escHtml(area.image)}" alt="${escHtml(area.name)}"
+      onload="onSeatMapImage()"><div class="dots" id="sm-dots"></div>`;
+  drawSeatMapDots();
+}
+
+// 选中变了只重画点，别动 <img>——重建图片会触发 onload，把用户的缩放和位置一起冲掉
+function drawSeatMapDots(){
+  const box = $('sm-dots');
+  if(!box || !_sm.area) return;
+  const chosen = (state.currentCfg && state.currentCfg.seat_list) || [];
+  const dots = _sm.area.seats.map(([name, x, y]) => {
+    const ord = chosen.indexOf(name);
+    const heat = _seatHeat[name] || 0;
+    let cls = 'dot';
+    if(name === _sm.picked) cls += ' here';
+    else if(ord >= 0) cls += ' picked';
+    else if(heat >= 3) cls += ' taken hot';
+    else if(heat > 0) cls += ' taken';
+    const num = (ord >= 0 && name !== _sm.picked) ? `<span class="num">${ord + 1}</span>` : '';
+    return `<i class="${cls}" style="left:${x}%;top:${y}%">${num}</i>`;
+  }).join('');
+  const pick = _sm.area.seats.find(s => s[0] === _sm.picked);
+  box.innerHTML = dots + (pick
+    ? `<span class="tag" style="left:${pick[1]}%;top:${pick[2]}%">${escHtml(pick[0])}</span>`
+    : '');
+  updateSeatMapBar();
+}
+
+function onSeatMapImage(){
+  const map = $('sm-map'), img = $('sm-stage').querySelector('img');
+  if(!map || !img) return;
+  _sm.ratio = img.naturalHeight / img.naturalWidth || 0.5625;
+  resetSeatMapView();
+}
+
+// 图宽等于容器宽时算 scale=1；竖屏下整张图缩得太小，所以按容器高度补一档
+function resetSeatMapView(){
+  const map = $('sm-map');
+  if(!map) return;
+  const fitH = map.clientHeight / (map.clientWidth * _sm.ratio);
+  _sm.scale = Math.max(1, Math.min(fitH, 2.4));
+  _sm.x = 0; _sm.y = 0;
+  if(_sm.picked) centerSeatMapOn(_sm.picked);
+  else applySeatMapTransform();
+}
+
+function centerSeatMapOn(seatName){
+  const map = $('sm-map');
+  const seat = _sm.area && _sm.area.seats.find(s => s[0] === seatName);
+  if(!map || !seat) return;
+  const w = map.clientWidth * _sm.scale;
+  _sm.x = map.clientWidth / 2 - w * seat[1] / 100 - SEAT_DOT_PX * _sm.scale / 2;
+  _sm.y = map.clientHeight / 2 - w * _sm.ratio * seat[2] / 100 - SEAT_DOT_PX * _sm.scale / 2;
+  applySeatMapTransform();
+}
+
+// 把屏幕坐标换成容器内容盒里的坐标。rect 含边框，clientLeft/Top 正好是边框宽度
+function seatMapPoint(clientX, clientY){
+  const map = $('sm-map');
+  const rect = map.getBoundingClientRect();
+  return { x: clientX - rect.left - map.clientLeft, y: clientY - rect.top - map.clientTop };
+}
+
+function applySeatMapTransform(){
+  const map = $('sm-map'), stage = $('sm-stage');
+  if(!map || !stage) return;
+  const mw = map.clientWidth, mh = map.clientHeight;
+  const w = mw * _sm.scale, h = mw * _sm.ratio * _sm.scale;
+  _sm.x = (w <= mw) ? (mw - w) / 2 : Math.min(0, Math.max(mw - w, _sm.x));
+  _sm.y = (h <= mh) ? (mh - h) / 2 : Math.min(0, Math.max(mh - h, _sm.y));
+  stage.style.transform = `translate(${_sm.x}px, ${_sm.y}px) scale(${_sm.scale})`;
+}
+
+// 触摸点太密，与其让人去点 5px 的圆点，不如点哪儿就选最近的那个座位
+function pickNearestSeat(clientX, clientY){
+  const map = $('sm-map');
+  if(!map || !_sm.area) return;
+  const mw = map.clientWidth;
+  const pt = seatMapPoint(clientX, clientY);
+  const w = mw * _sm.scale;
+  const px = (pt.x - _sm.x) / w * 100;
+  const py = (pt.y - _sm.y) / (w * _sm.ratio) * 100;
+  // 坐标是圆点左上角，补半个点才是学生眼里那个座位的位置
+  const offX = SEAT_DOT_PX / 2 / mw * 100;
+  const offY = SEAT_DOT_PX / 2 / (mw * _sm.ratio) * 100;
+
+  let best = null, bestD = Infinity;
+  for(const [name, x, y] of _sm.area.seats){
+    // y 按图片长宽比折算回等比距离，否则横向的座位总是显得更近
+    const dy = (y + offY - py) * _sm.ratio;
+    const dx = x + offX - px;
+    const d = dx * dx + dy * dy;
+    if(d < bestD){ bestD = d; best = name; }
+  }
+  if(!best || Math.sqrt(bestD) > 8) return;   // 离所有座位都太远，当成误触
+  _sm.picked = best;
+  drawSeatMapDots();
+}
+
+function updateSeatMapBar(){
+  const name = $('sm-name'), ok = $('sm-ok');
+  if(!name || !ok) return;
+  const chosen = (state.currentCfg && state.currentCfg.seat_list) || [];
+  if(_sm.picked){
+    const ord = chosen.indexOf(_sm.picked);
+    const heat = _seatHeat[_sm.picked] || 0;
+    const note = ord >= 0 ? `  （已在第 ${ord + 1} 位）`
+               : heat > 0 ? `  · 另有 ${heat} 人也选了` : '';
+    name.className = 'picked-name';
+    name.textContent = _sm.picked + note;
+    ok.disabled = (_sm.mode === 'add' && ord >= 0);
+  }else{
+    name.className = 'picked-name empty';
+    name.textContent = '点图上任意位置选座';
+    ok.disabled = true;
+  }
+}
+
+function confirmSeatMap(){
+  if(!_sm.picked) return;
+  if(_sm.mode === 'reserve'){
+    const seat = _sm.picked;
+    closeSheet();
+    openReserveNow(seat, state.reserveDay);
+    return;
+  }
+  if(!state.currentCfg){ toast('请先选择学号','error'); return; }
+  const seats = state.currentCfg.seat_list || [];
+  if(seats.includes(_sm.picked)){ toast('座位已存在','error'); return; }
+  seats.push(_sm.picked);
+  state.currentCfg.seat_list = seats;
+  renderCfgSeats();
+  const added = _sm.picked;
+  persistSeatList().then(ok => {
+    if(ok) toast('已添加并保存 ' + added, 'success');
+  });
+  closeSheet();
+}
+
+// ---- 手势：单指拖动平移，双指捏合缩放，轻点选座 ----
+const _smTouch = { pointers: new Map(), start: null, pinch: null };
+
+function onSeatMapDown(e){
+  const map = $('sm-map');
+  map.setPointerCapture(e.pointerId);
+  _smTouch.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if(_smTouch.pointers.size === 1){
+    _smTouch.start = { x: e.clientX, y: e.clientY, mx: _sm.x, my: _sm.y, t: Date.now(), moved: 0 };
+    map.classList.add('panning');
+  }else if(_smTouch.pointers.size === 2){
+    _smTouch.pinch = pinchState();
+  }
+}
+
+function pinchState(){
+  const [a, b] = [..._smTouch.pointers.values()];
+  const mid = seatMapPoint((a.x + b.x) / 2, (a.y + b.y) / 2);
+  return {
+    dist: Math.hypot(a.x - b.x, a.y - b.y) || 1,
+    scale: _sm.scale,
+    // 捏合中心在图上的相对位置，缩放过程中要一直粘在手指中间
+    ox: (mid.x - _sm.x) / _sm.scale, oy: (mid.y - _sm.y) / _sm.scale,
+  };
+}
+
+function onSeatMapMove(e){
+  if(!_smTouch.pointers.has(e.pointerId)) return;
+  _smTouch.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+  if(_smTouch.pointers.size >= 2 && _smTouch.pinch){
+    const [a, b] = [..._smTouch.pointers.values()];
+    const p = _smTouch.pinch;
+    const scale = Math.max(1, Math.min(6, p.scale * Math.hypot(a.x - b.x, a.y - b.y) / p.dist));
+    const mid = seatMapPoint((a.x + b.x) / 2, (a.y + b.y) / 2);
+    _sm.scale = scale;
+    _sm.x = mid.x - p.ox * scale;
+    _sm.y = mid.y - p.oy * scale;
+    applySeatMapTransform();
+    return;
+  }
+  const s = _smTouch.start;
+  if(!s) return;
+  const dx = e.clientX - s.x, dy = e.clientY - s.y;
+  s.moved = Math.max(s.moved, Math.hypot(dx, dy));
+  _sm.x = s.mx + dx;
+  _sm.y = s.my + dy;
+  applySeatMapTransform();
+}
+
+function onSeatMapUp(e){
+  const map = $('sm-map');
+  _smTouch.pointers.delete(e.pointerId);
+  if(_smTouch.pointers.size < 2) _smTouch.pinch = null;
+  if(_smTouch.pointers.size > 0) return;
+  map.classList.remove('panning');
+  const s = _smTouch.start;
+  _smTouch.start = null;
+  if(s && s.moved < 6 && Date.now() - s.t < 500) pickNearestSeat(e.clientX, e.clientY);
+}
+
+function onSeatMapWheel(e){
+  e.preventDefault();
+  const pt = seatMapPoint(e.clientX, e.clientY);
+  const ox = (pt.x - _sm.x) / _sm.scale, oy = (pt.y - _sm.y) / _sm.scale;
+  _sm.scale = Math.max(1, Math.min(6, _sm.scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+  _sm.x = pt.x - ox * _sm.scale;
+  _sm.y = pt.y - oy * _sm.scale;
+  applySeatMapTransform();
+}
+
 // ---------- notify ----------
 function notifyMode(cfg){
   return (cfg && cfg.notify_mode === 'full') ? 'full' : 'simple';
@@ -1705,12 +1994,48 @@ const SHEETS = {
       <button class="btn danger grow" onclick="doCancelTomorrow()">确认取消</button>
     </div>
   `,
+  'seat-map': () => {
+    const areas = (_layout && _layout.areas) || [];
+    return `
+    <div class="grab"></div>
+    <h3>按图选座</h3>
+    <div class="desc">拖动看图，双指缩放。点图上任意位置，会选中离它最近的那个座位。</div>
+    <div class="field">
+      <label>楼层 / 区域</label>
+      <select id="sm-area" onchange="renderSeatMapArea(this.value)">
+        ${areas.map(a => `<option value="${a.roomId}">${escHtml(a.floor)} · ${escHtml(a.name)}（${a.seats.length} 座）</option>`).join('')}
+      </select>
+    </div>
+    <div class="seatmap mt" id="sm-map"
+         onpointerdown="onSeatMapDown(event)" onpointermove="onSeatMapMove(event)"
+         onpointerup="onSeatMapUp(event)" onpointercancel="onSeatMapUp(event)"
+         onwheel="onSeatMapWheel(event)">
+      <div class="stage" id="sm-stage"></div>
+    </div>
+    <div class="seatmap-legend">
+      <span><i class="here"></i>当前选中</span>
+      <span><i class="picked"></i>我的优先级</span>
+      <span><i class="taken"></i>别人也选了</span>
+      <span><i class="taken hot"></i>3 人以上</span>
+      <span><i></i>没人预定</span>
+      <span style="margin-left:auto;cursor:pointer" onclick="resetSeatMapView()">复位 ⟲</span>
+    </div>
+    <div class="seatmap-bar">
+      <div class="picked-name empty" id="sm-name">点图上任意位置选座</div>
+      <button class="btn sm ghost" onclick="closeSheet()">取消</button>
+      <button class="btn sm accent" id="sm-ok" onclick="confirmSeatMap()" disabled>${_sm.mode === 'reserve' ? '用这个座位' : '添加'}</button>
+    </div>`;
+  },
+
   'seat-picker': () => {
     const zones = sortedZones();
     return `
     <div class="grab"></div>
     <h3>添加座位</h3>
-    <div class="desc">先选楼层，再选座位号。</div>
+    <div class="desc">先选楼层，再选座位号；不确定坐哪就翻平面图。</div>
+    ${hasSeatLayout() ? `
+      <button class="btn sm" style="width:100%;margin-bottom:12px" onclick="openSeatMap('add')">🗺️ 按图选座</button>
+    ` : ''}
     <div class="col gap-sm">
       <div class="field"><label>楼层 / 区域</label>
         <select id="sp-zone" onchange="onZone(this.value)">
@@ -1910,18 +2235,21 @@ const SHEETS = {
       </div>
       <div class="field">
         <label>座位</label>
-        <select id="rn-seat">
-          <option value="">请先选区域</option>
-        </select>
+        <div class="row-flex" style="gap:6px">
+          <select id="rn-seat" style="flex:1;min-width:0">
+            <option value="">请先选区域</option>
+          </select>
+          ${hasSeatLayout() ? `<button class="btn sm ghost" onclick="openSeatMapForReserve()">看图</button>` : ''}
+        </div>
       </div>
       <div class="row-flex mt">
         <div class="field">
           <label>开始</label>
-          <input type="time" id="rn-start" value="08:00" oninput="checkRnDuration()">
+          <input type="time" id="rn-start" value="${(state.rnTimes && state.rnTimes.start) || '08:00'}" oninput="checkRnDuration()">
         </div>
         <div class="field">
           <label>结束</label>
-          <input type="time" id="rn-end" value="22:00" oninput="checkRnDuration()">
+          <input type="time" id="rn-end" value="${(state.rnTimes && state.rnTimes.end) || '22:00'}" oninput="checkRnDuration()">
         </div>
       </div>
       <div class="tiny" id="rn-duration-hint" style="color:var(--warn);display:none"></div>
@@ -2562,6 +2890,8 @@ async function init(){
   $('scrim').addEventListener('click', e => { if(e.target.id === 'scrim') closeSheet(); });
 
   syncThemeUI();
+  // 平面图数据决定弹层里显不显示「按图选座」，弹层是现渲染的，所以先在后台捞好
+  loadSeatLayout();
   if(DEMO_MODE){ await enterDemoMode(); return; }
   // 先讲清楚这工具干什么，再去加载数据——新访客第一眼不该是一个空主页
   if(shouldShowWelcome()) openSheet('welcome');

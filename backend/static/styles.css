@@ -629,3 +629,75 @@ body.cozy .box.pad{padding:22px 24px}
 .heatmap-legend .cell.l2{background:var(--heat2)}
 .heatmap-legend .cell.l3{background:var(--heat3)}
 .heatmap-legend .cell.l4{background:var(--heat4)}
+
+/* ========= 平面图选座 ========= */
+.seatmap{
+  --seat-dot:6px;              /* 与 app.js 的 SEAT_DOT_PX 保持一致 */
+  position:relative;overflow:hidden;
+  height:44vh;min-height:200px;max-height:360px;
+  border:2px solid var(--line);border-radius:var(--wobble-r-sm);
+  background:var(--paper2);box-shadow:var(--shadow-sm);
+  touch-action:none;user-select:none;-webkit-user-select:none;cursor:grab;
+}
+.seatmap.panning{cursor:grabbing}
+.seatmap .stage{position:absolute;top:0;left:0;width:100%;transform-origin:0 0}
+.seatmap .stage img{display:block;width:100%;pointer-events:none;-webkit-user-drag:none}
+.seatmap .dots{position:absolute;inset:0}
+/* 平面图是白底黑线的施工图，深色模式下直接反色，免得半夜刺眼 */
+:root[data-theme="dark"] .seatmap .stage img{filter:invert(.88) hue-rotate(180deg) saturate(.8)}
+@media (prefers-color-scheme:dark){
+  :root[data-theme="system"] .seatmap .stage img{filter:invert(.88) hue-rotate(180deg) saturate(.8)}
+}
+/* 坐标记的是圆点左上角，跟官方选座页同一套约定，位置才对得上 */
+.seatmap .dot{
+  position:absolute;width:var(--seat-dot);height:var(--seat-dot);
+  border-radius:50%;background:var(--ink4);border:1px solid var(--ink3);
+  pointer-events:none;
+}
+.seatmap .dot.picked{background:var(--ok);border-color:var(--ok)}
+/* 别人的优先级里也有这个座位：越红抢的人越多 */
+.seatmap .dot.taken{background:var(--warn);border-color:var(--warn)}
+.seatmap .dot.taken.hot{background:var(--danger);border-color:var(--danger)}
+/* 选中的点大一圈，用负 margin 让它和原来的小点同心，不然会跳一下 */
+.seatmap .dot.here{
+  background:var(--accent);border-color:var(--line);
+  width:calc(var(--seat-dot) + 4px);height:calc(var(--seat-dot) + 4px);
+  margin:-2px;z-index:2;
+  box-shadow:0 0 0 3px var(--accent-soft);
+}
+/* 优先级序号浮在点上方——8px 的圆点里塞不下字 */
+.seatmap .dot .num{
+  position:absolute;left:50%;bottom:100%;transform:translate(-50%,-1px);
+  pointer-events:none;
+  font-family:var(--hand2);font-size:10px;line-height:1;color:var(--ok);
+}
+.seatmap .tag{
+  position:absolute;
+  transform:translate(calc(-50% + var(--seat-dot) / 2), calc(var(--seat-dot) + 6px));
+  font-family:var(--mono);font-size:10px;white-space:nowrap;
+  background:var(--surface);color:var(--ink);
+  border:1.5px solid var(--line);border-radius:5px;padding:1px 4px;
+  pointer-events:none;z-index:3;
+}
+.seatmap-bar{
+  display:flex;align-items:center;gap:8px;
+  margin-top:8px;
+}
+.seatmap-bar .picked-name{
+  font-family:var(--mono);font-size:15px;font-weight:600;color:var(--ink);
+  flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.seatmap-bar .picked-name.empty{font-family:var(--sans);font-size:12px;color:var(--ink3);font-weight:400}
+.seatmap-legend{
+  display:flex;align-items:center;gap:4px 10px;flex-wrap:wrap;
+  margin-top:8px;font-family:var(--sans);font-size:10px;color:var(--ink3);
+}
+.seatmap-legend i{
+  width:8px;height:8px;border-radius:50%;display:inline-block;
+  margin-right:4px;vertical-align:middle;
+  background:var(--ink4);border:1px solid var(--ink3);
+}
+.seatmap-legend i.picked{background:var(--ok);border-color:var(--ok)}
+.seatmap-legend i.taken{background:var(--warn);border-color:var(--warn)}
+.seatmap-legend i.taken.hot{background:var(--danger);border-color:var(--danger)}
+.seatmap-legend i.here{background:var(--accent);border-color:var(--accent)}

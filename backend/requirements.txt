@@ -8,3 +8,5 @@ flask-cors
 python-dotenv
 pymongo
 apscheduler
+# 仅 utils/fetch_seat_layout.py 用：把抓下来的平面图压到合适大小
+pillow
