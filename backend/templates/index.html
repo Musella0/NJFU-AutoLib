@@ -326,24 +326,22 @@
       </div>
     </div>
 
+    {% if contacts %}
     <div class="box pad mb-lg">
       <div class="label" style="margin-bottom:4px">联系方式</div>
-      <div class="toggle-row" style="cursor:pointer" onclick="copyContact()">
+      {% for c in contacts %}
+      <div class="toggle-row" style="cursor:pointer" onclick="onContact(this)"
+           data-kind="{{ c.kind }}"{% if c.href %} data-href="{{ c.href }}"{% endif %}>
         <div class="info">
-          <div class="t1">反馈与建议</div>
-          <div class="t2" id="contact-email">msl0314_1@proton.me</div>
+          <div class="t1">{{ c.title }}</div>
+          <div class="t2 contact-value">{{ c.value }}</div>
         </div>
-        <div class="sub" style="color:var(--ink3)">复制</div>
+        <div class="sub" style="color:var(--ink3)">{{ c.action }}</div>
       </div>
-      <div class="toggle-row" style="cursor:pointer" onclick="openGithub()">
-        <div class="info">
-          <div class="t1">GitHub</div>
-          <div class="t2">github.com/Musella0/NJFU-AutoLib</div>
-        </div>
-        <div class="sub" style="color:var(--ink3)">打开</div>
-      </div>
-      <div class="tiny" style="color:var(--ink3);margin-top:6px">遇到 bug、想加功能，或者预约异常，都可以发邮件找我，也欢迎来 GitHub 提 issue。</div>
+      {% endfor %}
+      <div class="tiny" style="color:var(--ink3);margin-top:6px">遇到 bug、想加功能，或者预约异常，都可以照上面的方式找我。</div>
     </div>
+    {% endif %}
 
     <div class="box pad" id="logout-card" style="display:none">
       <div class="toggle-row" style="cursor:pointer;border:0;padding:4px 0" onclick="doLogout()">

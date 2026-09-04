@@ -247,9 +247,33 @@ def _static_v():
         return 0
 
 
+def _contacts():
+    """「联系方式」卡片上的条目，全部来自环境变量。
+
+    仓库里不写死任何一个具体地址或号码：这是部署者的私人联系方式，
+    换个人部署就该是他自己的。没配的条目直接不渲染那一行。
+    """
+    items = []
+    email = os.environ.get("CONTACT_EMAIL", "").strip()
+    qq = os.environ.get("CONTACT_QQ", "").strip()
+    github = os.environ.get("CONTACT_GITHUB", "").strip()
+    if email:
+        items.append({"kind": "email", "title": "反馈与建议", "value": email, "action": "复制"})
+    if qq:
+        items.append({"kind": "qq", "title": "QQ", "value": qq, "action": "复制"})
+    if github:
+        items.append({
+            "kind": "github", "title": "GitHub", "action": "打开",
+            # 显示时去掉协议头，点开时仍要用完整 URL
+            "value": github.split("://", 1)[-1].rstrip("/"),
+            "href": github if "://" in github else "https://" + github,
+        })
+    return items
+
+
 @app.route("/")
 def index():
-    return render_template("index.html", static_v=_static_v())
+    return render_template("index.html", static_v=_static_v(), contacts=_contacts())
 
 @app.route("/admin")
 def admin():

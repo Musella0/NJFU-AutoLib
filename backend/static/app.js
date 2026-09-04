@@ -122,31 +122,41 @@ function toast(msg, type='info'){
   setTimeout(()=>{ el.style.opacity='0'; setTimeout(()=>el.remove(), 300); }, 2800);
 }
 
-async function copyContact(){
-  const el = $('contact-email');
-  const mail = (el ? el.textContent : '').trim();
-  if(!mail) return;
-  try{
-    if(navigator.clipboard && window.isSecureContext){
-      await navigator.clipboard.writeText(mail);
-    } else {
-      const ta = document.createElement('textarea');
-      ta.value = mail;
-      ta.style.position = 'fixed';
-      ta.style.opacity = '0';
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      ta.remove();
-    }
-    toast('邮箱已复制：' + mail, 'success');
-  }catch(e){
-    location.href = 'mailto:' + mail;
+// 非 https 下没有 clipboard API，退回老掉牙的 execCommand
+async function copyPlain(text){
+  if(navigator.clipboard && window.isSecureContext){
+    await navigator.clipboard.writeText(text);
+    return;
   }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  const ok = document.execCommand('copy');
+  ta.remove();
+  if(!ok) throw new Error('copy failed');
 }
 
-function openGithub(){
-  window.open('https://github.com/Musella0/NJFU-AutoLib', '_blank', 'noopener');
+// 联系方式那几行。条目由后端按环境变量渲染，这里只认 data-kind
+async function onContact(row){
+  const el = row.querySelector('.contact-value');
+  const val = (el ? el.textContent : '').trim();
+  if(!val) return;
+  const kind = row.dataset.kind;
+  if(kind === 'github'){
+    window.open(row.dataset.href || ('https://' + val), '_blank', 'noopener');
+    return;
+  }
+  const label = kind === 'qq' ? 'QQ' : '邮箱';
+  try{
+    await copyPlain(val);
+    toast(label + '已复制：' + val, 'success');
+  }catch(e){
+    if(kind === 'email') location.href = 'mailto:' + val;
+    else toast('复制失败了，' + label + '：' + val, 'error');
+  }
 }
 
 async function api(path, opts={}){

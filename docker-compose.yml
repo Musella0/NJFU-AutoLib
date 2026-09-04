@@ -49,6 +49,10 @@ services:
       - SMTP_FROM=${SMTP_FROM:-}
       - RESEND_API_KEY=${RESEND_API_KEY:-}
       - RESEND_FROM=${RESEND_FROM:-AutoLib <onboarding@resend.dev>}
+      # 「联系方式」卡片，留空则整块不显示
+      - CONTACT_EMAIL=${CONTACT_EMAIL:-}
+      - CONTACT_QQ=${CONTACT_QQ:-}
+      - CONTACT_GITHUB=${CONTACT_GITHUB:-}
     ports:
       # 仅供本机调试；公网流量统一经过 Caddy 的 HTTPS 入口。
       - "127.0.0.1:${API_PORT:-5004}:5004"
