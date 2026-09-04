@@ -25,6 +25,9 @@ const APK_NAME = 'AutoLib-0.2.1.apk';
 
 const WEEK_LABELS = ['一','二','三','四','五','六','日']; // iso 1..7
 const WEEK_DEFAULTS = ['08:00-22:00','08:00-22:00','08:00-22:00','08:00-22:00','08:00-20:00','08:00-22:00','08:00-22:00'];
+// 抢座优先级最多 3 个：再往下排也轮不到，后端 MAX_SEAT_LIST 同值
+const MAX_SEATS = 3;
+
 const TIME_MIN = '08:00';
 const TIME_MAX_DEFAULT = '22:00';
 const TIME_MAX_FRIDAY = '20:00';
@@ -555,9 +558,14 @@ function renderCfgSeats(){
     list.appendChild(chip);
   });
   const add = document.createElement('span');
-  add.className = 'chip add';
-  add.textContent = '+ 加座位';
-  add.onclick = () => openSheet('seat-picker');
+  if(seats.length >= MAX_SEATS){
+    add.className = 'chip add disabled';
+    add.textContent = `最多 ${MAX_SEATS} 个`;
+  }else{
+    add.className = 'chip add';
+    add.textContent = '+ 加座位';
+    add.onclick = () => openSheet('seat-picker');
+  }
   list.appendChild(add);
 }
 
@@ -1564,6 +1572,7 @@ function addSeat(){
   if(!state.currentCfg){ toast('请先选择学号','error'); return; }
   const seats = state.currentCfg.seat_list || [];
   if(seats.includes(s)){ toast('座位已存在','error'); closeSheet(); return; }
+  if(seats.length >= MAX_SEATS){ toast(`最多 ${MAX_SEATS} 个座位，先删一个再加`,'error'); return; }
   seats.push(s);
   state.currentCfg.seat_list = seats;
   renderCfgSeats();
@@ -1748,12 +1757,14 @@ function updateSeatMapBar(){
   const chosen = (state.currentCfg && state.currentCfg.seat_list) || [];
   if(_sm.picked){
     const ord = chosen.indexOf(_sm.picked);
+    const full = _sm.mode === 'add' && ord < 0 && chosen.length >= MAX_SEATS;
     const heat = _seatHeat[_sm.picked] || 0;
     const note = ord >= 0 ? `  （已在第 ${ord + 1} 位）`
+               : full ? `  · 最多 ${MAX_SEATS} 个座位`
                : heat > 0 ? `  · 另有 ${heat} 人也选了` : '';
     name.className = 'picked-name';
     name.textContent = _sm.picked + note;
-    ok.disabled = (_sm.mode === 'add' && ord >= 0);
+    ok.disabled = (_sm.mode === 'add' && (ord >= 0 || full));
   }else{
     name.className = 'picked-name empty';
     name.textContent = '点图上任意位置选座';
@@ -1772,6 +1783,7 @@ function confirmSeatMap(){
   if(!state.currentCfg){ toast('请先选择学号','error'); return; }
   const seats = state.currentCfg.seat_list || [];
   if(seats.includes(_sm.picked)){ toast('座位已存在','error'); return; }
+  if(seats.length >= MAX_SEATS){ toast(`最多 ${MAX_SEATS} 个座位，先删一个再加`,'error'); return; }
   seats.push(_sm.picked);
   state.currentCfg.seat_list = seats;
   renderCfgSeats();

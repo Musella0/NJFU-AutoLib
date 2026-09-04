@@ -72,6 +72,9 @@ limiter = Limiter(
 from blueprints.database_bp import database_bp
 app.register_blueprint(database_bp, url_prefix="/db")
 
+# 抢座优先级最多 3 个座位：再往下排也轮不到，列表长了反而看不清顺序
+MAX_SEAT_LIST = 3
+
 ADMIN_RESET_CODE_TTL = 10 * 60
 ADMIN_RESET_MAX_ATTEMPTS = 5
 _admin_reset_codes = {}
@@ -563,6 +566,8 @@ def save_my_account(pid):
         ):
             return jsonify({"error": "座位配置格式无效"}), 400
         update["seat_list"] = list(dict.fromkeys(seat.strip() for seat in seats))
+        if len(update["seat_list"]) > MAX_SEAT_LIST:
+            return jsonify({"error": f"最多只能设置 {MAX_SEAT_LIST} 个座位"}), 400
     if "time" in update and not isinstance(update["time"], dict):
         return jsonify({"error": "时间配置格式无效"}), 400
     if "notify_mode" in update and update["notify_mode"] not in NOTIFY_MODES:

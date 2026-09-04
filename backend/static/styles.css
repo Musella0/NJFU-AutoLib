@@ -320,6 +320,9 @@ body.no-wobble .chip,body.no-wobble .pill{border-radius:999px !important}
 .chip .x:hover{color:var(--danger)}
 .chip.add{border-style:dashed;color:var(--ink3);background:transparent}
 .chip.add:hover{color:var(--accent);border-color:var(--accent)}
+/* 座位已经排满 3 个：位置还留着，但不再是个能点的东西 */
+.chip.add.disabled{color:var(--ink4);cursor:default}
+.chip.add.disabled:hover{color:var(--ink4);border-color:var(--line);transform:none;box-shadow:none}
 .chip.draggable{cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none}
 .chip.draggable:active{cursor:grabbing}
 .chip.draggable .grip{font-family:var(--mono);font-size:10px;color:var(--ink4);letter-spacing:-1px;line-height:1}
