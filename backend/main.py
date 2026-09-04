@@ -43,6 +43,9 @@ app.permanent_session_lifetime = timedelta(days=30)
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SESSION_COOKIE_SECURE", "false").lower() == "true"
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+# templates 是 bind mount 进来的，不打开这个开关 Jinja 会一直用首次加载的缓存，
+# 改完 HTML 必须重启容器才生效。代价只是每次渲染多一次 mtime 检查。
+app.config["TEMPLATES_AUTO_RELOAD"] = True
 _cors_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
 CORS(app, origins=_cors_origins if _cors_origins else [])
 
