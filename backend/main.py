@@ -1014,27 +1014,27 @@ def get_all_seats():
 
 
 @app.route("/api/seat_popularity", methods=["GET"])
+@limiter.limit("60/minute")
 @login_required
 def get_seat_popularity():
-    """每个座位被多少人放进了抢座优先级。
+    """单个座位被多少人放进了抢座优先级。
 
-    只回聚合数字，不带学号，用来在选座图上避开一堆人盯着的位置。
-    自己的账号不计入——图上另有标记，这里的数字读作「除我以外还有几个人」。
+    只回一个数字，不带学号，自己的账号不计入——读作「除我以外还有几个人」。
+    刻意只按座位号单查：早先这里一次吐出全库计数给整张平面图上色，座位重合率本就
+    接近 0，那层颜色没挡下过任何冲突，却等于把每个人的意愿清单摊开。现在只有用户
+    真的点到某个座位才查那一个，限流是拦住拿脚本逐个刷座位、把全图拼回来的做法。
     """
+    seat = (request.args.get("seat") or "").strip()
+    if not seat:
+        return jsonify({"error": "缺少座位号"}), 400
     try:
         uid = session["web_uid"]
         client, db = get_db()
-        counts = {
-            row["_id"]: row["n"]
-            for row in db.user_config_info.aggregate([
-                {"$match": {"pid": {"$ne": uid}, "seat_list": {"$type": "array"}}},
-                {"$unwind": "$seat_list"},
-                {"$group": {"_id": "$seat_list", "n": {"$sum": 1}}},
-            ])
-            if isinstance(row.get("_id"), str)
-        }
+        count = db.user_config_info.count_documents(
+            {"pid": {"$ne": uid}, "seat_list": seat}
+        )
         client.close()
-        return jsonify({"counts": counts}), 200
+        return jsonify({"seat": seat, "count": count}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

@@ -1586,7 +1586,10 @@ function addSeat(){
 // 平面图和座位坐标是 utils/fetch_seat_layout.py 抓下来的静态数据（座位一年也不挪一次），
 // 抢座流程本身用不到，纯粹是让人挑座位时知道自己坐在哪、靠不靠窗。
 let _layout = null;
-let _seatHeat = {};   // 座位号 → 除我以外把它放进优先级的人数
+// 点中某个座位时才查那一个，查过的留着，别重复请求。
+// 早先这里一次拉全库计数给整张图上色：真实数据里座位重合率是 0，那层颜色没挡下过
+// 任何一次冲突，却等于把每个人的意愿清单摊在图上——20 来个点一一对应到具体的人。
+let _seatHeat = {};   // 座位号 → 除我以外把它放进优先级的人数（只存查过的）
 
 // 圆点直径，和 styles.css 里的 --seat-dot 必须一致：
 // 坐标记的是圆点左上角（跟官方一致），判距离时要用它换算出圆心
@@ -1595,14 +1598,17 @@ const SEAT_DOT_PX = 6;
 // 当前地图的状态：区域、选中的座位、平移缩放
 const _sm = { area:null, picked:null, scale:1, x:0, y:0, mode:'add', ratio:1 };
 
-// 别人的优先级里有没有这个座位。失败就当没有——这只是个参考色，不该挡住选座
-async function loadSeatHeat(){
+// 别人的优先级里有没有这个座位。失败就当没有——这只是条提示，不该挡住选座
+async function fetchSeatHeat(seatName){
+  if(seatName in _seatHeat) return;
   try{
-    const { ok, data } = await api('/api/seat_popularity');
-    _seatHeat = (ok && data && data.counts) ? data.counts : {};
+    const { ok, data } = await api('/api/seat_popularity?seat=' + encodeURIComponent(seatName));
+    _seatHeat[seatName] = (ok && data && typeof data.count === 'number') ? data.count : 0;
   }catch(e){
-    _seatHeat = {};
+    _seatHeat[seatName] = 0;
   }
+  // 回来得晚就只补这一行提示，别去重画图——用户可能已经点到别的座位了
+  if(_sm.picked === seatName) updateSeatMapBar();
 }
 
 async function loadSeatLayout(){
@@ -1634,7 +1640,6 @@ function areaOfSeat(seatName){
 async function openSeatMap(mode, seatName){
   await loadSeatLayout();
   if(!hasSeatLayout()){ toast('平面图数据缺失','error'); return; }
-  await loadSeatHeat();
   _sm.mode = (mode === 'reserve') ? 'reserve' : 'add';
   const preset = seatName || (state.currentCfg && (state.currentCfg.seat_list || [])[0]);
   const area = areaOfSeat(preset) || _layout.areas[0];
@@ -1664,12 +1669,9 @@ function drawSeatMapDots(){
   const chosen = (state.currentCfg && state.currentCfg.seat_list) || [];
   const dots = _sm.area.seats.map(([name, x, y]) => {
     const ord = chosen.indexOf(name);
-    const heat = _seatHeat[name] || 0;
     let cls = 'dot';
     if(name === _sm.picked) cls += ' here';
     else if(ord >= 0) cls += ' picked';
-    else if(heat >= 3) cls += ' taken hot';
-    else if(heat > 0) cls += ' taken';
     const num = (ord >= 0 && name !== _sm.picked) ? `<span class="num">${ord + 1}</span>` : '';
     return `<i class="${cls}" style="left:${x}%;top:${y}%">${num}</i>`;
   }).join('');
@@ -1748,6 +1750,8 @@ function pickNearestSeat(clientX, clientY){
   }
   if(!best || Math.sqrt(bestD) > 8) return;   // 离所有座位都太远，当成误触
   _sm.picked = best;
+  // 立即预约是当场的事，跟别人明早的优先级撞不上，不必去查
+  if(_sm.mode === 'add') fetchSeatHeat(best);
   drawSeatMapDots();
 }
 
@@ -1761,7 +1765,7 @@ function updateSeatMapBar(){
     const heat = _seatHeat[_sm.picked] || 0;
     const note = ord >= 0 ? `  （已在第 ${ord + 1} 位）`
                : full ? `  · 最多 ${MAX_SEATS} 个座位`
-               : heat > 0 ? `  · 另有 ${heat} 人也选了` : '';
+               : heat > 0 ? `  · AutoLib 中另有 ${heat} 人也选了` : '';
     name.className = 'picked-name';
     name.textContent = _sm.picked + note;
     ok.disabled = (_sm.mode === 'add' && (ord >= 0 || full));
@@ -2027,9 +2031,7 @@ const SHEETS = {
     <div class="seatmap-legend">
       <span><i class="here"></i>当前选中</span>
       <span><i class="picked"></i>我的优先级</span>
-      <span><i class="taken"></i>别人也选了</span>
-      <span><i class="taken hot"></i>3 人以上</span>
-      <span><i></i>没人预定</span>
+      <span><i></i>其他座位</span>
       <span style="margin-left:auto;cursor:pointer" onclick="resetSeatMapView()">复位 ⟲</span>
     </div>
     <div class="seatmap-bar">

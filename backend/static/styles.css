@@ -658,9 +658,6 @@ body.cozy .box.pad{padding:22px 24px}
   pointer-events:none;
 }
 .seatmap .dot.picked{background:var(--ok);border-color:var(--ok)}
-/* 别人的优先级里也有这个座位：越红抢的人越多 */
-.seatmap .dot.taken{background:var(--warn);border-color:var(--warn)}
-.seatmap .dot.taken.hot{background:var(--danger);border-color:var(--danger)}
 /* 选中的点大一圈，用负 margin 让它和原来的小点同心，不然会跳一下 */
 .seatmap .dot.here{
   background:var(--accent);border-color:var(--line);
@@ -701,6 +698,4 @@ body.cozy .box.pad{padding:22px 24px}
   background:var(--ink4);border:1px solid var(--ink3);
 }
 .seatmap-legend i.picked{background:var(--ok);border-color:var(--ok)}
-.seatmap-legend i.taken{background:var(--warn);border-color:var(--warn)}
-.seatmap-legend i.taken.hot{background:var(--danger);border-color:var(--danger)}
 .seatmap-legend i.here{background:var(--accent);border-color:var(--accent)}
