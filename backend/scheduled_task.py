@@ -41,7 +41,6 @@ from typing import List, Dict, Any, Tuple, Optional
 
 import requests
 from pymongo import MongoClient, DESCENDING
-from apscheduler.schedulers.background import BackgroundScheduler
 
 from utils.vpn_system import VPNSystem
 from utils.library_system import LibrarySystem
@@ -136,12 +135,25 @@ db = mongo_client.AutoLib
 user_config_info = db.user_config_info  # 存储用户配置和预约记录
 users_col = db.users  # 存储用户基本信息
 
-IN_LIBRARY_STATUSES = {1093, 3141}
+IN_LIBRARY_STATUSES = {1093, 3141}  # 1093=使用中，3141=暂离，都表示已刷卡入馆
+PENDING_CHECKIN_STATUS = 1027       # 待签到——只有这个状态的预约才谈得上「迟到」
 _arrival_checks_backfilled = False
 
 # 并发抢座：7:00 时所有账号并行执行，避免串行排队让靠后的用户错过黄金窗口。
 # 上限不宜过高，webvpn 网关和图书馆接口都扛不住太猛的并发。
 RESERVE_CONCURRENCY = int(os.getenv("RESERVE_CONCURRENCY", "8"))
+
+
+def _as_status_code(raw: Any) -> Optional[int]:
+    """
+    把 resvStatus 统一成 int。上游返回 int，但 owned_seat 里存的是 str
+    （见 library_system._format_reservation_data），两边比较必须先归一化，
+    否则 '1027' in {1027} 永远是 False，判断会静默失效。
+    """
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _blackout_message(conflict: Dict[str, Any]) -> str:
@@ -575,10 +587,14 @@ def process_reservations() -> None:
     log_with_user(logger, 'info', '系统', '预约处理', f"预约处理结束，耗时 {elapsed:.1f} 秒")
 
 
-def _mark_seat_by_protection(pid: str, dev_name: str) -> None:
+def _mark_seat_by_protection(pid: str, dev_name: str, target_date: str) -> None:
     """
-    将指定用户/座位的当前 owned_seat 条目标记为 by_protection=True，
+    将指定用户/座位/日期的 owned_seat 条目标记为 by_protection=True，
     防止保护后重新预约的位置再次触发级联迟到保护。
+
+    必须按日期过滤：同一座位名下往往还躺着明后天的预约（07:00 定时任务提前约的），
+    整批打标会让那些预约在它们自己那天被 register_protection_jobs 当成
+    “保护生成的预约”跳过，等于第二天迟到保护静默失效。
     """
     try:
         fresh_data = user_config_info.find_one({"pid": pid}, {"owned_seat": 1})
@@ -588,13 +604,21 @@ def _mark_seat_by_protection(pid: str, dev_name: str) -> None:
         seats = owned.get(dev_name)
         if not seats:
             return
-        updated = [{**s, "by_protection": True} for s in seats]
+        updated = [
+            {**s, "by_protection": True}
+            if str(s.get("target_time", ""))[:10] == target_date else s
+            for s in seats
+        ]
+        if updated == seats:
+            log_with_user(logger, 'warning', pid, '迟到保护',
+                         f"未找到 {dev_name} 在 {target_date} 的新预约，未打 by_protection 标记")
+            return
         user_config_info.update_one(
             {"pid": pid},
             {"$set": {f"owned_seat.{dev_name}": updated}}
         )
         log_with_user(logger, 'info', pid, '迟到保护',
-                     f"已标记 {dev_name} 的新预约为 by_protection，防止级联触发")
+                     f"已标记 {dev_name} 在 {target_date} 的新预约为 by_protection，防止级联触发")
     except Exception as e:
         log_with_user(logger, 'warning', pid, '迟到保护', f"标记 by_protection 失败: {str(e)}")
 
@@ -880,23 +904,40 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
             vpn_password=_dec(user["vpn_password"])
         )
 
-        # 检查用户当前签到状态，若已在馆则无需保护
-        # 1093=使用中，3141=暂离，均表示用户已完成签到入馆
-        IN_LIBRARY_STATUSES = {1093, 3141}
+        # 检查这条预约的实时状态，决定要不要保护。
+        # 只有 1027（待签到）才继续往下取消重约；其余一律保守跳过：
+        # 1093/3141 说明人已经进馆了；1169/1217/3265 之类是已违约/已取消/已结束，
+        # 拿这种陈旧 uuid 去 delete_seat 只会换回「预约在当前状态下不能删除」。
+        # uuid 在实时列表里找不到同理——那条预约已经不存在了，不能替它做决定。
         try:
             res_list, _ = library.get_reservation_info()
-            if res_list:
-                for res in res_list:
-                    if res.get('uuid') == seat_dict['uuid']:
-                        current_status = res.get('resvStatus')
-                        if current_status in IN_LIBRARY_STATUSES:
-                            log_with_user(logger, 'info', pid, '迟到保护',
-                                f"用户已在馆内（状态码: {current_status}），跳过迟到保护")
-                            _record_visit_log(pid, seat_dict['uuid'], seat_dict['target_time'], dev_name)
-                            return
-                        log_with_user(logger, 'info', pid, '迟到保护',
-                            f"用户未签到（状态码: {current_status}），继续执行迟到保护")
-                        break
+            if res_list is None:
+                log_with_user(logger, 'warning', pid, '迟到保护',
+                    "查询实时预约失败，保守跳过本次保护")
+                return
+
+            matched = next(
+                (r for r in (res_list or []) if r.get('uuid') == seat_dict['uuid']),
+                None,
+            )
+            if matched is None:
+                log_with_user(logger, 'warning', pid, '迟到保护',
+                    f"实时预约列表中找不到 uuid {seat_dict['uuid']}（{dev_name} "
+                    f"{seat_dict['target_time']}），可能已取消或过期，保守跳过本次保护")
+                return
+
+            current_status = _as_status_code(matched.get('resvStatus'))
+            if current_status in IN_LIBRARY_STATUSES:
+                log_with_user(logger, 'info', pid, '迟到保护',
+                    f"用户已在馆内（状态码: {current_status}），跳过迟到保护")
+                _record_visit_log(pid, seat_dict['uuid'], seat_dict['target_time'], dev_name)
+                return
+            if current_status != PENDING_CHECKIN_STATUS:
+                log_with_user(logger, 'warning', pid, '迟到保护',
+                    f"预约状态为 {current_status}，非待签到，保守跳过本次保护")
+                return
+            log_with_user(logger, 'info', pid, '迟到保护',
+                f"用户未签到（状态码: {current_status}），继续执行迟到保护")
         except Exception as e:
             log_with_user(logger, 'warning', pid, '迟到保护',
                 f"检查签到状态失败，继续执行迟到保护: {str(e)}")
@@ -954,7 +995,7 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
                         log_with_user(logger, 'info', pid, '迟到保护', "已同步最新预约信息到数据库")
                         # 非永久保护：标记新预约，防止级联触发
                         if protection_minutes != -1:
-                            _mark_seat_by_protection(pid, dev_name)
+                            _mark_seat_by_protection(pid, dev_name, date_str)
                     except Exception as e:
                         log_with_user(logger, 'warning', pid, '迟到保护', f"同步预约信息失败: {str(e)}")
                     return
@@ -980,102 +1021,87 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
     except Exception as e:
         log_with_user(logger, 'error', pid, '迟到保护', f"执行失败: {str(e)}")
 
-def schedule_late_protection_jobs() -> None:
+def register_late_protection_jobs(scheduler) -> None:
     """
-    注册并执行迟到保护任务
-    
-    工作流程：
-    1. 获取所有开启迟到保护的用户
-    2. 扫描每个用户的预约记录
-    3. 为每个需要保护的座位注册保护任务
-    4. 启动调度器并等待执行
-    
-    保护任务在预约时间前7分钟触发。
-    调度器会一直运行到晚上22点。
-    每30分钟重新扫描一次预约记录，确保新预约也能得到保护。
+    把今天还没到点的迟到保护任务注册到传入的调度器上（在预约开始前 7 分钟触发）。
+
+    这个函数是**幂等**的：job_id 固定 + replace_existing，重复调用只会覆盖同一批任务。
+    调度器由调用方（scheduler_runner）持有并常驻，所以本函数不启动、不关闭、不阻塞。
+
+    历史坑：早先这里自己 new 一个 BackgroundScheduler 并阻塞到 22:00，整段挂在
+    07:00 的抢座任务里。结果白天任何一次重启容器，当天剩下所有人的迟到保护就
+    静默消失了（07:00 那一发已经过去，不会再有人调它），日志上完全看不出异常。
     """
-    scheduler = BackgroundScheduler()
-    
-    def register_protection_jobs():
-        """注册所有需要保护的预约任务"""
-        now = datetime.now()
-        today_str = now.strftime("%Y-%m-%d")
-        
-        try:
-            # 获取需要保护的用户
-            users = list(user_config_info.find({"late_protection": "True"}))
-            log_with_user(logger, 'info', '系统', '迟到保护', f"找到 {len(users)} 个开启迟到保护的用户")
-            
-            # 注册保护任务
-            for user in users:
-                pid = user.get("pid")
-                owned_seat = user.get("owned_seat", {})
-                
-                for dev_name, seat_list in owned_seat.items():
-                    for seat_dict in seat_list:
-                        # 跳过已由保护机制创建的预约，防止级联触发
-                        if seat_dict.get('by_protection'):
-                            log_with_user(logger, 'info', pid, '迟到保护',
-                                         f"跳过已受保护的预约 {dev_name}（防止级联）")
-                            continue
-                        if seat_dict['target_time'][:10] != today_str:
-                            continue
-                            
-                        begin_str = seat_dict['target_time'][:19]
-                        begin_time = datetime.strptime(begin_str, "%Y-%m-%d %H:%M:%S")
-                        exec_time = begin_time - timedelta(minutes=7)
-                        
-                        # 只注册未来的任务
-                        if exec_time > now:
-                            job_id = f"{pid}_{dev_name}_{seat_dict['uuid']}"
-                            scheduler.add_job(
-                                late_protect_action,
-                                'date',
-                                run_date=exec_time,
-                                args=[user, dev_name, seat_dict],
-                                id=job_id,
-                                replace_existing=True
-                            )
-                            log_with_user(logger, 'info', pid, '迟到保护', 
-                                         f"注册任务 用户:{pid} 座位:{dev_name} 执行时间:{exec_time.strftime('%H:%M:%S')}")
-                        else:
-                            log_with_user(logger, 'info', pid, '迟到保护', 
-                                          f"跳过过期任务 用户:{pid} 座位:{dev_name} 原执行时间:{exec_time.strftime('%H:%M:%S')}")
-        except Exception as e:
-            log_with_user(logger, 'error', '系统', '迟到保护', f"注册保护任务时发生异常: {str(e)}")
+    now = datetime.now()
+    today_str = now.strftime("%Y-%m-%d")
 
     try:
-        # 启动调度器
-        scheduler.start()
-        log_with_user(logger, 'info', '系统', '迟到保护', "迟到保护 >> 调度器已启动")
-        
-        # 立即执行一次任务注册
-        register_protection_jobs()
-        
-        # 添加定期重新注册任务
-        scheduler.add_job(
-            register_protection_jobs,
-            'interval',
-            minutes=30,
-            id='refresh_protection_jobs',
-            replace_existing=True
-        )
-        
-        # 主循环
-        while True:
-            now = datetime.now()
-            if now.hour >= 22:
-                log_with_user(logger, 'info', '系统', '迟到保护', "到达22:00，准备退出...")
-                scheduler.shutdown()
-                break
-            time.sleep(30)
-            
+        users = list(user_config_info.find({"late_protection": "True"}))
     except Exception as e:
-        log_with_user(logger, 'error', '系统', '迟到保护', f"注册任务时发生异常: {str(e)}")
-        if scheduler.running:
-            scheduler.shutdown()
-    finally:
-        log_with_user(logger, 'info', '系统', '迟到保护', "迟到保护服务已停止")
+        log_with_user(logger, 'error', '系统', '迟到保护', f"查询用户列表异常: {str(e)}")
+        return
+
+    registered = 0
+    try:
+        for user in users:
+            pid = user.get("pid")
+            owned_seat = user.get("owned_seat", {})
+
+            for dev_name, seat_list in owned_seat.items():
+                for seat_dict in seat_list:
+                    if seat_dict['target_time'][:10] != today_str:
+                        continue
+                    # owned_seat 是图书馆整份预约列表的镜像，已违约(1169)/已取消(1217)/
+                    # 已结束(3265) 的陈旧条目都留在里面，同一座位同一天能有好几条。
+                    # 只有「待签到」才谈得上迟到，其余全是僵尸——照旧注册的话，它们会
+                    # 在同一时刻起一堆任务，各自拿着陈旧 uuid 去取消，然后齐刷刷失败。
+                    status = _as_status_code(seat_dict.get('resvStatus'))
+                    if status != PENDING_CHECKIN_STATUS:
+                        log_with_user(logger, 'debug', pid, '迟到保护',
+                                     f"跳过非待签到预约 {dev_name} "
+                                     f"{seat_dict['target_time']}（状态码: {status}）")
+                        continue
+                    # 跳过已由保护机制创建的预约，防止级联触发。
+                    # 日志带上时段：这是唯一一条“今天不给你保护”的记录，
+                    # 不打出来的话事后完全查不到保护为什么没触发。
+                    if seat_dict.get('by_protection'):
+                        log_with_user(logger, 'debug', pid, '迟到保护',
+                                     f"跳过已受保护的预约 {dev_name} "
+                                     f"{seat_dict['target_time']}（防止级联）")
+                        continue
+
+                    begin_str = seat_dict['target_time'][:19]
+                    begin_time = datetime.strptime(begin_str, "%Y-%m-%d %H:%M:%S")
+                    exec_time = begin_time - timedelta(minutes=7)
+
+                    # 只注册未来的任务
+                    if exec_time > now:
+                        # job_id 不带 uuid：带了的话同一时段的重复条目 uuid 不同，
+                        # replace_existing 去重不掉，会并行起好几个保护任务。
+                        job_id = f"{pid}_{dev_name}_{begin_str}"
+                        scheduler.add_job(
+                            late_protect_action,
+                            'date',
+                            run_date=exec_time,
+                            args=[user, dev_name, seat_dict],
+                            id=job_id,
+                            replace_existing=True,
+                            # 调度器卡几十秒不该让保护整个失效；但也不能补跑到预约
+                            # 开始之后——那时进了宽限期，原预约已经删不掉了。
+                            # 4 分钟的窗口保证最晚也在 begin-3min 触发。
+                            misfire_grace_time=240,
+                        )
+                        registered += 1
+                        log_with_user(logger, 'info', pid, '迟到保护',
+                                     f"注册任务 用户:{pid} 座位:{dev_name} 执行时间:{exec_time.strftime('%H:%M:%S')}")
+                    else:
+                        log_with_user(logger, 'debug', pid, '迟到保护',
+                                      f"跳过过期任务 用户:{pid} 座位:{dev_name} 原执行时间:{exec_time.strftime('%H:%M:%S')}")
+    except Exception as e:
+        log_with_user(logger, 'error', '系统', '迟到保护', f"注册保护任务时发生异常: {str(e)}")
+
+    log_with_user(logger, 'info', '系统', '迟到保护',
+                  f"扫描完成：{len(users)} 个用户开启保护，本轮待触发任务 {registered} 个")
 
 
 def auto_nap_action(pid: str) -> None:
@@ -1211,7 +1237,6 @@ def process_auto_naps() -> None:
 
 def scan_and_record_visits() -> None:
     """扫描所有用户今日预约，若检测到签到状态则记录道馆日志（每15分钟由调度器调用）"""
-    IN_LIBRARY_STATUSES = {1093, 3141}
     today_str = datetime.now().strftime("%Y-%m-%d")
     try:
         users = list(user_config_info.find(
@@ -1241,7 +1266,7 @@ def scan_and_record_visits() -> None:
             if not res_list:
                 continue
             for res in res_list:
-                if res.get("resvStatus") in IN_LIBRARY_STATUSES:
+                if _as_status_code(res.get("resvStatus")) in IN_LIBRARY_STATUSES:
                     uuid = res.get("uuid", "")
                     begin_time = res.get("resvBeginTime", "")
                     end_time = res.get("resvEndTime", "")
@@ -1256,19 +1281,17 @@ def scan_and_record_visits() -> None:
 
 if __name__ == "__main__":
     """
-    主程序入口
-    
-    执行流程：
-    1. 处理所有预约请求
-    2. 启动迟到保护服务
-    
+    主程序入口：手动跑一轮预约用。
+
+    迟到保护不在这里启动——它是 scheduler_runner 里的常驻 job
+    （register_late_protection_jobs），需要一个活着的调度器持有任务。
+
     异常处理：
     - 捕获所有异常并记录日志
     - 确保程序正常退出
     """
     try:
         process_reservations()
-        schedule_late_protection_jobs()
     except KeyboardInterrupt:
         log_with_user(logger, 'info', '系统', '程序中断', "程序被用户中断")
     except Exception as e:

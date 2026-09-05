@@ -1,8 +1,9 @@
 """
 定时任务调度入口
 
-使用 APScheduler 在每天指定时间执行预约任务，
-预约完成后自动启动迟到保护服务。
+使用 APScheduler 在每天指定时间执行预约任务。
+迟到保护是独立的常驻 job（每 30 分钟重扫一次），与抢座解耦，
+这样白天重启容器不会让当天剩下的保护全部失效。
 
 环境变量:
   SCHEDULE_HOUR         - 预约执行的小时 (默认 7)
@@ -25,6 +26,10 @@ logging.basicConfig(
     format="[%(asctime)s] [%(levelname)s] %(message)s"
 )
 logger = logging.getLogger("scheduler_runner")
+
+# 主调度器。迟到保护的一次性任务要注册到它上面，所以 run_late_protection_scan
+# 需要能拿到；在 main() 里赋值。
+_scheduler = None
 
 def run_auto_nap_check():
     """每分钟扫描一次，对到达触发时间的用户执行自动午休"""
@@ -80,24 +85,33 @@ def run_prelogin_refresh_task():
 
 
 def run_reservation_task():
-    """执行一次完整的预约 + 迟到保护流程"""
+    """执行一次抢座。迟到保护是独立的常驻 job，不再挂在这里。"""
     logger.info("========== 开始执行预约任务 ==========")
     try:
         # 每次执行时重新导入，确保拿到最新的数据库连接
-        from scheduled_task import process_reservations, schedule_late_protection_jobs
+        from scheduled_task import process_reservations
 
-        # 1. 执行所有预约
         process_reservations()
         logger.info("预约任务执行完毕")
-
-        # 2. 启动迟到保护（会阻塞到22:00）
-        logger.info("启动迟到保护服务...")
-        schedule_late_protection_jobs()
-
     except Exception as e:
         logger.error(f"预约任务执行异常: {e}", exc_info=True)
     finally:
         logger.info("========== 预约任务结束 ==========")
+
+
+def run_late_protection_scan():
+    """
+    把今天待触发的迟到保护任务注册到主调度器上，每 30 分钟重扫一次。
+
+    独立成常驻 job 而不是挂在 07:00 抢座后面，是因为后者一旦白天重启容器就
+    再也不会被调用，当天剩下所有人的保护会静默消失。现在启动即扫一次，
+    重启只会丢掉「已经过了触发点」的那些，其余照常补回来。
+    """
+    try:
+        from scheduled_task import register_late_protection_jobs
+        register_late_protection_jobs(_scheduler)
+    except Exception as e:
+        logger.error(f"迟到保护扫描异常: {e}", exc_info=True)
 
 def main():
     hour = int(os.getenv("SCHEDULE_HOUR", "7"))
@@ -117,7 +131,9 @@ def main():
 
     logger.info(f"定时预约调度器启动，每天 {hour:02d}:{minute:02d} 执行预约")
 
+    global _scheduler
     scheduler = BlockingScheduler(timezone="Asia/Shanghai")
+    _scheduler = scheduler
     scheduler.add_job(
         run_reservation_task,
         'cron',
@@ -179,6 +195,18 @@ def main():
         hour='8,10,12,14,16,18,20,22',
         minute=0,
         id='visit_check',
+        replace_existing=True
+    )
+    # 启动即扫一次（next_run_time=now），之后每 30 分钟一轮，好让当天新产生的
+    # 预约——比如保护自己重约出来的、或用户手动约的——也能进保护。
+    scheduler.add_job(
+        run_late_protection_scan,
+        'interval',
+        minutes=30,
+        id='late_protection_scan',
+        next_run_time=datetime.now(),
+        coalesce=True,
+        max_instances=1,
         replace_existing=True
     )
     scheduler.add_job(
