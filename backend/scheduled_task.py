@@ -134,6 +134,7 @@ mongo_client = MongoClient(config.get_mongo_uri())
 db = mongo_client.AutoLib
 user_config_info = db.user_config_info  # 存储用户配置和预约记录
 users_col = db.users  # 存储用户基本信息
+pending_segments = db.pending_segments  # 超出提前预约窗口、等着补约的时段
 
 IN_LIBRARY_STATUSES = {1093, 3141}  # 1093=使用中，3141=暂离，都表示已刷卡入馆
 PENDING_CHECKIN_STATUS = 1027       # 待签到——只有这个状态的预约才谈得上「迟到」
@@ -142,6 +143,18 @@ _arrival_checks_backfilled = False
 # 并发抢座：7:00 时所有账号并行执行，避免串行排队让靠后的用户错过黄金窗口。
 # 上限不宜过高，webvpn 网关和图书馆接口都扛不住太猛的并发。
 RESERVE_CONCURRENCY = int(os.getenv("RESERVE_CONCURRENCY", "8"))
+
+# 图书馆服务端规则 resvRule.earliestResvTime（实测 1860 分钟 = 31 小时）：一个时段
+# 最早只能提前这么久下单，而且是相对「预约开始时间」算的。所以 7:00 那批最远只够得到
+# 次日 14:00 开始的时段，再往后的段发过去只会得到「不在提前预约时间范围内」。
+# 超窗的段不能硬发，只能排进 pending_segments，等 开始时间-31h 到了再补约。
+EARLIEST_RESV_MINUTES = int(os.getenv("EARLIEST_RESV_MINUTES", "1860"))
+TIME_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+def bookable_at(resv_begin_time: str) -> datetime:
+    """该时段最早可以下单的时刻。"""
+    return datetime.strptime(resv_begin_time, TIME_FMT) - timedelta(minutes=EARLIEST_RESV_MINUTES)
 
 
 def _as_status_code(raw: Any) -> Optional[int]:
@@ -328,6 +341,171 @@ def handle_reservation_error(pid: str, error_msg: str) -> None:
     log_with_user(logger, 'error', pid, '预约异常', error_msg)
     update_user_config(pid, error_msg)
 
+
+def _reserve_one_segment(
+    library: LibrarySystem,
+    pid: str,
+    seat_ids: List[str],
+    resv_begin_time: str,
+    resv_end_time: str,
+    seg_label: str
+) -> Tuple[bool, str]:
+    """
+    预约一个时段。7:00 主流程和排队补约共用这一份，两边的日志和结果格式才不会跑偏。
+
+    Returns:
+        Tuple[bool, str]: (是否成功, 写进 result 给用户看的一行)
+    """
+    try:
+        log_with_user(logger, 'info', pid, '预约执行', f"开始预约 {seg_label}")
+        res_message, user_info = library.reserve_seat(
+            seat_list=seat_ids,
+            resv_begin_time=resv_begin_time,
+            resv_end_time=resv_end_time
+        )
+    except Exception as e:
+        err = f"{seg_label} 异常: {str(e)}"
+        log_with_user(logger, 'error', pid, '预约异常', err)
+        return False, f"❌ {err}"
+
+    if "成功" in res_message or "预约成功" in res_message:
+        log_with_user(logger, 'info', pid, '预约结果', f"{seg_label} 成功: {res_message}")
+        if user_info:
+            library.insert_or_update_mongo(
+                collection_name="users",
+                pid=user_info.get("pid"),
+                data=user_info,
+                upsert=True
+            )
+        # res_message 已是「✅ 08-08 · 08:30-22:00 · 3F-C109 · 预约成功」格式
+        return True, res_message
+
+    log_with_user(logger, 'error', pid, '预约失败', f"{seg_label} 失败: {res_message}")
+    return False, f"❌ {seg_label}: {res_message}"
+
+
+def queue_pending_segment(pid: str, resv_begin_time: str, resv_end_time: str, open_at: datetime) -> None:
+    """
+    把超窗的时段排进补约队列。
+
+    按 (学号, 起止时间) upsert：同一段被重复排队——比如用户又点了一次「立即预约」——
+    只会更新同一条记录，不会攒出一堆重复补约。
+    """
+    now = datetime.now()
+    pending_segments.update_one(
+        {"pid": pid, "resv_begin_time": resv_begin_time, "resv_end_time": resv_end_time},
+        {
+            "$set": {"open_at": open_at, "status": "pending", "updated_at": now},
+            "$setOnInsert": {"created_at": now},
+        },
+        upsert=True
+    )
+
+
+def _pending_result_line(seg_label: str, open_at: datetime) -> str:
+    hours = EARLIEST_RESV_MINUTES // 60
+    return (f"⏳ {seg_label}: 图书馆最多提前 {hours} 小时预约，"
+            f"已排到 {open_at:%m-%d %H:%M} 自动补约")
+
+
+def _replace_queued_result(pid: str, resv_begin_time: str, resv_end_time: str, line: str) -> None:
+    """
+    用补约结果替换掉 result 里那条「⏳ 已排队」占位。
+
+    直接覆盖整个 result 会把同一天其他段的结果一起抹掉，所以按时间段匹配，只换自己那行。
+    """
+    cfg = user_config_info.find_one({"pid": pid}, {"result": 1}) or {}
+    span = f"{resv_begin_time[11:16]}-{resv_end_time[11:16]}"
+    kept = [
+        item for item in (cfg.get("result") or "").splitlines()
+        if not (item.startswith("⏳") and span in item)
+    ]
+    kept.append(line)
+    update_user_config(pid, "\n".join(kept))
+
+
+def _finish_pending_segment(doc: Dict[str, Any], status: str, message: str) -> None:
+    """给队列里的一条打上终态，顺手把结果写回用户面板。"""
+    pid = doc.get("pid", "?")
+    pending_segments.update_one(
+        {"_id": doc["_id"]},
+        {"$set": {"status": status, "message": message, "updated_at": datetime.now()}}
+    )
+    log_with_user(logger, 'info' if status == "done" else 'warning', pid, '排队补约',
+                  f"{doc.get('resv_begin_time')} ~ {doc.get('resv_end_time')} → {status}: {message}")
+    _replace_queued_result(pid, doc.get("resv_begin_time", ""), doc.get("resv_end_time", ""), message)
+
+
+def process_due_segments(now: Optional[datetime] = None) -> None:
+    """
+    补约那些当初超出 31 小时窗口、现在刚够得着的时段。
+
+    独立常驻 job 扫数据库，而不是 7:00 时挂一串一次性定时任务：后者只活在内存里，
+    白天重启一次容器当天所有补约就静默消失了（迟到保护踩过同样的坑）。
+
+    Args:
+        now: 仅测试用，默认取当前时间
+    """
+    now = now or datetime.now()
+    try:
+        due = list(
+            pending_segments.find({"status": "pending", "open_at": {"$lte": now}}).sort("open_at", 1)
+        )
+    except Exception as exc:
+        log_with_user(logger, 'error', '系统', '排队补约', f"读取补约队列失败: {exc}")
+        return
+
+    for doc in due:
+        pid = doc.get("pid", "?")
+        resv_begin_time = doc.get("resv_begin_time", "")
+        resv_end_time = doc.get("resv_end_time", "")
+        seg_label = f"{resv_begin_time[5:10]} {resv_begin_time[11:16]}-{resv_end_time[11:16]}"
+        try:
+            if datetime.strptime(resv_begin_time, TIME_FMT) <= now:
+                _finish_pending_segment(doc, "expired", f"⚠️ {seg_label}: 已过开始时间，放弃补约")
+                continue
+
+            cfg = user_config_info.find_one({"pid": pid, "is_reserved": "True", "verified": True})
+            if not cfg or not cfg.get("seat_list"):
+                _finish_pending_segment(doc, "skipped", f"⚠️ {seg_label}: 账号已停用自动预约，跳过补约")
+                continue
+
+            conflict = find_reservation_conflict(db.school_notice_reviews, resv_begin_time, resv_end_time)
+            if conflict:
+                _finish_pending_segment(doc, "skipped", _blackout_message(conflict))
+                continue
+
+            seat_ids = get_seat_ids(cfg["seat_list"])
+            if not seat_ids:
+                _finish_pending_segment(doc, "failed", f"❌ {seg_label}: 未找到有效的座位ID")
+                continue
+
+            vpn_password = _dec(cfg["vpn_password"])
+            library = LibrarySystem(
+                username=pid,
+                password=vpn_password,
+                vpn_password=vpn_password
+            )
+            ok, line = _reserve_one_segment(
+                library, pid, seat_ids, resv_begin_time, resv_end_time, seg_label
+            )
+            if ok:
+                try:
+                    # get_reservation_info 会重建 owned_seat，迟到保护是照着它扫的，
+                    # 不刷一次这条补出来的预约就进不了保护。
+                    library.get_reservation_info()
+                except Exception as exc:
+                    log_with_user(logger, 'warning', pid, '排队补约', f"同步预约信息失败: {exc}")
+            _finish_pending_segment(doc, "done" if ok else "failed", line)
+            notify_user(cfg,
+                        "✅ 补约成功" if ok else "❌ 补约失败",
+                        f"学号 {pid}\n{line}",
+                        always=not ok)
+        except Exception as exc:
+            log_with_user(logger, 'error', pid, '排队补约', f"{seg_label} 补约异常: {exc}")
+            _finish_pending_segment(doc, "failed", f"❌ {seg_label}: 补约异常 {exc}")
+
+
 def reservation(res_item: Dict[str, Any]) -> None:
     """
     处理单个预约请求
@@ -368,55 +546,54 @@ def reservation(res_item: Dict[str, Any]) -> None:
             handle_reservation_error(pid, "未找到有效的座位ID")
             return
 
+        # 按提前预约窗口把段分成两拨：现在够得着的照常抢，够不着的排队等窗口打开。
+        # 这一步必须在登录之前——整天的段全都超窗时，连 webvpn 都不用登。
+        now = datetime.now()
+        plan = [
+            (idx, begin, end, bookable_at(begin))
+            for idx, (begin, end) in enumerate(segments, 1)
+        ]
+        due = [item for item in plan if item[3] <= now]
+        queued = [item for item in plan if item[3] > now]
+
+        segment_results: Dict[int, str] = {}
+        for idx, resv_begin_time, resv_end_time, open_at in queued:
+            seg_label = f"第{idx}段 {resv_begin_time[-8:-3]}-{resv_end_time[-8:-3]}"
+            queue_pending_segment(pid, resv_begin_time, resv_end_time, open_at)
+            segment_results[idx] = _pending_result_line(seg_label, open_at)
+            log_with_user(logger, 'info', pid, '预约排队',
+                          f"{seg_label} 超出提前预约窗口，已排到 {open_at:%Y-%m-%d %H:%M} 补约")
+
         # 初始化图书馆系统（多段共享同一会话）
         # 优先复用预登录好的会话：webvpn + CAS 那 4~8 秒已经在 6:50 付过了，
         # 这里直接就能发预约请求。取不到（没预登录、会话过期、校验失败）
         # 就照旧现场登录，行为与加这个功能之前完全一致。
-        library = prelogin.take(pid)
-        if library is not None:
-            log_with_user(logger, 'info', pid, '系统初始化', "复用预登录会话")
-        else:
-            log_with_user(logger, 'info', pid, '系统初始化', "开始初始化图书馆系统")
-            library = LibrarySystem(
-                username=pid,
-                password=vpn_password,
-                vpn_password=vpn_password
-            )
+        library = None
+        if due:
+            library = prelogin.take(pid)
+            if library is not None:
+                log_with_user(logger, 'info', pid, '系统初始化', "复用预登录会话")
+            else:
+                log_with_user(logger, 'info', pid, '系统初始化', "开始初始化图书馆系统")
+                library = LibrarySystem(
+                    username=pid,
+                    password=vpn_password,
+                    vpn_password=vpn_password
+                )
 
         # 逐段预约
         any_success = False
-        segment_results: List[str] = []
-        for idx, (resv_begin_time, resv_end_time) in enumerate(segments, 1):
+        any_failure = False
+        for idx, resv_begin_time, resv_end_time, _ in due:
             seg_label = f"第{idx}段 {resv_begin_time[-8:-3]}-{resv_end_time[-8:-3]}"
-            try:
-                log_with_user(logger, 'info', pid, '预约执行', f"开始预约 {seg_label}")
-                res_message, user_info = library.reserve_seat(
-                    seat_list=seat_ids,
-                    resv_begin_time=resv_begin_time,
-                    resv_end_time=resv_end_time
-                )
+            ok, line = _reserve_one_segment(
+                library, pid, seat_ids, resv_begin_time, resv_end_time, seg_label
+            )
+            any_success = any_success or ok
+            any_failure = any_failure or not ok
+            segment_results[idx] = line
 
-                if "成功" in res_message or "预约成功" in res_message:
-                    log_with_user(logger, 'info', pid, '预约结果', f"{seg_label} 成功: {res_message}")
-                    any_success = True
-                    # res_message 已是「✅ 08-08 · 08:30-22:00 · 3F-C109 · 预约成功」格式
-                    segment_results.append(res_message)
-                    if user_info:
-                        library.insert_or_update_mongo(
-                            collection_name="users",
-                            pid=user_info.get("pid"),
-                            data=user_info,
-                            upsert=True
-                        )
-                else:
-                    log_with_user(logger, 'error', pid, '预约失败', f"{seg_label} 失败: {res_message}")
-                    segment_results.append(f"❌ {seg_label}: {res_message}")
-            except Exception as e:
-                err = f"{seg_label} 异常: {str(e)}"
-                log_with_user(logger, 'error', pid, '预约异常', err)
-                segment_results.append(f"❌ {err}")
-
-        combined = "\n".join(segment_results)
+        combined = "\n".join(segment_results[idx] for idx in sorted(segment_results))
         update_user_config(pid, combined)
         if any_success:
             notify_user(res_item, "✅ 预约完成" if len(segments) == 1 else f"✅ 多段预约 ({len(segments)}段)",
@@ -432,6 +609,9 @@ def reservation(res_item: Dict[str, Any]) -> None:
                                     f"状态 {res.get('resvStatus')}")
             except Exception:
                 pass
+        elif queued and not any_failure:
+            # 一段都没约，但也没失败——全都还没到窗口，等补约任务接手就行，不算异常。
+            notify_user(res_item, f"⏳ 预约已排队 ({len(queued)}段)", f"学号 {pid}\n{combined}")
         else:
             notify_user(res_item, "❌ 预约失败", f"学号 {pid}\n{combined}", always=True)
 

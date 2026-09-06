@@ -216,6 +216,15 @@ def _ensure_database_indexes() -> None:
             unique=True,
             name="uniq_school_notice_revision",
         )
+        # 同一学号的同一时段只排一次补约，重复点「立即预约」不会攒出多条。
+        db.pending_segments.create_index(
+            [("pid", 1), ("resv_begin_time", 1), ("resv_end_time", 1)],
+            unique=True,
+            name="uniq_pending_segment",
+        )
+        db.pending_segments.create_index(
+            [("status", 1), ("open_at", 1)], name="pending_segment_due"
+        )
     finally:
         client.close()
 
@@ -1091,6 +1100,15 @@ def reserve_custom(pid):
         blocked = _manual_reservation_blackout([(resv_begin, resv_end)])
         if blocked:
             return jsonify(blocked), 409
+
+        # 图书馆只让提前 31 小时下单，超了服务端只回一句「不在提前预约时间范围内」，
+        # 这里先算一遍，好告诉用户到底什么时候能约。
+        from scheduled_task import bookable_at
+        open_at = bookable_at(resv_begin)
+        if open_at > _dt.now():
+            return jsonify({
+                "error": f"图书馆最多提前 31 小时预约，该时段要到 {open_at:%m-%d %H:%M} 之后才能下单"
+            }), 400
 
         library = LibrarySystem(
             username=pid,

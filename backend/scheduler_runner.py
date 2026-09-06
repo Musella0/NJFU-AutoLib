@@ -57,6 +57,15 @@ def run_arrival_check():
         logger.error(f"到馆复查异常: {e}", exc_info=True)
 
 
+def run_pending_segment_check():
+    """补约 7:00 时还超出图书馆 31 小时预约窗口的时段。"""
+    try:
+        from scheduled_task import process_due_segments
+        process_due_segments()
+    except Exception as e:
+        logger.error(f"排队补约异常: {e}", exc_info=True)
+
+
 def run_school_notice_check():
     """20:00 检查学校公告；20:05/20:15 只在前次失败时继续。"""
     try:
@@ -187,6 +196,17 @@ def main():
         'interval',
         minutes=1,
         id='arrival_check',
+        replace_existing=True
+    )
+    # 每分钟扫一次补约队列：窗口一开就下单，晚几十秒无所谓——能约到的时段这时候
+    # 几乎没人在抢，但一定要扫得比窗口密，否则等于错过。
+    scheduler.add_job(
+        run_pending_segment_check,
+        'interval',
+        minutes=1,
+        id='pending_segment_check',
+        coalesce=True,
+        max_instances=1,
         replace_existing=True
     )
     scheduler.add_job(
