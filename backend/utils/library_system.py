@@ -231,7 +231,9 @@ class LibrarySystem(BaseSystem):
         self.login_url = f"{self.base_url}ic-web/login/user{self.vpn_suffix}"
         self.reserve_url = f"{self.base_url}ic-web/reserve{self.vpn_suffix}"
 
-        # 用户信息
+        # 图书馆返回的用户信息。注意里面的 'pid' 是图书馆自己的内部人员 ID，
+        # 和登录学号不一定相等，绝对不能拿它当本地数据库的主键——
+        # user_config_info / arrival_checks / web_users 全都以 self.username（登录学号）归属。
         self.user_info: Optional[Dict[str, Any]] = None
         self.vpn: Optional[VPNSystem] = None
 
@@ -827,8 +829,11 @@ class LibrarySystem(BaseSystem):
                 log_with_user('info', self.username, '预约成功',
                              f"座位 {seat_name}({seat_id}) 预约成功: {success_msg}")
                 try:
+                    # 归属一律用登录学号：user_info['pid'] 是图书馆自己的内部人员 ID，
+                    # 多数人恰好和学号相同，不同的那几个会被注册到一个不存在的账号上，
+                    # 复查时找不到凭据直接判 failed，迟到保护静默失效。
                     register_arrival_check(
-                        str(user_info.get('pid') or self.username),
+                        self.username,
                         str(success_info.get('uuid') or ''),
                         actual_seat_name,
                         resv_begin_time,
@@ -1082,7 +1087,7 @@ class LibrarySystem(BaseSystem):
                 # get_reservation_info 会重建 owned_seat；保留本地流程元数据，
                 # 否则迟到保护生成的新预约会在下一次查询后丢失标记并被二次保护。
                 existing = user_config_info.find_one(
-                    {"pid": self.user_info['pid']}, {"owned_seat": 1}
+                    {"pid": self.username}, {"owned_seat": 1}
                 ) or {}
                 local_metadata = {
                     seat.get("uuid"): {"by_protection": True}
@@ -1097,7 +1102,7 @@ class LibrarySystem(BaseSystem):
                 # 更新数据库
                 if not self.insert_or_update_mongo(
                     'user_config_info',
-                    self.user_info['pid'],
+                    self.username,
                     {"owned_seat": owned_seat},
                     upsert=True
                 ):
@@ -1121,15 +1126,10 @@ class LibrarySystem(BaseSystem):
         在查询失败或发生异常时调用，确保用户配置被正确清空。
         """
         try:
-            user_pid = (
-                self.user_info['pid']
-                if hasattr(self, 'user_info') and self.user_info and 'pid' in self.user_info
-                else ''
-            )
-            if user_pid:
+            if self.username:
                 self.insert_or_update_mongo(
                     'user_config_info',
-                    user_pid,
+                    self.username,
                     {"owned_seat": {}},
                     upsert=True
                 )
