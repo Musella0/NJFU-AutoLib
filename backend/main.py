@@ -1,9 +1,10 @@
+import hashlib
 import os
 import secrets
 import time
 from functools import wraps
 from threading import Lock
-from flask import Flask, render_template, jsonify, request, session
+from flask import Flask, g, render_template, jsonify, request, session
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -96,9 +97,84 @@ def _manual_reservation_blackout(segments):
     return ReservationBlackoutError(conflict).to_payload() if conflict else None
 
 
+# ==================== Bearer token ====================
+# 登录态有两条等价的路：Cookie 会话，和 Authorization: Bearer <token>。
+# 加第二条是因为 Cookie 这条路会被环境掐断——Safari 在明文 HTTP 页面上直接丢弃带
+# Secure 标记的 Cookie，各家 WebView / 第三方客户端也未必带 Cookie 罐，用户看到的
+# 现象是「验证成功但没登上」。令牌由验证接口签发，服务端只存 sha256，明文只在签发
+# 时回一次。代价是它不像 Cookie 那样有 HttpOnly 保护，页面被 XSS 就能读走，所以
+# 有效期与会话一致，退出登录时立即吊销。
+
+AUTH_TOKEN_TTL = timedelta(days=30)
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _issue_auth_token(db, uid: str) -> str:
+    """签发长效令牌，返回明文；库里只落哈希。"""
+    token = secrets.token_urlsafe(32)
+    now = datetime.now()
+    db.auth_tokens.insert_one({
+        "token_hash": _hash_token(token),
+        "uid": uid,
+        "created_at": now,
+        "expires_at": now + AUTH_TOKEN_TTL,
+    })
+    return token
+
+
+def _bearer_token():
+    scheme, _, value = request.headers.get("Authorization", "").partition(" ")
+    if scheme.lower() != "bearer":
+        return None
+    return value.strip() or None
+
+
+def _uid_from_token():
+    token = _bearer_token()
+    if not token:
+        return None
+    client, db = get_db()
+    try:
+        row = db.auth_tokens.find_one({"token_hash": _hash_token(token)})
+    finally:
+        client.close()
+    if not row:
+        return None
+    # TTL 索引最多能拖一分钟才删，这里自己再判一次过期。
+    expires_at = row.get("expires_at")
+    if expires_at and expires_at <= datetime.now():
+        return None
+    return row.get("uid")
+
+
+def _revoke_auth_token() -> None:
+    """退出登录时吊销本次请求带的令牌（如果有）。"""
+    token = _bearer_token()
+    if not token:
+        return
+    client, db = get_db()
+    try:
+        db.auth_tokens.delete_one({"token_hash": _hash_token(token)})
+    finally:
+        client.close()
+
+
+def current_uid():
+    """当前登录学号：Cookie 会话优先，其次 Bearer 令牌；都没有返回 None。
+
+    结果挂在 g 上，一个请求里只查一次库。
+    """
+    if "autolib_uid" not in g:
+        g.autolib_uid = session.get("web_uid") or _uid_from_token()
+    return g.autolib_uid
+
+
 def _ensure_uid():
-    """确保 session 中有 uid：已登录返回真实 uid，否则分配游客 uid。"""
-    uid = session.get("web_uid")
+    """确保有 uid：已登录（Cookie 或令牌）返回真实 uid，否则分配游客 uid。"""
+    uid = current_uid()
     if uid:
         return uid
     guest_uid = session.get("guest_uid")
@@ -115,6 +191,13 @@ def _ensure_database_indexes() -> None:
     client, db = get_db()
     try:
         db.web_users.create_index("uid", unique=True, name="uniq_web_uid")
+        db.auth_tokens.create_index(
+            "token_hash", unique=True, name="uniq_auth_token"
+        )
+        # 过期令牌交给 MongoDB 的 TTL 线程清，不需要额外的定时任务。
+        db.auth_tokens.create_index(
+            "expires_at", expireAfterSeconds=0, name="ttl_auth_token"
+        )
         # Create the new invariant before removing the legacy compound index.
         # If historical duplicates still exist this raises DuplicateKeyError,
         # leaving the old index intact until migrate_account_configs.py runs.
@@ -142,7 +225,7 @@ def _ensure_database_indexes() -> None:
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if not session.get("web_uid"):
+        if not current_uid():
             return jsonify({"error": "请先验证学号登录", "need_login": True}), 401
         return f(*args, **kwargs)
     return decorated
@@ -161,7 +244,7 @@ def own_account_required(f):
     """Require a real login whose student ID matches the route account."""
     @wraps(f)
     def decorated(pid, *args, **kwargs):
-        uid = session.get("web_uid")
+        uid = current_uid()
         if not uid:
             return jsonify({"error": "请先验证学号登录", "need_login": True}), 401
         if uid != pid:
@@ -302,6 +385,8 @@ def _login_as(db, pid: str):
     session.permanent = True
     session["web_uid"] = pid
     session.pop("guest_uid", None)
+    # 本次请求早先可能已经把「未登录」缓存进 g 了，登录后要让它重新解析。
+    g.pop("autolib_uid", None)
     user = db.web_users.find_one({"uid": pid}) or {}
     return (user.get("nickname") or "").strip()
 
@@ -325,37 +410,40 @@ def _upsert_verified_account(db, pid: str, password: str) -> None:
     )
 
 
-def _offline_login(pid: str, password: str) -> bool:
+def _offline_login(pid: str, password: str):
     """学校服务不可用时的回退：本地缓存的密码哈希对得上就放行进入登录态。
 
     只用于服务异常（不是密码错误）的场景，且不会把 verified 置为 True——
     学校侧恢复后仍需要重新验证一次。
+    成功返回新签发的令牌（非空字符串），失败返回 None。
     """
     client, db = get_db()
     try:
         user = db.web_users.find_one({"uid": pid})
         if not user or not check_password_hash(user.get("password", ""), password):
-            return False
+            return None
         _login_as(db, pid)
-        return True
+        return _issue_auth_token(db, pid)
     finally:
         client.close()
 
 
 @app.route("/api/auth/logout", methods=["POST"])
 def logout():
+    _revoke_auth_token()
     session.clear()
     return jsonify({"message": "已退出"}), 200
 
 
 @app.route("/api/auth/me", methods=["GET"])
 def auth_me():
-    if "web_uid" in session:
+    uid = current_uid()
+    if uid:
         client, db = get_db()
-        user = db.web_users.find_one({"uid": session["web_uid"]}) or {}
+        user = db.web_users.find_one({"uid": uid}) or {}
         nickname = (user.get("nickname") or "").strip()
         client.close()
-        return jsonify({"logged_in": True, "uid": session["web_uid"], "nickname": nickname, "is_guest": False}), 200
+        return jsonify({"logged_in": True, "uid": uid, "nickname": nickname, "is_guest": False}), 200
     if "guest_uid" in session:
         return jsonify({"logged_in": False, "uid": session["guest_uid"], "nickname": "", "is_guest": True}), 200
     return jsonify({"logged_in": False, "nickname": "", "is_guest": True}), 200
@@ -364,10 +452,10 @@ def auth_me():
 @app.route("/api/auth/profile", methods=["POST"])
 def update_profile():
     """登录用户更新昵称。密码即统一身份认证密码，由登录流程自动缓存，不提供修改。"""
-    if "web_uid" not in session:
+    uid = current_uid()
+    if not uid:
         return jsonify({"error": "请先登录"}), 401
     data = request.get_json() or {}
-    uid = session["web_uid"]
 
     update = {}
     if "nickname" in data:
@@ -532,7 +620,7 @@ def admin_me():
 @login_required
 def get_my_accounts():
     """Return the canonical account for the logged-in student."""
-    uid = session["web_uid"]
+    uid = current_uid()
     client, db = get_db()
     raw_accounts = list(db.user_config_info.find(
         _account_filter(uid),
@@ -808,7 +896,7 @@ def verify_account(pid):
 
     # Fall back to DB if the password is not provided in the request body.
     if not vpn_password:
-        cfg = _get_decrypted_cfg(pid) if session.get("web_uid") == pid else None
+        cfg = _get_decrypted_cfg(pid) if current_uid() == pid else None
         if cfg:
             vpn_password = vpn_password or cfg.get("vpn_password")
 
@@ -817,7 +905,7 @@ def verify_account(pid):
 
     def mark_verified(value: bool):
         """Only invalidate the account that is currently authenticated."""
-        if session.get("web_uid") != pid:
+        if current_uid() != pid:
             return
         c, d = get_db()
         d.user_config_info.update_one(
@@ -839,9 +927,11 @@ def verify_account(pid):
             "failed_at": "vpn",
             "error": f"VPN 登录异常：{str(e)}",
         }
-        if _offline_login(pid, vpn_password):
+        offline_token = _offline_login(pid, vpn_password)
+        if offline_token:
             response["logged_in"] = True
             response["uid"] = pid
+            response["token"] = offline_token
             response["offline"] = True
             response["error"] = (
                 f"统一身份认证服务暂时不可用（{str(e)}），"
@@ -881,12 +971,16 @@ def verify_account(pid):
         _cache_identity(db2, pid, vpn_password)
         _upsert_verified_account(db2, pid, vpn_password)
         _login_as(db2, pid)
+        # Cookie 会话之外再回一个令牌：浏览器存不下 Cookie（Safari + 明文 HTTP、
+        # 无痕模式、WebView）时，客户端拿它走 Authorization 头照样是登录态。
+        token = _issue_auth_token(db2, pid)
     finally:
         client2.close()
     return jsonify({
         "verified": True,
         "logged_in": True,
         "uid": pid,
+        "token": token,
         "message": "统一身份认证及图书馆登录验证成功",
     }), 200
 
@@ -1052,7 +1146,7 @@ def get_seat_popularity():
     if not seat:
         return jsonify({"error": "缺少座位号"}), 400
     try:
-        uid = session["web_uid"]
+        uid = current_uid()
         client, db = get_db()
         count = db.user_config_info.count_documents(
             {"pid": {"$ne": uid}, "seat_list": seat}
@@ -1721,7 +1815,7 @@ def _visit_totals(db, match):
 @app.route("/api/my/visit_stats", methods=["GET"])
 @login_required
 def my_visit_stats():
-    uid = session["web_uid"]
+    uid = current_uid()
     client, db = get_db()
     if not db.user_config_info.find_one(_account_filter(uid), {"_id": 1}):
         client.close()
@@ -1794,7 +1888,7 @@ def my_visit_stats():
 @login_required
 def my_reservation_results():
     """Return the latest reservation result for the logged-in student."""
-    uid = session["web_uid"]
+    uid = current_uid()
     client, db = get_db()
     rows = list(db.user_config_info.find(
         {**_account_filter(uid), "result": {"$exists": True, "$ne": ""}},

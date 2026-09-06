@@ -159,12 +159,31 @@ async function onContact(row){
   }
 }
 
+// ---------- 登录令牌 ----------
+// Cookie 不是所有环境都存得下：Safari 在明文 HTTP 页面上会直接丢弃带 Secure 标记的
+// 会话 Cookie，无痕模式和部分 WebView 同理。验证接口除了种 Cookie 还会回一个令牌，
+// 存下来挂在 Authorization 头上，后端两条路都认。
+const TOKEN_KEY = 'autolib_token';
+function getToken(){
+  try{ return localStorage.getItem(TOKEN_KEY) || ''; }catch(e){ return ''; }
+}
+function setToken(t){
+  try{
+    if(t) localStorage.setItem(TOKEN_KEY, t);
+    else localStorage.removeItem(TOKEN_KEY);
+  }catch(e){}
+}
+
 async function api(path, opts={}){
   const options = Object.assign({}, opts);
   options.credentials = options.credentials || 'same-origin';
   if(options.body && typeof options.body === 'object'){
     options.headers = Object.assign({'Content-Type':'application/json'}, options.headers || {});
     options.body = JSON.stringify(options.body);
+  }
+  const token = getToken();
+  if(token){
+    options.headers = Object.assign({}, options.headers || {}, { 'Authorization': 'Bearer ' + token });
   }
   const r = await fetch(path, options);
   let data = null;
@@ -190,6 +209,8 @@ async function checkAuth(){
       state.uid = data.uid;
       state.nickname = data.nickname || '';
     }else{
+      // 服务端不认这个身份了（令牌过期或已吊销），留着只会每个请求都吃 401。
+      setToken('');
       state.isGuest = true;
       state.uid = data.uid || '';
       state.nickname = '';
@@ -249,6 +270,7 @@ async function saveProfile(){
 async function doLogout(){
   await flushCfgAutosave();
   await api('/api/auth/logout', { method:'POST' });
+  setToken('');
   state.isGuest = true;
   state.uid = '';
   state.nickname = '';
@@ -365,6 +387,7 @@ async function verifyAdd(){
     btn.textContent = '验证并保存';
     // 学校服务异常时后端可能凭本地缓存放行：仍然进入登录态，只是未验证。
     if(vres.data.offline && vres.data.logged_in && vres.data.uid){
+      setToken(vres.data.token || '');
       state.isGuest = false;
       state.uid = vres.data.uid;
       state.currentPid = pid;
@@ -377,13 +400,14 @@ async function verifyAdd(){
     return;
   }
 
-  // 验证接口会原子地登录并创建/恢复配置。再次读取会话，避免 Cookie
-  // 被禁用时继续发保存请求并制造游客数据。
+  // 验证接口会原子地登录并创建/恢复配置。令牌先存下来，再复核一次登录态，
+  // 避免 Cookie 和令牌都没落地时继续发保存请求、制造游客数据。
+  setToken(vres.data.token || '');
   const auth = await api('/api/auth/me');
   if(!auth.ok || !auth.data.logged_in || auth.data.uid !== pid){
     btn.disabled = false;
     btn.textContent = '验证并保存';
-    toast('验证成功，但浏览器未保存登录状态，请启用 Cookie 后重试','error');
+    toast('验证成功，但本机没能保存登录状态，请检查浏览器是否禁用了 Cookie 和本地存储','error');
     return;
   }
   state.isGuest = false;
@@ -813,9 +837,10 @@ async function verifyAndSaveCfg(){
     toast(data.error || '验证失败','error');
     return;
   }
+  setToken(data.token || '');
   const auth = await api('/api/auth/me');
   if(!auth.ok || !auth.data.logged_in || auth.data.uid !== state.currentPid){
-    toast('验证成功，但浏览器未保存登录状态，请启用 Cookie 后重试','error');
+    toast('验证成功，但本机没能保存登录状态，请检查浏览器是否禁用了 Cookie 和本地存储','error');
     return;
   }
   $('cfg-vpn').value = '';
@@ -1441,10 +1466,10 @@ function toggleNotices(){
 async function loadNotices(){
   try{
     const promises = [fetch('/api/announcements').catch(() => null)];
-    promises.push(fetch('/api/my/reservation_results').catch(() => null));
+    promises.push(api('/api/my/reservation_results').catch(() => null));
     const res = await Promise.all(promises);
     const anns = (res[0] && res[0].ok) ? await res[0].json() : [];
-    const results = (res[1] && res[1].ok) ? await res[1].json() : [];
+    const results = (res[1] && res[1].ok && Array.isArray(res[1].data)) ? res[1].data : [];
     renderNotices(anns, results);
     queueSchoolNoticePopup(anns);
   }catch(e){

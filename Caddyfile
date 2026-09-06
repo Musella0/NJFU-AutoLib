@@ -1,3 +1,7 @@
+# Cloudflare 挡在前面，且 SSL 模式是 Flexible——它用明文回源，源站这边永远只看到 :80。
+# 所以不能按「连接进来的协议」跳转：那样连用户已经在 https 上的请求也会被跳回 https，
+# 浏览器直接撞进重定向死循环（ERR_TOO_MANY_REDIRECTS）。
+# 用户侧真正用的协议只存在于 Cloudflare 透传的 X-Forwarded-Proto 里，只认它。
 http://xn--1jq43jfrduzxh22d.xn--fiqs8s, https://xn--1jq43jfrduzxh22d.xn--fiqs8s {
     encode zstd gzip
 
@@ -5,8 +9,18 @@ http://xn--1jq43jfrduzxh22d.xn--fiqs8s, https://xn--1jq43jfrduzxh22d.xn--fiqs8s 
         X-Content-Type-Options "nosniff"
         X-Frame-Options "SAMEORIGIN"
         Referrer-Policy "strict-origin-when-cross-origin"
+        # 首次访问后浏览器自己就不再走明文，省掉那一次可被劫持的跳转。
+        # 不加 includeSubDomains/preload：子域将来若有纯 HTTP 服务不至于被一起锁死。
+        Strict-Transport-Security "max-age=31536000"
         -Server
     }
+
+    # 明文访问一律跳 HTTPS。
+    # 起因：会话 Cookie 带 Secure 标记（SESSION_COOKIE_SECURE=true），Safari 在明文
+    # 页面上会直接把它丢掉，用户看到的现象是「验证成功但没登上，提示启用 Cookie」。
+    # 用 308 而不是 301：301 会让客户端把 POST 降级成 GET，Android 端的预约请求会丢 body。
+    @plaintext header X-Forwarded-Proto http
+    redir @plaintext https://{host}{uri} 308
 
     # APK 自助更新下载：只服务 /srv/downloads 这一个目录
     handle_path /download/* {
