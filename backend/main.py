@@ -1683,6 +1683,17 @@ def admin_set_app_version():
     return jsonify(_serialize_app_version(doc)), 200
 
 
+@app.route("/api/contacts", methods=["GET"])
+def list_contacts():
+    """给原生客户端用的「联系方式」条目。
+
+    网页端是渲染 index.html 时把 _contacts() 塞进模板的，安卓端不走模板，
+    只能单开一个接口拿同一份数据——否则号码又得写死进 APK 里。
+    和网页端一样对游客可见。
+    """
+    return jsonify({"contacts": _contacts()}), 200
+
+
 @app.route("/api/announcements", methods=["GET"])
 def list_announcements():
     """Public list of active announcements — visible to guests and logged-in users."""

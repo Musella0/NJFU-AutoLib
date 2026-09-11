@@ -14,6 +14,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
+import android.text.method.LinkMovementMethod
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -73,8 +74,14 @@ class MainActivity : AppCompatActivity() {
     /** 已自动补过到馆记录的日期，防止重复提交。 */
     private var autoArrivedFor: String? = null
 
-    /** 座位号 → 除我以外把它放进优先级的人数，只在选座图上当参考色用。 */
-    private var seatHeat: Map<String, Int> = emptyMap()
+    /** 公告栏的表情/应援按钮，连点攒包和飞掷动画都在里面。 */
+    private val reactions by lazy { Reactions(this, api) }
+
+    /**
+     * 座位号 → 除我以外把它放进优先级的人数，只存查过的那几个。
+     * 早先是一次拉全库计数给整张图上色，现在点中哪个才查哪个（见 [fetchSeatHeat]）。
+     */
+    private val seatHeat = mutableMapOf<String, Int>()
 
     /**
      * 上次真正拉取预约的时刻与所属学号；查询会触发学校系统登录，很贵，所以要节流。
@@ -139,8 +146,9 @@ class MainActivity : AppCompatActivity() {
         if (schoolNoticeDialogShowing || isFinishing || isDestroyed) return
         schoolNoticeDialogShowing = true
         val sourceUrl = item.optString("source_url")
-        val message = buildString {
-            append(item.optString("content"))
+        // 正文和网页端是同一份 Markdown，拼进 Spannable 才留得住里面的链接和格式
+        val message = android.text.SpannableStringBuilder().apply {
+            append(Markdown.render(item.optString("content")))
             val from = item.optString("display_from")
             val until = item.optString("display_until")
             if (from.isNotBlank() && until.isNotBlank()) {
@@ -162,6 +170,8 @@ class MainActivity : AppCompatActivity() {
         builder.create().apply {
             setOnDismissListener { schoolNoticeDialogShowing = false }
             show()
+            // AlertDialog 自带的消息 TextView 不设 movementMethod，正文里的链接点不动
+            findViewById<TextView>(android.R.id.message)?.movementMethod = LinkMovementMethod.getInstance()
         }
     }
 
@@ -672,6 +682,8 @@ class MainActivity : AppCompatActivity() {
         api.get("/api/announcements") { announcementsResponse ->
             api.get("/api/my/reservation_results") { resultsResponse ->
                 host.removeAllViews()
+                // 上一批计数控件已经不在视图树上了，先解绑再重建
+                reactions.detachCounters()
                 val announcements = announcementsResponse.jsonArray ?: JSONArray()
                 val results = resultsResponse.jsonArray ?: JSONArray()
                 for (i in 0 until announcements.length()) {
@@ -681,7 +693,11 @@ class MainActivity : AppCompatActivity() {
                         append(item.optString("title"))
                         if (item.optBoolean("pinned")) append("  [置顶]")
                     }
-                    host.addView(noticeCard(title, item.optString("content"), announcementColor(item.optString("level"))))
+                    host.addView(noticeCard(
+                        title, item.optString("content"),
+                        announcementColor(item.optString("level")),
+                        markdown = true, extra = reactions.bar(item),
+                    ))
                 }
                 for (i in 0 until results.length()) {
                     val item = results.optJSONObject(i) ?: continue
@@ -693,6 +709,8 @@ class MainActivity : AppCompatActivity() {
                     ))
                 }
                 if (host.childCount == 0) host.addView(text("暂无通知", 14))
+                // 总数单独拉一次：公告接口不带计数，别人点的也要看得见
+                reactions.load()
             }
         }
     }
@@ -1039,15 +1057,23 @@ class MainActivity : AppCompatActivity() {
                 seatList.addView(text("按住 ⋮⋮ 上下拖动可调整优先级", 12)
                     .apply { setTextColor(color(R.color.text_muted)) })
             }
-            seatList.addView(action("＋ 添加候选座位", accent = true) {
-                pickSeat { name ->
-                    if (chosenSeats.contains(name)) return@pickSeat toast("座位已存在")
-                    chosenSeats += name
-                    renderChosenSeats()
-                    persistSeatList(chosenSeats)
-                    toast("已添加并保存 $name")
-                }
-            })
+            // 满 3 个就把入口变成不可点的说明，比点进去再被拒少走一步
+            if (chosenSeats.size >= MAX_SEATS) {
+                seatList.addView(action("最多 $MAX_SEATS 个座位") {}.apply { isEnabled = false; alpha = 0.55f })
+            } else {
+                seatList.addView(action("＋ 添加候选座位", accent = true) {
+                    pickSeat { name ->
+                        if (chosenSeats.contains(name)) return@pickSeat toast("座位已存在")
+                        if (chosenSeats.size >= MAX_SEATS) {
+                            return@pickSeat toast("最多 $MAX_SEATS 个座位，先删一个再加")
+                        }
+                        chosenSeats += name
+                        renderChosenSeats()
+                        persistSeatList(chosenSeats)
+                        toast("已添加并保存 $name")
+                    }
+                })
+            }
         }
         renderChosenSeats()
         host.addView(cardBlock("座位优先级（按顺序尝试）", seatList))
@@ -1357,15 +1383,7 @@ class MainActivity : AppCompatActivity() {
             addView(action("迟到保护是什么？") { showLateProtectionInfo() })
             addView(action("午休是什么？") { showNapInfo() })
         }))
-        host.addView(cardBlock("联系方式", vertical(0).apply {
-            addView(text("遇到 bug、想加功能，或者预约异常，都可以发邮件找我。", 12)
-                .apply { setTextColor(color(R.color.text_muted)) })
-            addView(text(CONTACT_EMAIL, 15, true))
-            addView(horizontal().apply {
-                addView(action("发邮件", 1f, accent = true) { sendContactMail() })
-                addView(action("复制邮箱", 1f) { copyContactEmail() })
-            })
-        }))
+        contactsCard(host)
 
         if (loggedIn()) {
             host.addView(section("其他"))
@@ -1702,21 +1720,63 @@ class MainActivity : AppCompatActivity() {
         else toast("没有可用的浏览器，请手动访问：$url")
     }
 
-    private fun copyContactEmail() {
-        val clipboard = getSystemService(android.content.ClipboardManager::class.java)
-        if (clipboard == null) return toast("复制失败，邮箱：$CONTACT_EMAIL")
-        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("AutoLib 反馈邮箱", CONTACT_EMAIL))
-        // Android 13 起系统自己会弹复制提示，再 toast 一次就重了
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) toast("已复制：$CONTACT_EMAIL")
+    /**
+     * 「联系方式」整块。条目由后端 `/api/contacts` 按 CONTACT_* 环境变量给出，
+     * 仓库和 APK 里都不写死具体号码——换个人部署就该是他自己的。
+     * 一条都没配（或接口取不到）就整张卡片不出现，和网页端的 `{% if contacts %}` 一致。
+     */
+    private fun contactsCard(host: LinearLayout) {
+        val card = card().also { host.addView(it) }
+        card.isVisible = false
+        api.get("/api/contacts") { response ->
+            val items = response.jsonObject?.optJSONArray("contacts") ?: JSONArray()
+            val rows = (0 until items.length()).mapNotNull { items.optJSONObject(it) }
+            if (rows.isEmpty()) return@get
+            replaceCard(card, vertical(0).apply {
+                addView(text("联系方式", 17, true).apply { setPadding(0, 0, 0, dp(9)) })
+                addView(text("遇到 bug、想加功能，或者预约异常，都可以照下面的方式找我。", 12)
+                    .apply { setTextColor(color(R.color.text_muted)) })
+                rows.forEach { addView(contactRow(it)) }
+            })
+            card.isVisible = true
+        }
     }
 
-    private fun sendContactMail() {
-        val intent = android.content.Intent(android.content.Intent.ACTION_SENDTO, android.net.Uri.parse("mailto:$CONTACT_EMAIL")).apply {
+    /** 一条联系方式：标题 + 值 + 右侧动作按钮，按 kind 决定点了是复制还是打开。 */
+    private fun contactRow(item: JSONObject): View {
+        val kind = item.optString("kind")
+        val value = item.optString("value")
+        val label = item.optString("title").ifBlank { kind }
+        return horizontal().apply {
+            setPadding(0, dp(6), 0, dp(6))
+            addView(vertical(0).apply {
+                addView(text(label, 13).apply { setTextColor(color(R.color.text_muted)) })
+                addView(text(value, 15, true))
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(action(item.optString("action").ifBlank { "复制" }, compact = true) {
+                if (kind == "github") openDownload(item.optString("href").ifBlank { "https://$value" })
+                else copyContact(label, value)
+            })
+            // 邮箱多给一个直接起草的入口，省得复制完再自己开邮件客户端
+            if (kind == "email") addView(action("发邮件", compact = true, accent = true) { sendContactMail(value) })
+        }
+    }
+
+    private fun copyContact(label: String, value: String) {
+        val clipboard = getSystemService(android.content.ClipboardManager::class.java)
+        if (clipboard == null) return toast("复制失败，$label：$value")
+        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("AutoLib $label", value))
+        // Android 13 起系统自己会弹复制提示，再 toast 一次就重了
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) toast("已复制：$value")
+    }
+
+    private fun sendContactMail(email: String) {
+        val intent = android.content.Intent(android.content.Intent.ACTION_SENDTO, android.net.Uri.parse("mailto:$email")).apply {
             putExtra(android.content.Intent.EXTRA_SUBJECT, "AutoLib 反馈（${BuildConfig.VERSION_NAME}）")
         }
         // 没装邮件客户端的机器不少，退回复制比崩掉强
         if (intent.resolveActivity(packageManager) != null) startActivity(intent)
-        else copyContactEmail()
+        else copyContact("邮箱", email)
     }
 
     private fun checkUpdateManually() {
@@ -2020,11 +2080,27 @@ class MainActivity : AppCompatActivity() {
             addView(child)
         })
     }
-    private fun noticeCard(title: String, body: String, accent: Int) = card().apply {
+    /**
+     * [markdown] 只给公告开：预约结果是后端拼好的一句话，按 Markdown 解析纯属添乱。
+     * [extra] 是正文下面再挂一块，目前只有公告的互动条会用。
+     */
+    private fun noticeCard(
+        title: String, body: String, accent: Int,
+        markdown: Boolean = false, extra: View? = null,
+    ) = card().apply {
         strokeColor = color(accent)
         addView(vertical(dp(15)).apply {
             addView(text(title, 15, true).apply { setTextColor(color(accent)) })
-            addView(text(body, 13).apply { setTextColor(color(R.color.text_secondary)) })
+            addView(text(body, 13).apply {
+                setTextColor(color(R.color.text_secondary))
+                if (markdown) {
+                    text = Markdown.render(body)
+                    // 不设 movementMethod 的话公告里的链接只是段蓝字，点不动
+                    movementMethod = LinkMovementMethod.getInstance()
+                    setLinkTextColor(color(R.color.primary))
+                }
+            })
+            extra?.let { addView(it) }
         })
     }
     private fun action(
@@ -2162,17 +2238,24 @@ class MainActivity : AppCompatActivity() {
         fun refresh() {
             val seat = map.picked
             val ordinal = if (seat == null) -1 else map.chosen.indexOf(seat)
+            val full = !forReserve && ordinal < 0 && map.chosen.size >= MAX_SEATS
             val crowd = seatHeat[seat] ?: 0
             picked.text = when {
                 seat == null -> "点图上任意位置选座"
                 ordinal >= 0 -> "$seat（已在优先级第 ${ordinal + 1} 位）"
-                crowd > 0 -> "$seat · 另有 $crowd 人也选了"
+                full -> "$seat · 最多 $MAX_SEATS 个座位"
+                // 说清是本站的数字，免得被读成全校数据
+                crowd > 0 -> "$seat · AutoLib 中另有 $crowd 人也选了"
                 else -> seat
             }
             picked.setTextColor(color(if (seat == null) R.color.text_muted else R.color.text_primary))
-            confirm?.isEnabled = seat != null && (forReserve || ordinal < 0)
+            confirm?.isEnabled = seat != null && (forReserve || (ordinal < 0 && !full))
         }
-        map.onPicked = { refresh() }
+        map.onPicked = { seat ->
+            refresh()
+            // 立即预约是当场的事，跟别人明早的优先级撞不上，不必去查
+            if (!forReserve && seat != null) fetchSeatHeat(seat) { if (map.picked == seat) refresh() }
+        }
 
         // 换区域时底图是异步来的，回来时用户可能已经翻到别的区域，按 roomId 认领
         fun showArea(area: SeatLayout.Area) {
@@ -2194,7 +2277,6 @@ class MainActivity : AppCompatActivity() {
         }
         dialog.show()
 
-        loadSeatHeat { map.heat = it; refresh() }
         SeatLayout.areas(this, api) { areas ->
             if (!dialog.isShowing) return@areas
             if (areas.isEmpty()) {
@@ -2215,20 +2297,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** 选座图图例 + 复位，对应网页端 .seatmap-legend。 */
-    private fun seatMapLegend(onReset: () -> Unit): View = vertical(0).apply {
-        addView(horizontal().apply {
-            addView(legendDot(R.color.primary, "当前选中"))
-            addView(legendDot(R.color.success, "我的优先级"))
-            addView(legendDot(R.color.warn, "别人也选了"))
-        })
-        addView(horizontal().apply {
-            addView(legendDot(R.color.danger, "3 人以上"))
-            addView(
-                legendDot(R.color.stroke_muted, "没人预定"),
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
-            )
-            addView(action("复位 ⟲", compact = true) { onReset() })
-        })
+    private fun seatMapLegend(onReset: () -> Unit): View = horizontal().apply {
+        addView(legendDot(R.color.primary, "当前选中"))
+        addView(legendDot(R.color.success, "我的优先级"))
+        addView(legendDot(R.color.stroke_muted, "其他座位"))
+        // 富余的横向空间交给这块空白，图例文字就不会被挤成两行
+        addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 1, 1f))
+        addView(action("复位 ⟲", compact = true) { onReset() })
     }
 
     private fun legendDot(colorId: Int, label: String) = horizontal().apply {
@@ -2244,13 +2319,15 @@ class MainActivity : AppCompatActivity() {
         setPadding(0, 0, dp(10), 0)
     }
 
-    /** 座位热度只是张参考色，取不到就当没人选，不该挡住选座。 */
-    private fun loadSeatHeat(callback: (Map<String, Int>) -> Unit) {
-        if (seatHeat.isNotEmpty()) return callback(seatHeat)
-        api.get("/api/seat_popularity") { response ->
-            val counts = response.jsonObject?.optJSONObject("counts")
-            seatHeat = counts?.let { obj -> jsonKeys(obj).associateWith { obj.optInt(it) } }.orEmpty()
-            callback(seatHeat)
+    /**
+     * 查一个座位被多少人放进了优先级。取不到就当没人选——这只是条提示，不该挡住选座。
+     * 查过的留着不再请求；回来得晚就只补底栏那行字，[onDone] 不会去重画图。
+     */
+    private fun fetchSeatHeat(seat: String, onDone: () -> Unit) {
+        if (seatHeat.containsKey(seat)) return
+        api.get("/api/seat_popularity?seat=${api.encoded(seat)}") { response ->
+            seatHeat[seat] = response.jsonObject?.optInt("count", 0) ?: 0
+            onDone()
         }
     }
 
@@ -2471,12 +2548,12 @@ class MainActivity : AppCompatActivity() {
         /** 预约结果的复用窗口：切页返回不再重查，超过才自动刷新。 */
         private const val RESERVATION_TTL_MS = 3 * 60 * 1000L
         private const val PREF_THEME = "theme"
+        /** 抢座优先级最多 3 个：再往下排也轮不到，与后端 MAX_SEAT_LIST 同值。 */
+        private const val MAX_SEATS = 3
         /** 通知范围，取值与后端 NOTIFY_MODES 一致：simple 只发异常，full 连成功回执一起发。 */
         private const val NOTIFY_MODE_SIMPLE = "simple"
         private const val NOTIFY_MODE_FULL = "full"
         private val NOTIFY_MODE_LABELS = listOf("仅异常 — 失败时才来信", "全部 — 每天成功也发")
-        /** 反馈邮箱：以前只写在公告里，公告过期就没人找得到了。 */
-        private const val CONTACT_EMAIL = "msl0314_1@proton.me"
         private const val THEME_SYSTEM = "system"
         private const val THEME_LIGHT = "light"
         private const val THEME_DARK = "dark"

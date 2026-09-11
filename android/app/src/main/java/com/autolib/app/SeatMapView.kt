@@ -44,13 +44,6 @@ class SeatMapView @JvmOverloads constructor(
             invalidate()
         }
 
-    /** 座位号 → 除我以外把它放进优先级的人数。 */
-    var heat: Map<String, Int> = emptyMap()
-        set(value) {
-            field = value
-            invalidate()
-        }
-
     var picked: String? = null
         private set
 
@@ -243,7 +236,7 @@ class SeatMapView @JvmOverloads constructor(
             val cy = offsetY + imageH * seat.y / 100f + dot / 2f
             if (cx < -dot || cy < -dot || cx > width + dot || cy > height + dot) return@forEach
             val ordinal = chosen.indexOf(seat.name)
-            dotPaint.color = color(seatColor(seat.name, ordinal))
+            dotPaint.color = color(seatColor(ordinal))
             canvas.drawCircle(cx, cy, dot / 2f, dotPaint)
             if (ordinal < 0) return@forEach
             // 圆点里塞不下字，序号浮在点上方
@@ -387,15 +380,13 @@ class SeatMapView @JvmOverloads constructor(
     /** 圆点跟着图一起放大，和网页端一样；缩到最小时留个下限，免得看不见。 */
     private fun dotSize() = max(dp(2.5f), dp(DOT_DP) * scale)
 
-    private fun seatColor(name: String, ordinal: Int): Int {
-        val crowd = heat[name] ?: 0
-        return when {
-            ordinal >= 0 -> R.color.success        // 我的优先级里已经有它
-            crowd >= 3 -> R.color.danger           // 一堆人盯着，抢不到的概率高
-            crowd > 0 -> R.color.warn
-            else -> R.color.stroke_muted
-        }
-    }
+    /**
+     * 图上只分「我的优先级」和「其他座位」两种。原先还按别人的选座人数染成黄/红，
+     * 那等于把每个人的意愿清单摊在图上——二十来个点基本能一一对应到具体的人。
+     * 人数改成点中某个座位时单查一个数字，只写在底栏那行提示里。
+     */
+    private fun seatColor(ordinal: Int): Int =
+        if (ordinal >= 0) R.color.success else R.color.stroke_muted
 
     private fun isNightMode() =
         (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
