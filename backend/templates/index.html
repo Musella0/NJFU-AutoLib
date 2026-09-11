@@ -308,6 +308,19 @@
       </div>
     </div>
 
+    <!-- 版本号和下载地址都来自 /api/app/version，没登记就整张卡片不显示 -->
+    <div class="box pad mb-lg" id="apk-card" style="display:none">
+      <div class="label" style="margin-bottom:4px">安卓客户端</div>
+      <div class="toggle-row" style="cursor:pointer" onclick="downloadApk()">
+        <div class="info">
+          <div class="t1">下载 APK <span id="apk-version" class="sub" style="color:var(--ink3)"></span></div>
+          <div class="t2">桌面小组件不打开 App 就能看今天坐哪，还有学习时长热力图</div>
+        </div>
+        <div class="sub" style="color:var(--ink3)">下载</div>
+      </div>
+      <div class="tiny" id="apk-notes" style="color:var(--ink3);margin-top:6px"></div>
+    </div>
+
     <div class="box pad mb-lg">
       <div class="label" style="margin-bottom:4px">关于</div>
       <div class="toggle-row" style="cursor:pointer" onclick="openSheet('lp-info')">

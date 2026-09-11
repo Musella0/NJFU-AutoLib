@@ -26,8 +26,6 @@ const NAP_WIP_TEXT = '施工中 🚧';
 
 // 首次使用的欢迎弹窗。key 带版本号：以后加了大功能把 v1 改成 v2，老用户会再看到一次。
 const WELCOME_KEY = 'autolib_welcome_ack_v1';
-const APK_URL = 'https://南林图书馆.中国/download/AutoLib-0.2.1.apk';
-const APK_NAME = 'AutoLib-0.2.1.apk';
 
 const WEEK_LABELS = ['一','二','三','四','五','六','日']; // iso 1..7
 const WEEK_DEFAULTS = ['08:00-22:00','08:00-22:00','08:00-22:00','08:00-22:00','08:00-20:00','08:00-22:00','08:00-22:00'];
@@ -2331,8 +2329,7 @@ const SHEETS = {
       <div class="box tight" style="border-left:4px solid var(--ink3)">
         <div class="sub" style="font-weight:700">📱 安卓客户端</div>
         <div class="t">桌面小组件不打开 App 就能看今天坐哪，还有学习时长热力图。</div>
-        <a class="btn sm accent" style="margin-top:8px;text-decoration:none"
-           href="${APK_URL}" download="${APK_NAME}">⬇ 下载 APK</a>
+        <button type="button" class="btn sm accent" style="margin-top:8px" onclick="downloadApk()">⬇ 下载 APK</button>
       </div>
     </div>
     <button class="btn primary mt-lg" style="width:100%" onclick="acknowledgeWelcome()">我知道啦</button>
@@ -2991,6 +2988,41 @@ function renderVisitStats(d){
     ${heatmapHtml((d.daily && d.daily.length) ? d.daily : dailyFromRecent(d.recent))}`;
 }
 
+// ---------- 安卓客户端下载 ----------
+// 版本号和下载地址都跟着后台登记的那条走（/api/app/version，在管理页里设）。
+// 早先是写死成常量的，发版得改代码，结果页面上的链接一直停在 0.2.1——
+// 而 App 内的升级检查走的是同一个接口，早就是新的了，两边对不上。
+let apkInfo = null;
+
+async function loadApkInfo(){
+  try{
+    const { ok, data } = await api('/api/app/version');
+    if(!ok || !data || !data.download_url) return null;   // 没登记过就不显示入口
+    apkInfo = data;
+    renderApkCard();
+    return apkInfo;
+  }catch(e){
+    return null;
+  }
+}
+
+function renderApkCard(){
+  const card = $('apk-card');
+  if(!card || !apkInfo) return;
+  const version = $('apk-version');
+  if(version) version.textContent = apkInfo.version_name ? 'v' + apkInfo.version_name : '';
+  const notes = $('apk-notes');
+  if(notes) notes.textContent = apkInfo.notes || '';
+  card.style.display = '';
+}
+
+// 欢迎弹层可能比这份数据先到，所以没拿到就现拉一次再说
+async function downloadApk(){
+  const info = apkInfo || await loadApkInfo();
+  if(!info || !info.download_url){ toast('下载信息还没加载好，稍后再试','error'); return; }
+  location.href = info.download_url;
+}
+
 // ---------- home loader ----------
 async function loadHome(){
   renderHome();
@@ -3167,6 +3199,7 @@ async function init(){
   await Promise.all([loadSeats(), loadAccounts()]);
   loadNotices();
   loadVisitStats();
+  loadApkInfo();
 }
 
 init();
