@@ -38,6 +38,9 @@ http://xn--1jq43jfrduzxh22d.xn--fiqs8s, https://xn--1jq43jfrduzxh22d.xn--fiqs8s 
         # 浏览器/客户端应按安装包处理，而不是当文本打开
         header @apk Content-Type "application/vnd.android.package-archive"
         header @apk Content-Disposition "attachment"
+        # 同名包有可能被换掉（发版当天修正一版之类）。不显式声明的话 Cloudflare
+        # 按扩展名默认缓存 4 小时，源站都换了 CDN 还在吐旧文件，且只能去面板清。
+        header @apk Cache-Control "public, max-age=300"
         file_server
     }
 
