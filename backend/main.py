@@ -17,8 +17,10 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from utils import config
 from utils.account_config import (
     NOTIFY_MODES,
+    RESERVATION_MODES,
     account_config_for_client,
     default_account_config,
+    validate_time_config,
 )
 from utils.admin_credentials import (
     AdminCredentialError,
@@ -28,6 +30,7 @@ from utils.admin_credentials import (
     verify_login as verify_admin_login,
 )
 from utils.crypto import encrypt as _enc, decrypt as _dec
+from utils.student_id import parse_student_id
 from utils.notify import queue_email, send_email
 from utils.reservation_blackout import (
     BEIJING_TZ,
@@ -689,8 +692,12 @@ def save_my_account(pid):
         update["seat_list"] = list(dict.fromkeys(seat.strip() for seat in seats))
         if len(update["seat_list"]) > MAX_SEAT_LIST:
             return jsonify({"error": f"最多只能设置 {MAX_SEAT_LIST} 个座位"}), 400
-    if "time" in update and not isinstance(update["time"], dict):
-        return jsonify({"error": "时间配置格式无效"}), 400
+    if "mode" in update and update["mode"] not in RESERVATION_MODES:
+        return jsonify({"error": "预约模式无效"}), 400
+    if "time" in update:
+        time_error = validate_time_config(update["time"])
+        if time_error:
+            return jsonify({"error": time_error}), 400
     if "notify_mode" in update and update["notify_mode"] not in NOTIFY_MODES:
         return jsonify({"error": "通知范围配置无效"}), 400
     # 开关一律落成 "True"/"False"，避免任意 JSON 值被原样写进配置文档。
@@ -773,6 +780,12 @@ def cancel_account_reservation(pid):
         return jsonify({"error": str(e)}), 500
 
 
+# 午休功能总开关。图书馆没有给我们「离馆」接口，已刷卡入座的预约删不掉，
+# 午休做到一半必然失败，所以整套先关掉。前端 NAP_DISABLED 也要一起改回来。
+NAP_ENABLED = os.getenv("NAP_ENABLED", "0").strip().lower() not in ("0", "false", "no", "off")
+NAP_DISABLED_MESSAGE = "午休功能维护中 🚧 —— 已入座的预约暂时无法释放，修好后会发公告"
+
+
 @app.route("/api/my/accounts/<pid>/nap_config", methods=["GET", "POST"])
 @own_account_required
 def nap_config(pid):
@@ -787,6 +800,10 @@ def nap_config(pid):
         result = {**defaults, **(cfg.get("nap_config") or {})}
         client.close()
         return jsonify(result), 200
+
+    if not NAP_ENABLED:
+        client.close()
+        return jsonify({"error": NAP_DISABLED_MESSAGE}), 503
 
     body = request.get_json(silent=True) or {}
     allowed = {"start_time", "end_time", "seat", "auto_daily", "trigger_time"}
@@ -803,6 +820,8 @@ def nap_config(pid):
 @own_account_required
 def do_nap(pid):
     """取消当前预约并立即重新预约下午时段（一键午休）"""
+    if not NAP_ENABLED:
+        return jsonify({"error": NAP_DISABLED_MESSAGE}), 503
     cfg = _get_decrypted_cfg(pid)
     if not cfg:
         return jsonify({"error": "未找到该账号配置"}), 404
@@ -1103,8 +1122,10 @@ def reserve_custom(pid):
 
         # 图书馆只让提前 31 小时下单，超了服务端只回一句「不在提前预约时间范围内」，
         # 这里先算一遍，好告诉用户到底什么时候能约。
-        from scheduled_task import bookable_at
-        open_at = bookable_at(resv_begin)
+        # 用 safe_bookable_at 而不是规则本身：边界是逐秒判定的，按规则值放行的那一刻
+        # 发出去照样可能被拒，页面上说「能约了」结果约不上比直接说清楚更糟。
+        from scheduled_task import safe_bookable_at
+        open_at = safe_bookable_at(resv_begin)
         if open_at > _dt.now():
             return jsonify({
                 "error": f"图书馆最多提前 31 小时预约，该时段要到 {open_at:%m-%d %H:%M} 之后才能下单"
@@ -1194,6 +1215,8 @@ def get_all_users():
             u.pop("lib_password", None)
             if "updated_at" in u and isinstance(u["updated_at"], datetime):
                 u["updated_at"] = u["updated_at"].strftime("%Y-%m-%d %H:%M:%S")
+            # 学院/班级由学号推导，不落库：学号改了分类要跟着改，存一份副本只会对不上。
+            u.update(parse_student_id(u.get("pid")))
             result.append(u)
         return jsonify(result), 200
     except Exception as e:
@@ -1270,6 +1293,12 @@ def update_user(pid):
                     "is_reserved", "late_protection",
                     "protection_max_minutes", "late_protection_blacklisted"]
         update = {k: v for k, v in data.items() if k in allowed}
+        if "mode" in update and update["mode"] not in RESERVATION_MODES:
+            return jsonify({"error": "预约模式无效"}), 400
+        if "time" in update:
+            time_error = validate_time_config(update["time"])
+            if time_error:
+                return jsonify({"error": time_error}), 400
         update["updated_at"] = datetime.now()
         client, db = get_db()
         db.user_config_info.update_one({"pid": pid}, {"$set": update})
@@ -1630,6 +1659,105 @@ def list_announcements():
     return jsonify([_serialize_announcement(d) for d in docs]), 200
 
 
+# ==================== 公告栏小互动（临时功能，用完即弃） ====================
+# 公告置顶卡片下面三个按钮：💩 / 👊 / 🌹。前端只看得到三个总数，
+# 这里额外按 uid 记一行，后台才知道「有多少个学号在玩、各扔了多少」。
+# 下线时删掉本段 + app.js / styles.css 里同名的一段，再 drop 掉
+# reactions、reaction_users 两个集合即可，不牵扯其他数据。
+
+REACTION_KINDS = ("poop", "whip", "rose")
+# 连点会在前端攒着一起发，一次最多认 20 下，多的丢掉——防的是改包刷榜，不是手速
+REACTION_MAX_PER_POST = 20
+
+
+def _reaction_totals(db):
+    totals = {kind: 0 for kind in REACTION_KINDS}
+    for doc in db.reactions.find({"_id": {"$in": list(REACTION_KINDS)}}):
+        totals[doc["_id"]] = int(doc.get("count", 0) or 0)
+    return totals
+
+
+@app.route("/api/reactions", methods=["GET"])
+@limiter.limit("60/minute")
+def list_reactions():
+    """公开总数：只有三个数字，不含任何学号。"""
+    client, db = get_db()
+    try:
+        return jsonify({"totals": _reaction_totals(db)}), 200
+    finally:
+        client.close()
+
+
+@app.route("/api/reactions", methods=["POST"])
+@limiter.limit("30/minute")
+def add_reaction():
+    """收的是增量 n 而不是固定 +1：连点在前端攒 700ms 才发一包，省往返。"""
+    body = request.get_json(silent=True) or {}
+    kind = (body.get("kind") or "").strip()
+    if kind not in REACTION_KINDS:
+        return jsonify({"error": "无效的类型"}), 400
+    try:
+        n = int(body.get("n", 1))
+    except (TypeError, ValueError):
+        return jsonify({"error": "无效的数量"}), 400
+    n = max(1, min(n, REACTION_MAX_PER_POST))
+
+    uid = _ensure_uid()
+    now = datetime.now()
+    client, db = get_db()
+    try:
+        db.reactions.update_one(
+            {"_id": kind},
+            {"$inc": {"count": n}, "$set": {"updated_at": now}},
+            upsert=True,
+        )
+        db.reaction_users.update_one(
+            {"_id": f"{kind}:{uid}"},
+            {
+                "$inc": {"count": n},
+                "$set": {
+                    "kind": kind,
+                    "uid": uid,
+                    # 没验证学号的访客也能点，但统计时要和真学号分开数
+                    "is_student": not uid.startswith("guest_"),
+                    "last_at": now,
+                },
+                "$setOnInsert": {"first_at": now},
+            },
+            upsert=True,
+        )
+        totals = _reaction_totals(db)
+    finally:
+        client.close()
+    return jsonify({"totals": totals}), 200
+
+
+@app.route("/api/admin/reactions", methods=["GET"])
+@admin_required
+def admin_list_reactions():
+    """后台看板：每种表情的总数 + 参与人数（学号和游客分开数）。"""
+    client, db = get_db()
+    try:
+        totals = _reaction_totals(db)
+        by_kind = {
+            kind: {
+                "count": totals[kind],
+                "students": len(db.reaction_users.distinct("uid", {"kind": kind, "is_student": True})),
+                "guests": len(db.reaction_users.distinct("uid", {"kind": kind, "is_student": False})),
+            }
+            for kind in REACTION_KINDS
+        }
+        payload = {
+            "totals": totals,
+            "by_kind": by_kind,
+            "active_students": len(db.reaction_users.distinct("uid", {"is_student": True})),
+            "active_guests": len(db.reaction_users.distinct("uid", {"is_student": False})),
+        }
+    finally:
+        client.close()
+    return jsonify(payload), 200
+
+
 @app.route("/api/admin/school_notice_reviews", methods=["GET"])
 @admin_required
 def admin_list_school_notice_reviews():
@@ -1920,10 +2048,13 @@ def my_reservation_results():
             upd = upd.strftime("%Y-%m-%d %H:%M:%S")
         result_text = r.get("result", "")
         success = ("成功" in result_text)
+        # 休息日和闭馆都是「按配置没约」，不是失败，前端不该标红。
+        skipped = (not success) and ("已跳过" in result_text)
         out.append({
             "pid": r.get("pid", ""),
             "result": result_text,
             "success": success,
+            "skipped": skipped,
             "updated_at": upd or "",
         })
     out.sort(key=lambda x: x.get("updated_at") or "", reverse=True)

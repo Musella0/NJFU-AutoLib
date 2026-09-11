@@ -471,6 +471,10 @@ select.time-input:disabled{opacity:.5;cursor:not-allowed}
   width:18px;height:18px;background:var(--line);
   border-radius:50%;transition:transform .2s, background .2s;
 }
+/* 施工中的功能入口：整行压暗、点不动，下面那行小字用警告色 */
+.wip-row{opacity:.5}
+.wip-row,.wip-row .toggle{cursor:not-allowed}
+.toggle-row .info .t2.wip-note{color:var(--warn-text);font-weight:700;margin-top:4px}
 .toggle.on{background:var(--accent);border-color:var(--accent)}
 .toggle.on::after{transform:translateX(20px);background:var(--on-accent)}
 
@@ -699,3 +703,33 @@ body.cozy .box.pad{padding:22px 24px}
 }
 .seatmap-legend i.picked{background:var(--ok);border-color:var(--ok)}
 .seatmap-legend i.here{background:var(--accent);border-color:var(--accent)}
+
+/* ========= 公告栏小互动（临时功能，用完即弃：连同 main.py / app.js 里同名的一段一起删） ========= */
+.reaction-bar{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.rx{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:4px 10px;font:inherit;line-height:1;cursor:pointer;
+  background:var(--surface);color:var(--ink);
+  border:2px solid var(--line);border-radius:var(--wobble-r-sm);
+  box-shadow:var(--shadow-sm);
+  transition:transform .12s,box-shadow .12s;
+  -webkit-tap-highlight-color:transparent;
+}
+.rx:hover{transform:translate(-1px,-1px);box-shadow:3px 3px 0 var(--line)}
+.rx:active{transform:translate(1px,1px);box-shadow:1px 1px 0 var(--line)}
+body.no-wobble .rx{border-radius:10px !important}
+.rx-emoji{font-size:17px}
+.rx-n{font-family:var(--mono);font-size:12px;color:var(--ink3);min-width:1.4em;text-align:left}
+/* 飞行层：盖住页面但不吃点击，overflow 挡住飞出界的那一下带出滚动条 */
+.throw-layer{position:fixed;inset:0;z-index:150;pointer-events:none;overflow:hidden}
+.thrown{
+  position:absolute;left:0;top:0;
+  font-size:34px;line-height:1;
+  will-change:transform,opacity;
+}
+.thrown-ring{
+  position:absolute;left:0;top:0;
+  width:70px;height:70px;
+  border:3px solid var(--ink3);border-radius:50%;
+  will-change:transform,opacity;
+}

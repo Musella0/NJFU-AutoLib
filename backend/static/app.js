@@ -18,6 +18,12 @@ const state = {
   pendingAnnouncementPopup: null,
 };
 
+// 午休功能整体停用。图书馆的「离馆」接口我们还没接上，人一旦刷卡入座，
+// 上游就拒绝删除这条预约（「预约在当前状态下不能删除」），午休必然半路失败。
+// 接上离馆接口之前先在前端关掉所有入口；后端 NAP_ENABLED=0 兜底，恢复时两边一起改。
+const NAP_DISABLED = true;
+const NAP_WIP_TEXT = '施工中 🚧';
+
 // 首次使用的欢迎弹窗。key 带版本号：以后加了大功能把 v1 改成 v2，老用户会再看到一次。
 const WELCOME_KEY = 'autolib_welcome_ack_v1';
 const APK_URL = 'https://南林图书馆.中国/download/AutoLib-0.2.1.apk';
@@ -462,7 +468,7 @@ function renderConfig(){
   // Toggles
   $('cfg-toggle-reserve').classList.toggle('on', cfg.is_reserved === 'True');
   $('cfg-toggle-lp').classList.toggle('on', cfg.late_protection === 'True');
-  $('cfg-toggle-nap').classList.toggle('on', !!(state.napConfig && state.napConfig.auto_daily));
+  $('cfg-toggle-nap').classList.toggle('on', !NAP_DISABLED && !!(state.napConfig && state.napConfig.auto_daily));
 
   // Stored credentials are never returned by the API or kept in page state.
   $('cfg-vpn').value = '';
@@ -792,7 +798,7 @@ async function saveCfg(options = {}){
     btn.textContent = '保存中...';
   }
   const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}`, { method:'POST', body });
-  if(ok && !silent){
+  if(ok && !silent && !NAP_DISABLED){
     const napAuto = $('cfg-toggle-nap').classList.contains('on');
     if(!state.napConfig || state.napConfig.auto_daily !== napAuto){
       const newNap = { ...(state.napConfig || {}), auto_daily: napAuto };
@@ -1109,7 +1115,7 @@ function renderTodayCard(opt){
     empty.style.display = '';
     const reserveOn = cfg.is_reserved === 'True';
     const nc = state.napConfig || {};
-    const napHint = nc.auto_daily
+    const napHint = (!NAP_DISABLED && nc.auto_daily)
       ? `<div class="meta-row" style="justify-content:center;margin-top:8px"><span class="pill accent">😴 自动午休已开启 · ${escHtml(nc.trigger_time || '12:00')} 触发</span></div>`
       : '';
     empty.innerHTML = `
@@ -1183,12 +1189,12 @@ function renderTodayCard(opt){
     <div class="meta-row">
       <span class="pill ok"><span class="dot"></span>${escHtml(status)}</span>
       ${lpOn ? '<span class="pill accent">🛡 迟到保护</span>' : ''}
-      ${(state.napConfig || {}).auto_daily ? `<span class="pill accent" style="cursor:pointer" onclick="openNap()">😴 午休 ${escHtml((state.napConfig||{}).trigger_time||'12:00')}</span>` : ''}
+      ${(!NAP_DISABLED && (state.napConfig || {}).auto_daily) ? `<span class="pill accent" style="cursor:pointer" onclick="openNap()">😴 午休 ${escHtml((state.napConfig||{}).trigger_time||'12:00')}</span>` : ''}
       ${showArrived ? '<span class="pill ok">✓ 已到馆</span>' : ''}
     </div>
     <div class="actions">
       ${canArrive ? `<button class="btn ${showArrived?'primary':'accent'} lg grow" id="btn-arrived" onclick="toggleArrived()">${showArrived ? '✓ 已到馆' : '✓ 我已到馆'}</button>` : ''}
-      ${canCancel ? `<button class="btn sm" onclick="openNap()">😴 午休</button>` : ''}
+      ${(canCancel && !NAP_DISABLED) ? `<button class="btn sm" onclick="openNap()">😴 午休</button>` : ''}
       ${canCancel ? `<button class="btn sm" onclick="openSheet('cancel')">取消</button>` : ''}
     </div>`;
 }
@@ -1471,6 +1477,7 @@ async function loadNotices(){
     const anns = (res[0] && res[0].ok) ? await res[0].json() : [];
     const results = (res[1] && res[1].ok && Array.isArray(res[1].data)) ? res[1].data : [];
     renderNotices(anns, results);
+    loadReactions();
     queueSchoolNoticePopup(anns);
   }catch(e){
     $('notice-list').innerHTML = '<div class="empty">通知加载失败</div>';
@@ -1482,7 +1489,7 @@ function renderNotices(anns, results){
   const items = [];
   const colorMap = { info:'accent', success:'ok', warning:'warn', danger:'var(--danger)' };
 
-  (anns || []).forEach(a => {
+  (anns || []).forEach((a, i) => {
     const lv = a.level || 'info';
     const border = { info:'var(--accent)', success:'var(--ok)', warning:'var(--warn)', danger:'var(--danger)' }[lv] || 'var(--accent)';
     const pill = { info:'accent', success:'ok', warning:'warn', danger:'accent' }[lv] || 'accent';
@@ -1496,17 +1503,22 @@ function renderNotices(anns, results){
         <div class="t md" style="margin-top:4px">${mdHtml(a.content)}</div>
         ${a.source_url ? `<div class="tiny" style="margin-top:6px"><a href="${escHtml(a.source_url)}" target="_blank" rel="noopener noreferrer">查看学校原公告</a></div>` : ''}
         <div class="tiny" style="margin-top:6px">${escHtml(a.updated_at || a.created_at || '')}</div>
+        ${i === 0 ? reactionBarHtml() : ''}
       </div>`);
   });
 
   (results || []).forEach(r => {
     if(!r.result) return;
     const ok = r.success;
-    const border = ok ? 'var(--ok)' : 'var(--danger)';
+    // 休息日/闭馆是按配置跳过的，既不是成功也不是失败，单独一档中性样式。
+    const skipped = !ok && r.skipped;
+    const border = ok ? 'var(--ok)' : (skipped ? 'var(--warn)' : 'var(--danger)');
+    const pill = ok ? 'ok' : (skipped ? 'warn' : 'accent');
+    const label = ok ? '预约成功' : (skipped ? '已跳过' : '预约失败');
     items.push(`
       <div class="box tight" style="border-left:5px solid ${border}">
         <div class="row-flex" style="gap:6px">
-          <span class="pill ${ok?'ok':'accent'}">${ok ? '预约成功' : '预约失败'}</span>
+          <span class="pill ${pill}">${label}</span>
           <div class="sub" style="font-weight:700">学号 ${escHtml(r.pid)}</div>
         </div>
         <div class="t" style="margin-top:4px;white-space:pre-wrap">${escHtml(r.result)}</div>
@@ -1515,6 +1527,7 @@ function renderNotices(anns, results){
   });
 
   list.innerHTML = items.length ? items.join('') : '<div class="empty">暂无通知</div>';
+  paintReactionCounts();
 }
 
 function schoolNoticeAckKey(a){
@@ -1541,6 +1554,117 @@ function dismissSchoolNotice(){
   }
   state.pendingAnnouncementPopup = null;
   closeSheet();
+}
+
+// ---------- 公告栏小互动（临时功能，用完即弃） ----------
+// 置顶公告下面三个按钮，点了会有个 emoji 飞向屏幕。前端只显示三个总数，
+// 谁点的、点了几次记在后端（/api/reactions）。下线时删掉本段 +
+// renderNotices 里那行 reactionBarHtml()，再删 main.py / styles.css 里同名的一段。
+const REACTIONS = [
+  { kind:'poop', emoji:'💩', title:'扔一坨' },
+  // 想换表情改这一处就行，后端只认 kind
+  { kind:'whip', emoji:'👊', title:'来一拳' },
+  { kind:'rose', emoji:'🌹', title:'送朵花' },
+];
+const rxTotals = { poop:0, whip:0, rose:0 };
+const rxPending = { poop:0, whip:0, rose:0 };  // 还没发给后端的连点
+let rxFlushTimer = null;
+const RX_MOTION = !(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
+function reactionBarHtml(){
+  return `<div class="reaction-bar">${REACTIONS.map(r => `
+    <button type="button" class="rx" title="${r.title}" aria-label="${r.title}" onclick="throwReaction(this,'${r.kind}')">
+      <span class="rx-emoji">${r.emoji}</span><span class="rx-n" id="rx-n-${r.kind}">${rxTotals[r.kind]}</span>
+    </button>`).join('')}</div>`;
+}
+
+function paintReactionCounts(){
+  REACTIONS.forEach(r => {
+    const el = $('rx-n-' + r.kind);
+    if(el) el.textContent = rxTotals[r.kind];
+  });
+}
+
+async function loadReactions(){
+  const { ok, data } = await api('/api/reactions');
+  if(!ok || !data.totals) return;   // 演示模式没有这个接口，静默跳过
+  Object.assign(rxTotals, data.totals);
+  paintReactionCounts();
+}
+
+function throwReaction(btn, kind){
+  const item = REACTIONS.find(r => r.kind === kind);
+  if(!item) return;
+  // 先加本地数字再发请求：连点时数字得跟着手指走，等往返就卡住了
+  rxTotals[kind] += 1;
+  rxPending[kind] += 1;
+  paintReactionCounts();
+  flyEmoji(btn, item.emoji);
+  clearTimeout(rxFlushTimer);
+  rxFlushTimer = setTimeout(flushReactions, 700);
+}
+
+async function flushReactions(){
+  for(const r of REACTIONS){
+    const n = rxPending[r.kind];
+    if(!n) continue;
+    rxPending[r.kind] = 0;
+    const { ok, data } = await api('/api/reactions', { method:'POST', body:{ kind:r.kind, n } });
+    if(ok && data.totals){
+      // 后端是准的（别人也在点），但本地还没发出去的那几下要补回来
+      REACTIONS.forEach(x => { rxTotals[x.kind] = (data.totals[x.kind] || 0) + rxPending[x.kind]; });
+      paintReactionCounts();
+    }
+  }
+}
+
+// 从按钮飞向屏幕中间偏上：一路放大 + 乱转，落点砸一下再化开
+function flyEmoji(btn, emoji){
+  const layer = $('throw-layer');
+  if(!layer || !RX_MOTION) return;
+  const box = btn.getBoundingClientRect();
+  const x0 = box.left + box.width / 2;
+  const y0 = box.top + box.height / 2;
+  const x1 = innerWidth / 2 + (Math.random() - .5) * innerWidth * .5;
+  const y1 = innerHeight * .42 + (Math.random() - .5) * innerHeight * .24;
+  const spin = Math.round((Math.random() - .5) * 900);
+  const at = (x, y, s, deg) => `translate(${x}px,${y}px) translate(-50%,-50%) scale(${s}) rotate(${deg}deg)`;
+
+  const el = document.createElement('div');
+  el.className = 'thrown';
+  el.textContent = emoji;
+  layer.appendChild(el);
+  const fly = el.animate([
+    { transform: at(x0, y0, .35, 0), opacity: 1 },
+    { transform: at((x0 + x1) / 2, Math.min(y0, y1) - 40, 1.1, spin * .5), opacity: 1, offset: .55 },
+    { transform: at(x1, y1, 2.6, spin), opacity: 1 },
+  ], { duration: 460, easing: 'cubic-bezier(.3,.7,.4,1)' });
+  fly.onfinish = () => { el.remove(); splatEmoji(emoji, x1, y1); };
+}
+
+function splatEmoji(emoji, x, y){
+  const layer = $('throw-layer');
+  if(!layer) return;
+  const at = (sx, sy, deg) => `translate(${x}px,${y}px) translate(-50%,-50%) scale(${sx},${sy}) rotate(${deg}deg)`;
+
+  const ring = document.createElement('div');
+  ring.className = 'thrown-ring';
+  ring.style.transform = `translate(${x}px,${y}px) translate(-50%,-50%)`;
+  layer.appendChild(ring);
+  ring.animate([
+    { transform: ring.style.transform + ' scale(.3)', opacity: .55 },
+    { transform: ring.style.transform + ' scale(1.6)', opacity: 0 },
+  ], { duration: 420, easing: 'ease-out' }).onfinish = () => ring.remove();
+
+  const mark = document.createElement('div');
+  mark.className = 'thrown';
+  mark.textContent = emoji;
+  layer.appendChild(mark);
+  mark.animate([
+    { transform: at(3.4, 2.1, 0), opacity: 1 },          // 砸扁
+    { transform: at(2.8, 2.9, 6), opacity: .95, offset: .25 },
+    { transform: at(3.0, 2.8, -4), opacity: 0 },
+  ], { duration: 700, easing: 'ease-out' }).onfinish = () => mark.remove();
 }
 
 // ---------- seats ----------
@@ -2436,6 +2560,40 @@ const SHEETS = {
 
 // ========== 一键午休 ==========
 
+// 把标了 data-nap-wip 的入口拆掉点击行为，并在说明下面补一行小字。
+// 只认 DOM 上的标记，所以以后恢复功能时改 NAP_DISABLED 一个常量就够。
+function applyNapWip(){
+  if(!NAP_DISABLED) return;
+  document.querySelectorAll('[data-nap-wip]').forEach(row => {
+    if(row.dataset.napWipDone) return;
+    row.dataset.napWipDone = '1';
+    row.removeAttribute('onclick');
+    row.onclick = null;
+    row.classList.add('wip-row');
+    row.style.cursor = 'not-allowed';   // 行上有内联 cursor:pointer，class 盖不住
+    const tg = row.querySelector('.toggle');
+    if(tg){
+      tg.classList.remove('on');
+      tg.removeAttribute('onclick');
+      tg.onclick = null;
+    }
+    const info = row.querySelector('.info');
+    if(info && !info.querySelector('.wip-note')){
+      const note = document.createElement('div');
+      note.className = 't2 wip-note';
+      note.textContent = NAP_WIP_TEXT;
+      info.appendChild(note);
+    }
+  });
+}
+
+// 入口都拆了，这里只兜住老客户端和手搓请求
+function napBlocked(){
+  if(!NAP_DISABLED) return false;
+  toast('午休功能维护中 🚧','info');
+  return true;
+}
+
 async function loadNapConfig(){
   if(!state.currentPid) return;
   try{
@@ -2457,6 +2615,7 @@ function updateNapSettingsLabel(){
 }
 
 function openNap(){
+  if(napBlocked()) return;
   if(!state.todayResv){ toast('今日无预约','info'); return; }
   if(!localStorage.getItem('autolib_nap_ack')){
     openSheet('nap-info');
@@ -2482,6 +2641,7 @@ function onNapSettingsSeatMode(val){
 }
 
 async function saveNapConfig(closeAfter=true){
+  if(napBlocked()) return;
   const start = ($('nap-start') || {}).value;
   const seatMode = ($('nap-seat-mode') || {}).value;
   let seat = '';
@@ -2504,6 +2664,7 @@ async function saveNapConfig(closeAfter=true){
 }
 
 async function saveNapSettings(){
+  if(napBlocked()) return;
   const start = ($('ns-start') || {}).value || '14:00';
   const triggerTime = ($('ns-trigger') || {}).value || '12:00';
   if(triggerTime >= start){ toast('午休结束必须晚于开始','error'); return; }
@@ -2529,6 +2690,7 @@ async function saveNapSettings(){
 }
 
 async function doNap(){
+  if(napBlocked()) return;
   if(!state.todayResv){ toast('今日无预约','info'); return; }
   const start = ($('nap-start') || {}).value;
   // end 继承当前预约结束时间
@@ -2935,6 +3097,7 @@ async function enterDemoMode(){
 
 // ---------- init ----------
 async function init(){
+  applyNapWip();
   // Wire scrim click-outside
   $('scrim').addEventListener('click', e => { if(e.target.id === 'scrim') closeSheet(); });
 

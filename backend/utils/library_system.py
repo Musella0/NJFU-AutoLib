@@ -35,6 +35,7 @@ from utils.base_system import BaseSystem, TimeoutSession
 from utils.password_encryptor import PasswordEncryptor
 from utils import config
 from utils.vpn_system import VPNSystem
+from utils import attempt_log
 
 # 获取日志记录器
 logger = logging.getLogger(__name__)
@@ -235,6 +236,9 @@ class LibrarySystem(BaseSystem):
         # 和登录学号不一定相等，绝对不能拿它当本地数据库的主键——
         # user_config_info / arrival_checks / web_users 全都以 self.username（登录学号）归属。
         self.user_info: Optional[Dict[str, Any]] = None
+        # 最近一次成功下单的结构化结果（uuid / 座位 / 时段）。预约接口只回一句给用户看的
+        # 中文消息，而占位换约必须拿到 uuid 才能取消、拿到 devId 才能约回同一张座位。
+        self.last_reservation: Optional[Dict[str, Any]] = None
         self.vpn: Optional[VPNSystem] = None
 
         # 使用共享会话或创建新会话（新建的同样要带默认超时）
@@ -770,7 +774,14 @@ class LibrarySystem(BaseSystem):
         resv_end_time: str
     ) -> str:
         """
-        预约单个座位
+        预约单个座位，并把这一次尝试的结果记进 reserve_attempts。
+
+        每一次下单都是对那张座位的一次精确探测：开枪时刻 + 图书馆的判定，
+        合起来就是「开闸后第 N 毫秒，这张座位还活着吗」。这是选座模型唯一的
+        一手数据来源，以前只进容器日志、会被滚掉，现在留下来。
+
+        记账固定走 finally，所以成功、失败、抛异常三条路都不会漏；而且记在拿到
+        响应之后，不会拖慢这一次下单。
 
         Args:
             user_info: 用户信息
@@ -781,9 +792,34 @@ class LibrarySystem(BaseSystem):
         Returns:
             str: 预约结果消息
         """
-        # 获取座位名称
         seat_name = self.get_seat_name_by_id(seat_id)
+        fired_at = datetime.now()
+        message = ""
+        try:
+            message = self._post_reservation(
+                user_info, seat_id, seat_name, resv_begin_time, resv_end_time
+            )
+            return message
+        finally:
+            attempt_log.record(
+                pid=self.username,
+                seat_name=seat_name,
+                dev_id=seat_id,
+                resv_begin_time=resv_begin_time,
+                resv_end_time=resv_end_time,
+                fired_at=fired_at,
+                message=message,
+            )
 
+    def _post_reservation(
+        self,
+        user_info: Dict[str, Any],
+        seat_id: str,
+        seat_name: str,
+        resv_begin_time: str,
+        resv_end_time: str
+    ) -> str:
+        """真正发那一个下单请求。调用方负责记账，这里只管下单和返回那句话。"""
         # 准备预约数据
         resv_data = {
             "testName": "",
@@ -828,6 +864,15 @@ class LibrarySystem(BaseSystem):
                 )
                 log_with_user('info', self.username, '预约成功',
                              f"座位 {seat_name}({seat_id}) 预约成功: {success_msg}")
+                self.last_reservation = {
+                    "uuid": str(success_info.get('uuid') or ''),
+                    # devId 用我们发出去的那个，不用响应里的：要约回“同一张座位”，
+                    # 以请求为准最可靠，响应里的字段名还随版本变过。
+                    "dev_id": str(seat_id),
+                    "dev_name": actual_seat_name,
+                    "resv_begin_time": resv_begin_time,
+                    "resv_end_time": resv_end_time,
+                }
                 try:
                     # 归属一律用登录学号：user_info['pid'] 是图书馆自己的内部人员 ID，
                     # 多数人恰好和学号相同，不同的那几个会被注册到一个不存在的账号上，
@@ -876,6 +921,9 @@ class LibrarySystem(BaseSystem):
         Returns:
             Tuple[str, Optional[Dict[str, Any]]]: (预约结果消息, 用户信息)
         """
+        # 上一段的结果必须先清掉：调用方靠它判断“这一单落在哪张座位、uuid 是多少”，
+        # 留着残留会让失败的一单被当成成功的那一单去取消。
+        self.last_reservation = None
         try:
             # 确保登录状态
             self.ensure_login()

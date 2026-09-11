@@ -223,7 +223,7 @@
           </div>
           <div class="toggle" id="cfg-toggle-lp" onclick="toggleLP(this,event)"></div>
         </div>
-        <div class="toggle-row">
+        <div class="toggle-row" data-nap-wip>
           <div class="info">
             <div class="t1">自动午休 😴</div>
             <div class="t2">每日触发时刻自动续约下午时段。<a href="#" onclick="openSheet('nap-about');return false" style="color:var(--accent)">说明</a></div>
@@ -299,7 +299,7 @@
 
     <div class="box pad mb-lg">
       <div class="label" style="margin-bottom:4px">午休</div>
-      <div class="toggle-row" style="cursor:pointer" onclick="openSheet('nap-settings')">
+      <div class="toggle-row" style="cursor:pointer" onclick="openSheet('nap-settings')" data-nap-wip>
         <div class="info">
           <div class="t1">午休配置</div>
           <div class="t2" id="nap-settings-label">下午 14:00，同座位</div>
@@ -368,6 +368,9 @@
 
 <!-- =============== TOASTS =============== -->
 <div class="toasts" id="toasts"></div>
+
+<!-- 公告栏小互动的飞行层（临时功能，用完即弃） -->
+<div class="throw-layer" id="throw-layer"></div>
 
 <!-- 公告栏 Markdown 渲染 -->
 <script src="{{ url_for('static', filename='markdown.js') }}?v={{ static_v }}"></script>

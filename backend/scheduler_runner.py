@@ -12,6 +12,11 @@
   PRELOGIN_ENABLED      - 是否提前登录 (默认 1，设 0 关闭)
   PRELOGIN_LEAD_MINUTES - 提前多少分钟预登录 (默认 10)
   PRELOGIN_REFRESH_LEAD_SECONDS - 提前多少秒复查会话 (默认 30)
+  SEAT_SNAPSHOT_ENABLED - 是否每天拍全馆占用快照 (默认 1，设 0 关闭)
+  SEAT_SNAPSHOT_PRE_MINUTES - 抢座前多少分钟拍第一张 (默认 15，即 6:45)
+  SEAT_SNAPSHOT_RUSH_SECONDS - 抢座后多少秒拍第二张 (默认 60，即 7:01)
+  SEAT_SNAPSHOT_DELAY_MINUTES - 抢座后多少分钟拍第三张 (默认 5，即 7:05)
+  SEAT_SNAPSHOT_PID - 拍快照用的观测账号 (见 utils/seat_snapshot.py)
 """
 
 import os
@@ -64,6 +69,46 @@ def run_pending_segment_check():
         process_due_segments()
     except Exception as e:
         logger.error(f"排队补约异常: {e}", exc_info=True)
+
+
+# 06:45 建好的观测会话，留给 07:01 那张复用。抢座窗口里不能再登一次。
+_snapshot_session = None
+
+
+def run_seat_snapshot_task(tag, keep_session=False, reuse_session=False):
+    """拍一张明天的全馆占用快照，攒「哪张座位有人抢」的历史数据。
+
+    一个早上拍三张，tag 分别是：
+      pre  (06:45) 抢座前，板子应该还是空的——它同时是「有没有人比 7:00 更早下手」的对照
+      rush (07:01) 7:00 那一波刚结束，这张才是「谁抢赢了」的真信号
+      post (07:05) 加上几分钟慢慢约的人
+
+    rush 减 pre = 真抢不过的座位；post 减 rush = 我们本来拿得到的座位。
+    单看 post 这两类混在一起，竞争度会被算高。
+
+    只读 ic-web，不碰任何用户配置。tag 用固定字面量而不是执行时刻，
+    偶尔晚几分钟跑也还归到同一批数据里，不会把序列切碎。
+    """
+    global _snapshot_session
+    try:
+        from utils.seat_snapshot import capture, login
+
+        library = None
+        if reuse_session:
+            library, _snapshot_session = _snapshot_session, None
+            if library is None:
+                logger.warning("没有可复用的观测会话，%s 这张跳过——"
+                               "抢座窗口里不现场登录", tag)
+                return
+        elif keep_session:
+            library = login()
+
+        capture(tag=tag, library=library)
+        if keep_session:
+            _snapshot_session = library
+    except Exception as e:
+        _snapshot_session = None
+        logger.error(f"座位占用快照异常: {e}", exc_info=True)
 
 
 def run_school_notice_check():
@@ -137,6 +182,28 @@ def main():
     reserve_at = datetime(2000, 1, 2, hour, minute)
     warm_at = reserve_at - timedelta(minutes=lead_minutes)
     refresh_at = reserve_at - timedelta(seconds=refresh_lead)
+    # 占用快照一个早上拍三张，把 7:00 那一秒夹在中间——竞争度只存在于差里。
+    #   pre  (06:45) 抢座前：板子应该还是空的，同时是「有没有人比 7:00 更早下手」的对照
+    #   rush (07:01) 抢座刚结束：这张才是「谁抢赢了」
+    #   post (07:05) 再加上几分钟慢慢约的人
+    # rush-pre = 真抢不过的；post-rush = 我们本来拿得到的。只拍 post 这两类混在
+    # 一起，竞争度会被算高。实测 09-11 的板子在前一天 10:50 还是 0/2749，
+    # 所以分辨率必须做到分钟级，拍在 7 点前后几小时都是同一个数。
+    snapshot_pre_at = reserve_at - timedelta(
+        minutes=max(1, int(os.getenv("SEAT_SNAPSHOT_PRE_MINUTES", "15")))
+    )
+    # rush 那张卡在抢座刚结束、慢悠悠约座的人还没进来之前。实测抢座本身
+    # 6~15 秒就跑完了（最慢的一天 07:00:15），60 秒留足了余量；而且它复用
+    # 6:45 的会话，窗口里一次登录都不会发生。
+    snapshot_rush_at = reserve_at + timedelta(
+        seconds=max(20, int(os.getenv("SEAT_SNAPSHOT_RUSH_SECONDS", "60")))
+    )
+    snapshot_at = reserve_at + timedelta(
+        minutes=max(1, int(os.getenv("SEAT_SNAPSHOT_DELAY_MINUTES", "5")))
+    )
+    snapshot_enabled = os.getenv("SEAT_SNAPSHOT_ENABLED", "1").strip().lower() not in (
+        "0", "false", "no", "off"
+    )
 
     logger.info(f"定时预约调度器启动，每天 {hour:02d}:{minute:02d} 执行预约")
 
@@ -229,6 +296,55 @@ def main():
         max_instances=1,
         replace_existing=True
     )
+    if snapshot_enabled:
+        logger.info(
+            f"座位占用快照已启用：{snapshot_pre_at:%H:%M} 抢座前 / "
+            f"{snapshot_rush_at:%H:%M:%S} 抢座刚结束 / {snapshot_at:%H:%M} 尘埃落定，"
+            f"三张的差分出「抢不过」和「本来拿得到」"
+        )
+        scheduler.add_job(
+            run_seat_snapshot_task,
+            'cron',
+            hour=snapshot_pre_at.hour,
+            minute=snapshot_pre_at.minute,
+            id='seat_snapshot_pre',
+            # keep_session：这次登录留给 07:01 那张复用
+            args=['pre', True, False],
+            coalesce=True,
+            max_instances=1,
+            # 抢座前这张迟到就没意义了，而且绝不能拖进 6:50 的预登录和 7:00 的抢座——
+            # 宁可这天缺一张 pre，也不能跟抢座抢网关。
+            misfire_grace_time=120,
+            replace_existing=True
+        )
+        scheduler.add_job(
+            run_seat_snapshot_task,
+            'cron',
+            hour=snapshot_rush_at.hour,
+            minute=snapshot_rush_at.minute,
+            second=snapshot_rush_at.second,
+            id='seat_snapshot_rush',
+            # reuse_session：只复用 6:45 那个会话，取不到就干脆不拍
+            args=['rush', False, True],
+            coalesce=True,
+            max_instances=1,
+            # 这张的价值全在「卡在抢座刚结束那一刻」，迟到 30 秒以上就没意义了
+            misfire_grace_time=30,
+            replace_existing=True
+        )
+        scheduler.add_job(
+            run_seat_snapshot_task,
+            'cron',
+            hour=snapshot_at.hour,
+            minute=snapshot_at.minute,
+            id='seat_snapshot_post',
+            args=['post', False, False],
+            coalesce=True,
+            max_instances=1,
+            # 晚半小时拍也还有用（抢座早结束了），再晚就没必要补了。
+            misfire_grace_time=1800,
+            replace_existing=True
+        )
     scheduler.add_job(
         run_school_notice_check,
         'cron',

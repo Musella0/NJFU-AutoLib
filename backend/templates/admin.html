@@ -141,6 +141,58 @@
   .modal-field textarea:focus{border-color:var(--accent)}
   .checkbox-row{display:flex;gap:16px;align-items:center}
   .checkbox-row label{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);cursor:pointer}
+  /* Toolbar: filters / grouping / column picker */
+  .toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px;margin-bottom:12px}
+  .tb-group{display:flex;align-items:center;gap:6px}
+  .tb-label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;font-weight:500;white-space:nowrap}
+  .tb-select,.tb-input{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 8px;color:var(--text);font-size:12px;font-family:var(--mono);outline:none}
+  .tb-select:focus,.tb-input:focus{border-color:var(--accent)}
+  .tb-input{width:160px;font-family:var(--sans)}
+  .tb-spacer{flex:1}
+  .tb-count{font-family:var(--mono);font-size:12px;color:var(--text3);white-space:nowrap}
+  .seg{display:flex;border:1px solid var(--border);border-radius:6px;overflow:hidden}
+  .seg button{padding:5px 12px;font-size:12px;font-family:var(--sans);background:var(--bg);color:var(--text2);border:none;cursor:pointer;transition:all .15s}
+  .seg button+button{border-left:1px solid var(--border)}
+  .seg button:hover{color:var(--text)}
+  .seg button.on{background:var(--accent-dim);color:var(--accent)}
+  .colpick{position:relative}
+  .colpick-panel{display:none;position:absolute;right:0;top:calc(100% + 6px);z-index:50;background:var(--bg2);border:1px solid var(--border2);border-radius:8px;padding:10px;width:210px;max-height:320px;overflow-y:auto;box-shadow:0 12px 40px rgba(0,0,0,.5)}
+  .colpick.open .colpick-panel{display:block}
+  .colpick-panel label{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text2);padding:5px 6px;border-radius:4px;cursor:pointer}
+  .colpick-panel label:hover{background:var(--bg3);color:var(--text)}
+  .colpick-panel label.locked{color:var(--text3);cursor:not-allowed}
+  .colpick-foot{display:flex;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid var(--border)}
+  /* Group sections */
+  .grp{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:10px;overflow:hidden}
+  .grp-head{display:flex;align-items:center;gap:10px;padding:10px 16px;cursor:pointer;user-select:none;background:var(--card);border-bottom:1px solid var(--border)}
+  .grp-head:hover{background:var(--bg3)}
+  .grp.collapsed>.grp-head{border-bottom:none}
+  .grp.collapsed>.grp-body{display:none}
+  .grp-caret{color:var(--text3);font-size:10px;transition:transform .15s;flex-shrink:0}
+  .grp.collapsed>.grp-head .grp-caret{transform:rotate(-90deg)}
+  .grp-name{font-size:13px;font-weight:600}
+  .grp-code{font-family:var(--mono);color:var(--accent)}
+  .grp-stats{display:flex;gap:10px;margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--text3);flex-shrink:0}
+  .grp-stats .ok{color:var(--green)}
+  .grp-stats .bad{color:var(--red)}
+  .grp-sub{border:1px solid var(--border);border-radius:6px;margin:10px 12px}
+  .grp-sub>.grp-head{padding:8px 12px;background:transparent}
+  .grp-sub .grp-name{font-size:12px;font-weight:500;color:var(--text2)}
+  /* Table view */
+  .tbl-wrap{overflow-x:auto}
+  table.tbl{width:100%;border-collapse:collapse;font-size:12px}
+  table.tbl th{text-align:left;font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;font-weight:500;padding:8px 12px;border-bottom:1px solid var(--border);white-space:nowrap;background:var(--card)}
+  table.tbl td{padding:9px 12px;border-bottom:1px solid var(--border);color:var(--text2);vertical-align:top}
+  table.tbl tr:last-child td{border-bottom:none}
+  table.tbl tbody tr:hover{background:rgba(88,166,255,.04)}
+  .td-mono{font-family:var(--mono);color:var(--text)}
+  .td-pid{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--text);white-space:nowrap}
+  .td-nowrap{white-space:nowrap}
+  .td-result{max-width:340px;line-height:1.5}
+  .td-actions{white-space:nowrap;display:flex;gap:4px;align-items:center}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;vertical-align:middle}
+  .dot-on{background:var(--green)}.dot-off{background:var(--text3)}
+  .empty-note{color:var(--text3);font-style:italic}
   @media(max-width:768px){.container{padding:16px}.topbar{padding:0 16px}.stats{flex-direction:column}.uc-body{grid-template-columns:1fr 1fr}.uc-header{flex-direction:column;align-items:flex-start;gap:10px}.uc-header-right{align-self:flex-end}}
 </style>
 </head>
@@ -212,6 +264,46 @@
 
     <div class="section-bar">
       <div class="section-title">用户列表</div>
+      <span class="tb-count" id="u-count"></span>
+    </div>
+    <div class="toolbar">
+      <div class="tb-group">
+        <span class="tb-label">视图</span>
+        <div class="seg" id="seg-view">
+          <button data-view="table" onclick="setView('table')">表格</button>
+          <button data-view="card" onclick="setView('card')">卡片</button>
+        </div>
+      </div>
+      <div class="tb-group">
+        <span class="tb-label">分类</span>
+        <div class="seg" id="seg-group">
+          <button data-group="none" onclick="setGroup('none')">不分类</button>
+          <button data-group="college" onclick="setGroup('college')">学院</button>
+          <button data-group="college_class" onclick="setGroup('college_class')">学院 / 班级</button>
+        </div>
+      </div>
+      <div class="tb-group">
+        <span class="tb-label">学院</span>
+        <select class="tb-select" id="f-college" onchange="onCollegeFilter(this.value)"></select>
+      </div>
+      <div class="tb-group">
+        <span class="tb-label">班级</span>
+        <select class="tb-select" id="f-class" onchange="setFilter('klass',this.value)"></select>
+      </div>
+      <div class="tb-group">
+        <span class="tb-label">搜索</span>
+        <input class="tb-input" id="f-q" type="search" placeholder="学号 / 座位 / 结果" oninput="setFilter('q',this.value)">
+      </div>
+      <div class="tb-spacer"></div>
+      <div class="colpick" id="colpick">
+        <button class="btn btn-ghost btn-sm" onclick="toggleColPick(event)">栏目 ▾</button>
+        <div class="colpick-panel" id="colpick-panel">
+          <div class="colpick-foot" style="margin:0 0 6px;padding:0 0 8px">
+            <button class="btn btn-ghost btn-sm" onclick="resetCols()">恢复默认</button>
+            <button class="btn btn-ghost btn-sm" onclick="setAllCols(true)">全选</button>
+          </div>
+        </div>
+      </div>
     </div>
     <div class="user-grid" id="grid"><div class="loading"><div class="spinner"></div><div>加载中...</div></div></div>
   </div>
@@ -391,10 +483,205 @@ async function loadUsers(){
     document.getElementById('s-lp-count').textContent=lpTotal;
     renderAll();}catch(e){document.getElementById('grid').innerHTML=`<div style="color:var(--red);text-align:center;padding:40px">加载失败：${e.message||e}</div>`;}
 }
+// ---- 分类：学院 / 班级 ----
+// 学院号和班级号由后端从学号里拆好（见 utils/student_id.py），前端只负责展示和分组。
+const UNCLASSIFIED='__none__';
+function collegeKey(u){return u.id_recognized?u.college_code:UNCLASSIFIED}
+function classKey(u){return u.id_recognized?u.class_key:UNCLASSIFIED}
+function collegeLabel(k){return k===UNCLASSIFIED?'未分类学号':k+' 院'}
+function classLabel(k){return k===UNCLASSIFIED?'未分类学号':(k.split('-')[1]||'?')+' 班'}
+function classFullLabel(k){if(k===UNCLASSIFIED)return'未分类学号';const[c,n]=k.split('-');return`${c} 院 ${n} 班`}
+// 未分类永远沉到最后，别夹在学院中间。
+function cmpKey(a,b){if(a===UNCLASSIFIED)return 1;if(b===UNCLASSIFIED)return -1;return a.localeCompare(b)}
+function groupBy(list,fn){const m=new Map();for(const u of list){const k=fn(u);if(!m.has(k))m.set(k,[]);m.get(k).push(u)}return m}
+
+// ---- 多栏分类：可选显示哪些栏 ----
+const COLS=[
+  {key:'pid',label:'学号',fixed:true},
+  {key:'college',label:'学院'},
+  {key:'class',label:'班级'},
+  {key:'seats',label:'目标座位'},
+  {key:'owned',label:'当前持有'},
+  {key:'result',label:'预约结果'},
+  {key:'switch',label:'开关'},
+  {key:'protect',label:'迟到保护'},
+  {key:'priority',label:'优先级'},
+  {key:'mode',label:'模式'},
+  {key:'time',label:'时间配置'},
+  {key:'web_uid',label:'所属用户'},
+  {key:'email',label:'通知邮箱'},
+  {key:'updated',label:'更新时间'},
+  {key:'actions',label:'操作',fixed:true},
+];
+const FIXED_COLS=COLS.filter(c=>c.fixed).map(c=>c.key);
+const DEFAULT_COLS=['pid','college','class','seats','owned','result','switch','actions'];
+
+function lsGet(k,d){try{const v=localStorage.getItem('autolib_admin_'+k);return v===null?d:JSON.parse(v)}catch(e){return d}}
+function lsSet(k,v){try{localStorage.setItem('autolib_admin_'+k,JSON.stringify(v))}catch(e){}}
+function normCols(raw){
+  // 存档里的栏目名可能来自旧版本，先按 COLS 过一遍，再补回不可取消的固定栏，
+  // 免得表格连学号和操作都渲染不出来。
+  const known=COLS.map(c=>c.key);
+  const picked=(Array.isArray(raw)?raw:[]).filter(k=>known.includes(k));
+  const merged=picked.length?picked:DEFAULT_COLS.slice();
+  return known.filter(k=>merged.includes(k)||FIXED_COLS.includes(k));
+}
+
+let viewMode=lsGet('view','table')==='card'?'card':'table';
+let groupMode=['none','college','college_class'].includes(lsGet('group','college_class'))?lsGet('group','college_class'):'college_class';
+let cols=normCols(lsGet('cols',null));
+let filters={college:'',klass:'',q:''};
+const collapsed=new Set();
+
+function setView(v){viewMode=v;lsSet('view',v);renderAll()}
+function setGroup(v){groupMode=v;lsSet('group',v);renderAll()}
+function setFilter(k,v){filters[k]=v;renderAll()}
+function onCollegeFilter(v){filters.college=v;filters.klass='';renderAll()}
+function syncControls(){
+  document.querySelectorAll('#seg-view button').forEach(b=>b.classList.toggle('on',b.dataset.view===viewMode));
+  document.querySelectorAll('#seg-group button').forEach(b=>b.classList.toggle('on',b.dataset.group===groupMode));
+}
+function toggleColPick(e){e.stopPropagation();document.getElementById('colpick').classList.toggle('open')}
+function toggleCol(key,on){cols=normCols(on?cols.concat([key]):cols.filter(k=>k!==key));lsSet('cols',cols);renderAll()}
+function setAllCols(){cols=COLS.map(c=>c.key);lsSet('cols',cols);buildColPick();renderAll()}
+function resetCols(){cols=DEFAULT_COLS.slice();lsSet('cols',cols);buildColPick();renderAll()}
+function buildColPick(){
+  const panel=document.getElementById('colpick-panel'),foot=panel.firstElementChild;
+  panel.innerHTML='';panel.appendChild(foot);
+  for(const c of COLS){
+    const row=document.createElement('label');
+    if(c.fixed)row.className='locked';
+    const box=document.createElement('input');
+    box.type='checkbox';box.checked=cols.includes(c.key);box.disabled=!!c.fixed;
+    if(!c.fixed)box.onchange=()=>toggleCol(c.key,box.checked);
+    row.appendChild(box);row.appendChild(document.createTextNode(' '+c.label));
+    panel.appendChild(row);
+  }
+}
+document.addEventListener('click',e=>{const p=document.getElementById('colpick');if(p&&!p.contains(e.target))p.classList.remove('open')});
+
+function ownedNames(u){
+  const out=[];
+  for(const[n,list]of Object.entries(u.owned_seat||{}))for(const s of list||[])out.push(n+' '+(s.target_time||''));
+  return out;
+}
+function matchedUsers(){
+  const q=(filters.q||'').trim().toLowerCase();
+  return users.filter(u=>{
+    if(filters.college&&collegeKey(u)!==filters.college)return false;
+    if(filters.klass&&classKey(u)!==filters.klass)return false;
+    if(!q)return true;
+    const hay=[u.pid,u.web_uid,u.result,(u.seat_list||[]).join(' '),ownedNames(u).join(' ')].join(' ').toLowerCase();
+    return hay.includes(q);
+  }).sort((a,b)=>String(a.pid||'').localeCompare(String(b.pid||'')));
+}
+function fillFilters(){
+  const csel=document.getElementById('f-college');
+  const colleges=[...new Set(users.map(collegeKey))].sort(cmpKey);
+  csel.innerHTML='<option value="">全部学院</option>'+colleges.map(k=>
+    `<option value="${k}">${collegeLabel(k)} · ${users.filter(u=>collegeKey(u)===k).length}</option>`).join('');
+  csel.value=colleges.includes(filters.college)?filters.college:(filters.college='');
+  const ksel=document.getElementById('f-class');
+  const pool=filters.college?users.filter(u=>collegeKey(u)===filters.college):users;
+  const classes=[...new Set(pool.map(classKey))].sort(cmpKey);
+  ksel.innerHTML='<option value="">全部班级</option>'+classes.map(k=>
+    `<option value="${k}">${(filters.college?classLabel(k):classFullLabel(k))} · ${pool.filter(u=>classKey(u)===k).length}</option>`).join('');
+  ksel.value=classes.includes(filters.klass)?filters.klass:(filters.klass='');
+}
+
 function renderAll(){
   const g=document.getElementById('grid');
+  syncControls();fillFilters();
+  const list=matchedUsers();
+  document.getElementById('u-count').textContent=
+    users.length?(list.length===users.length?`共 ${users.length} 人`:`筛选出 ${list.length} / ${users.length} 人`):'';
   if(!users.length){g.innerHTML='<div style="color:var(--text3);text-align:center;padding:60px">暂无用户</div>';return;}
-  g.innerHTML=users.map(card).join('');
+  if(!list.length){g.innerHTML='<div style="color:var(--text3);text-align:center;padding:60px">没有符合筛选条件的用户</div>';return;}
+  if(groupMode==='none'){g.innerHTML=viewMode==='card'?list.map(card).join(''):`<div class="grp">${tableHtml(list)}</div>`;return;}
+  const byCollege=groupBy(list,collegeKey);
+  g.innerHTML=[...byCollege.keys()].sort(cmpKey).map(ck=>{
+    const rows=byCollege.get(ck);
+    let inner;
+    if(groupMode==='college'){inner=body(rows);}
+    else{
+      const byClass=groupBy(rows,classKey);
+      inner=[...byClass.keys()].sort(cmpKey).map(kk=>
+        section('grp-sub',`c:${ck}/${kk}`,classLabel(kk),byClass.get(kk),body(byClass.get(kk)))).join('');
+    }
+    return section('',`col:${ck}`,collegeLabel(ck),rows,inner);
+  }).join('');
+}
+function body(list){return viewMode==='card'?`<div class="user-grid" style="padding:12px">${list.map(card).join('')}</div>`:tableHtml(list)}
+function section(cls,key,name,rows,inner){
+  const on=rows.filter(u=>u.is_reserved==='True').length;
+  const ok=rows.filter(u=>(u.result||'').includes('成功')).length;
+  const bad=rows.filter(u=>u.result&&!u.result.includes('成功')).length;
+  return `<div class="grp ${cls} ${collapsed.has(key)?'collapsed':''}">
+    <div class="grp-head" onclick="toggleGroup('${key}',this)">
+      <span class="grp-caret">▼</span>
+      <span class="grp-name"><span class="grp-code">${esc(name)}</span></span>
+      <span class="grp-stats"><span>${rows.length} 人</span><span>预约中 ${on}</span><span class="ok">成功 ${ok}</span>${bad?`<span class="bad">异常 ${bad}</span>`:''}</span>
+    </div>
+    <div class="grp-body">${inner}</div>
+  </div>`;
+}
+function toggleGroup(key,el){
+  const box=el.parentElement;
+  if(box.classList.toggle('collapsed'))collapsed.add(key);else collapsed.delete(key);
+}
+
+function tableHtml(list){
+  const active=COLS.filter(c=>cols.includes(c.key));
+  return `<div class="tbl-wrap"><table class="tbl">
+    <thead><tr>${active.map(c=>`<th>${c.label}</th>`).join('')}</tr></thead>
+    <tbody>${list.map(u=>`<tr>${active.map(c=>`<td>${cell(c.key,u)}</td>`).join('')}</tr>`).join('')}</tbody>
+  </table></div>`;
+}
+function cell(key,u){
+  const pid=u.pid||'?';
+  switch(key){
+    case'pid':return`<span class="td-pid">${esc(pid)}</span>${u.late_protection_blacklisted?' <span style="font-size:10px;padding:1px 5px;border-radius:4px;background:rgba(248,81,73,.15);color:var(--red)">黑</span>':''}`;
+    case'college':return u.id_recognized?`<span class="td-mono">${u.college_code}</span>`:'<span class="empty-note">未分类</span>';
+    case'class':return u.id_recognized?`<span class="td-mono">${u.class_code}</span>`:'<span class="empty-note">未分类</span>';
+    case'seats':return seatsHtml(u);
+    case'owned':return ownedHtml(u);
+    case'result':return u.result?`<div class="td-result ${resultClass(u)}">${esc(u.result)}</div>`:'<span class="empty-note">无</span>';
+    case'switch':return`<div class="td-actions">
+      <label class="toggle" title="预约"><input type="checkbox" ${u.is_reserved==='True'?'checked':''} onchange="tog('${pid}','is_reserved',this.checked)"><div class="toggle-track"></div><div class="toggle-thumb"></div></label>
+      <label class="toggle" title="迟到保护"><input type="checkbox" ${u.late_protection==='True'?'checked':''} onchange="tog('${pid}','late_protection',this.checked)"><div class="toggle-track"></div><div class="toggle-thumb"></div></label></div>`;
+    case'protect':return`${fmtProtect(u)} <span style="color:var(--text3)">/ ${u.late_protection_count||0}次</span>`;
+    case'priority':return`<span class="td-mono">${u.priority??0}</span>`;
+    case'mode':return u.mode==='week_time'?'按星期':(u.mode||'-');
+    case'time':return timeHtml(u);
+    case'web_uid':return`<span class="td-mono">${esc(u.web_uid||'-')}</span>`;
+    case'email':return u.notify_email?`<span class="td-mono">${esc(u.notify_email)}</span>`:'<span class="empty-note">未设置</span>';
+    case'updated':return`<span class="td-mono td-nowrap">${esc(u.updated_at||'-')}</span>`;
+    case'actions':return`<div class="td-actions">
+      <button class="btn btn-blue btn-sm" onclick="editPri('${pid}',${u.priority||0})">优先级</button>
+      <button class="btn btn-ghost btn-sm" style="color:var(--yellow)" onclick="openProtect('${pid}',${u.protection_max_minutes??60},${!!u.late_protection_blacklisted},${u.late_protection_count||0})">保护</button>
+      <button class="btn btn-red btn-sm" onclick="del('${pid}')">删除</button></div>`;
+    default:return'';
+  }
+}
+
+// 卡片和表格共用的几段渲染，改一处两边同时生效。
+function seatsHtml(u){
+  return (u.seat_list||[]).map(s=>`<span class="seat-tag">${esc(s)}</span>`).join('')||'<span class="uc-field-value empty">未设置</span>';
+}
+function timeHtml(u){
+  if(u.mode==='week_time'&&u.time&&u.time.week_time){
+    const d=['一','二','三','四','五','六','日'];
+    return'<div class="time-slots">'+[1,2,3,4,5,6,7].map(i=>`<div class="time-slot"><span class="day">周${d[i-1]}</span>${esc(String(u.time.week_time[i]||'-'))}</div>`).join('')+'</div>';
+  }
+  if(u.time&&u.time.tomorrow)return`<span class="uc-field-value">${esc(String(u.time.tomorrow))}</span>`;
+  return'<span class="uc-field-value empty">未设置</span>';
+}
+function ownedHtml(u){
+  if(!u.owned_seat||!Object.keys(u.owned_seat).length)return'<span class="uc-field-value empty">无</span>';
+  let h='<div class="owned-info">';
+  for(const[n,list]of Object.entries(u.owned_seat))for(const s of list||[])
+    h+=`<div class="owned-item"><span class="owned-dot"></span>${esc(n)} ${esc(s.target_time||'')}${s.by_protection?'<span style="font-size:10px;color:var(--yellow);margin-left:4px">[保护后]</span>':''}</div>`;
+  return h+'</div>';
 }
 function fmtProtect(u){
   if(u.late_protection_blacklisted)return'<span style="color:var(--red);font-weight:600">黑名单</span>';
@@ -404,19 +691,14 @@ function fmtProtect(u){
   if(m===0)return'0分钟（触发即取消）';
   return m+'分钟';
 }
+function resultClass(u){const r=u.result||'';return r.includes('成功')?'success':(r?'fail':'')}
+
 function card(u){
   const pid=u.pid||'?',av=pid.slice(-2),isOn=u.is_reserved==='True',lpOn=u.late_protection==='True';
-  const seats=(u.seat_list||[]).map(s=>`<span class="seat-tag">${s}</span>`).join('')||'<span class="uc-field-value empty">未设置</span>';
-  let timeH='';
-  if(u.mode==='week_time'&&u.time&&u.time.week_time){const d=['一','二','三','四','五','六','日'];timeH='<div class="time-slots">'+[1,2,3,4,5,6,7].map(i=>`<div class="time-slot"><span class="day">周${d[i-1]}</span>${u.time.week_time[i]||'-'}</div>`).join('')+'</div>';}
-  else if(u.time&&u.time.tomorrow){timeH=`<span class="uc-field-value">${u.time.tomorrow}</span>`;}
-  else{timeH='<span class="uc-field-value empty">未设置</span>';}
-  let ownH='';
-  if(u.owned_seat&&Object.keys(u.owned_seat).length){ownH='<div class="owned-info">';for(const[n,list]of Object.entries(u.owned_seat))for(const s of list)ownH+=`<div class="owned-item"><span class="owned-dot"></span>${n} ${s.target_time||''}${s.by_protection?'<span style="font-size:10px;color:var(--yellow);margin-left:4px">[保护后]</span>':''}</div>`;ownH+='</div>';}
-  else{ownH='<span class="uc-field-value empty">无</span>';}
-  const res=u.result||'',rc=res.includes('成功')?'success':(res?'fail':'');
+  const res=u.result||'',rc=resultClass(u);
   const lpCount=u.late_protection_count||0;
   const blBadge=u.late_protection_blacklisted?'<span style="font-size:10px;padding:1px 6px;border-radius:4px;background:rgba(248,81,73,.15);color:var(--red);border:1px solid rgba(248,81,73,.2);margin-left:4px">黑名单</span>':'';
+  const clsBadge=u.id_recognized?`<span class="uc-field-value">${u.college_code} 院 ${u.class_code} 班</span>`:'<span class="uc-field-value empty">未分类</span>';
   return `<div class="user-card">
     <div class="uc-header"><div class="uc-header-left"><div class="uc-avatar">${av}</div><div><div class="uc-pid">${pid}${blBadge}</div><div class="uc-updated">更新于 ${u.updated_at||'-'}</div></div></div>
     <div class="uc-header-right">
@@ -427,13 +709,14 @@ function card(u){
       <button class="btn btn-red btn-sm" onclick="del('${pid}')">删除</button>
     </div></div>
     <div class="uc-body">
+      <div class="uc-field"><div class="uc-field-label">学院 / 班级</div>${clsBadge}</div>
       <div class="uc-field"><div class="uc-field-label">所属用户</div><div class="uc-field-value">${u.web_uid||'-'}</div></div>
       <div class="uc-field"><div class="uc-field-label">模式</div><div class="uc-field-value">${u.mode==='week_time'?'按星期':(u.mode||'-')}</div></div>
       <div class="uc-field"><div class="uc-field-label">优先级</div><div class="uc-field-value">${u.priority??0}</div></div>
       <div class="uc-field"><div class="uc-field-label">保护设置</div><div class="uc-field-value">${fmtProtect(u)} <span style="color:var(--text3);font-size:11px">/ 触发${lpCount}次</span></div></div>
-      <div class="uc-field"><div class="uc-field-label">座位</div><div class="seat-tags">${seats}</div></div>
-      <div class="uc-field"><div class="uc-field-label">时间</div>${timeH}</div>
-      <div class="uc-field"><div class="uc-field-label">当前持有</div>${ownH}</div>
+      <div class="uc-field"><div class="uc-field-label">座位</div><div class="seat-tags">${seatsHtml(u)}</div></div>
+      <div class="uc-field"><div class="uc-field-label">时间</div>${timeHtml(u)}</div>
+      <div class="uc-field"><div class="uc-field-label">当前持有</div>${ownedHtml(u)}</div>
     </div>
     ${res?`<div class="uc-footer"><div class="uc-result ${rc}">结果: ${esc(res)}</div></div>`:''}
   </div>`;}
@@ -627,6 +910,7 @@ function delAnn(id){
   openM('m-ann-del');
 }
 
+buildColPick();
 checkAdmin();
 </script>
 </body>

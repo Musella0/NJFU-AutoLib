@@ -22,6 +22,15 @@ http://xn--1jq43jfrduzxh22d.xn--fiqs8s, https://xn--1jq43jfrduzxh22d.xn--fiqs8s 
     @plaintext header X-Forwarded-Proto http
     redir @plaintext https://{host}{uri} 308
 
+    # 只记录 APK 下载（其他请求在下面 log_skip 掉），用于统计下载次数
+    log {
+        output file /data/download.log {
+            roll_size 10MiB
+            roll_keep 5
+        }
+        format json
+    }
+
     # APK 自助更新下载：只服务 /srv/downloads 这一个目录
     handle_path /download/* {
         root * /srv/downloads
@@ -32,5 +41,9 @@ http://xn--1jq43jfrduzxh22d.xn--fiqs8s, https://xn--1jq43jfrduzxh22d.xn--fiqs8s 
         file_server
     }
 
-    reverse_proxy flask-api:5004
+    handle {
+        # 业务接口不写访问日志，避免日志文件被刷爆
+        log_skip
+        reverse_proxy flask-api:5004
+    }
 }
