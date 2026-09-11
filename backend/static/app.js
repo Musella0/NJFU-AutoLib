@@ -1648,7 +1648,7 @@ function splitEmojis(text){
   return Array.from(text);
 }
 
-// 应援：几个 emoji 从按钮上方依次冒出来，边升边放大，淡入再淡出
+// 应援：几个 emoji 从按钮上方一起冒出来，边升边放大，淡入再淡出
 function cheerEmojis(btn, emojis){
   const layer = $('throw-layer');
   const parts = splitEmojis(emojis).filter(e => e.trim());
@@ -1668,7 +1668,7 @@ function cheerEmojis(btn, emojis){
       { transform: at(y0, .5), opacity: 0 },
       { transform: at(y0 - rise * .45, 1.25), opacity: 1, offset: .35 },
       { transform: at(y0 - rise, 1.5), opacity: 0 },
-    ], { duration: 1100, delay: i * 130, easing: 'ease-out', fill: 'backwards' }).onfinish = () => el.remove();
+    ], { duration: 1100, easing: 'ease-out' }).onfinish = () => el.remove();
   });
 }
 
