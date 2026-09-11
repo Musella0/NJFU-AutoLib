@@ -76,8 +76,26 @@ class PoolTests(unittest.TestCase):
 
     def test_dead_session_is_dropped(self):
         prelogin.store("2021123400", warm_library(alive=False))
-        self.assertIsNone(prelogin.take("2021123400"))
+        with patch.object(prelogin, "VERIFY_FRESH_SECONDS", -1):
+            self.assertIsNone(prelogin.take("2021123400"))
         self.assertEqual(prelogin.pooled_pids(), [])
+
+    def test_recently_verified_session_is_handed_out_without_a_network_call(self):
+        """6:59:30 刚复查过，7:00:00 再问一次服务端纯属多花一个来回；
+        2026-09-11 那次 webvpn 卡了 5 秒，两个账号就是被这一问拖到 11 秒后才开枪。"""
+        library = warm_library()
+        prelogin.store("2021123400", library)
+
+        self.assertIs(prelogin.take("2021123400"), library)
+        library.verify_session.assert_not_called()
+
+    def test_old_session_is_verified_before_use(self):
+        library = warm_library()
+        prelogin.store("2021123400", library)
+
+        with patch.object(prelogin, "VERIFY_FRESH_SECONDS", -1):
+            self.assertIs(prelogin.take("2021123400"), library)
+        library.verify_session.assert_called_once()
 
     def test_verify_blowing_up_falls_back_instead_of_raising(self):
         library = Mock()
@@ -85,7 +103,16 @@ class PoolTests(unittest.TestCase):
         prelogin.store("2021123400", library)
 
         # 这个函数在 7:00:00 的关键路径上，异常必须被吞掉。
-        self.assertIsNone(prelogin.take("2021123400"))
+        with patch.object(prelogin, "VERIFY_FRESH_SECONDS", -1):
+            self.assertIsNone(prelogin.take("2021123400"))
+
+    def test_clear_can_keep_sessions_for_pending_segments(self):
+        prelogin.store("2021123400", warm_library())
+        prelogin.store("2021123401", warm_library())
+
+        prelogin.clear(keep=["2021123401"])
+
+        self.assertEqual(prelogin.pooled_pids(), ["2021123401"])
 
     def test_stale_session_is_discarded_without_network_call(self):
         library = warm_library()
@@ -211,7 +238,8 @@ class ReservationReuseTests(unittest.TestCase):
         dead = self._reservable(alive=False)
         prelogin.store(self.account["pid"], dead)
 
-        self._run().assert_called_once()
+        with patch.object(prelogin, "VERIFY_FRESH_SECONDS", -1):
+            self._run().assert_called_once()
         dead.reserve_seat.assert_not_called()
 
 

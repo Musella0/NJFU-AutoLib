@@ -55,6 +55,25 @@ SESSION_VERIFY_TIMEOUT = (
     float(os.getenv("SESSION_VERIFY_READ_TIMEOUT", "5")),
 )
 
+# 图书馆对同一账号同时只受理一个预约操作，上一发刚回完那零点几秒里再发会被
+# 「您有预约操作正在进行」顶回。这时候不该跳下一张座位（2026-09-11 一个账号就是
+# 这样把三张备选全烧掉的），而是等锁放开再打同一张。
+BUSY_RETRY_DELAY_SECONDS = max(0.0, float(os.getenv("RESERVE_BUSY_RETRY_DELAY_SECONDS", "0.4")))
+BUSY_RETRY_MAX = max(0, int(os.getenv("RESERVE_BUSY_RETRY_MAX", "3")))
+
+# 下单响应里这些迹象说明会话已经被服务端踢掉了（预登录会话放久了会这样），
+# 而不是座位有问题。认出来就现场重登、原座位再打一次。
+AUTH_FAILURE_MARK = "会话失效"
+
+
+def _is_account_busy(message: str) -> bool:
+    """图书馆的账号级锁：「您有预约操作正在进行，请稍后操作」。"""
+    return "预约操作正在进行" in (message or "")
+
+
+def _is_auth_failure(message: str) -> bool:
+    return AUTH_FAILURE_MARK in (message or "")
+
 
 def _is_transient_login_error(message: str) -> bool:
     """判断图书馆登录失败是否适合在短时间内自动重试。"""
@@ -843,13 +862,29 @@ class LibrarySystem(BaseSystem):
             log_with_user('debug', self.username, '预约响应',
                          f"座位 {seat_name}({seat_id}) 响应内容: {response.text}")
 
+            if response.status_code in (401, 403) or (
+                    response.status_code in (301, 302, 303, 307, 308)):
+                error_msg = (f"座位 {seat_name}({seat_id}) 请求失败: {AUTH_FAILURE_MARK}"
+                             f"（HTTP {response.status_code}）")
+                log_with_user('error', self.username, '预约失败', error_msg)
+                return error_msg
             if response.status_code != 200:
                 error_msg = f"座位 {seat_name}({seat_id}) 请求失败: 状态码 {response.status_code}"
                 log_with_user('error', self.username, '预约失败', error_msg)
                 return error_msg
 
             # 处理响应结果
-            result = response.json()
+            try:
+                result = response.json()
+            except ValueError:
+                # 会话没了的时候 webvpn/CAS 会把 POST 重定向到登录页，回来的是 HTML。
+                body = (response.text or "")[:200].lower()
+                if "<html" in body or "login" in body or "cas" in body:
+                    error_msg = f"座位 {seat_name}({seat_id}) 请求失败: {AUTH_FAILURE_MARK}（返回登录页）"
+                else:
+                    error_msg = f"座位 {seat_name}({seat_id}) 请求失败: 响应不是 JSON"
+                log_with_user('error', self.username, '预约失败', error_msg)
+                return error_msg
             target_time = f"{resv_begin_time[:10]} {resv_begin_time[11:]}-{resv_end_time[11:]}"
 
             if result.get('code') == 0:
@@ -891,7 +926,10 @@ class LibrarySystem(BaseSystem):
                 return success_msg
             else:
                 # 预约失败
-                error_msg = f"座位 {seat_name}({seat_id}) 期望预约时间{target_time} 预约失败: {result['message']}"
+                reason = str(result.get('message', '未知错误'))
+                if any(mark in reason for mark in ("未登录", "请先登录", "登录失效", "登录过期", "token")):
+                    reason = f"{AUTH_FAILURE_MARK}（{reason}）"
+                error_msg = f"座位 {seat_name}({seat_id}) 期望预约时间{target_time} 预约失败: {reason}"
                 log_with_user('error', self.username, '预约失败', error_msg)
                 return error_msg
 
@@ -934,16 +972,39 @@ class LibrarySystem(BaseSystem):
 
             # 尝试预约每个座位
             failed_seats = []
+            relogged = False
             for seat_id in seat_list:
                 seat_name = self.get_seat_name_by_id(seat_id)
                 log_with_user('info', self.username, '预约', f"尝试预约座位: {seat_name}({seat_id})")
 
-                res_message = self._reserve_single_seat(
-                    self.user_info,
-                    seat_id,
-                    resv_begin_time,
-                    resv_end_time
-                )
+                busy_retries = 0
+                while True:
+                    res_message = self._reserve_single_seat(
+                        self.user_info,
+                        seat_id,
+                        resv_begin_time,
+                        resv_end_time
+                    )
+                    if _is_account_busy(res_message) and busy_retries < BUSY_RETRY_MAX:
+                        # 账号级锁还没放开，跳下一张只会再被顶一次；等一下打同一张。
+                        busy_retries += 1
+                        log_with_user('warning', self.username, '预约',
+                                      f"座位 {seat_name}({seat_id}) 账号有预约操作进行中，"
+                                      f"{BUSY_RETRY_DELAY_SECONDS:g}s 后重试同一张（第 {busy_retries} 次）")
+                        time.sleep(BUSY_RETRY_DELAY_SECONDS)
+                        continue
+                    if _is_auth_failure(res_message) and not relogged:
+                        # 预登录会话被服务端踢了（7:00 为省一个来回没校验就直接开枪）。
+                        # 现场重登一次，原座位再打；再失败就按普通失败处理。
+                        relogged = True
+                        log_with_user('warning', self.username, '预约',
+                                      f"座位 {seat_name}({seat_id}) 会话已失效，现场重新登录后重试")
+                        self.user_info = None
+                        self._initialize_login()
+                        if not self.user_info:
+                            return "会话失效且重新登录失败，无法进行预约", None
+                        continue
+                    break
 
                 if "预约成功" in res_message:
                     log_with_user('info', self.username, '预约', f"座位 {seat_name}({seat_id}) 预约成功")

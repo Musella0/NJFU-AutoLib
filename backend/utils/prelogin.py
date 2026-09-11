@@ -25,8 +25,14 @@ ENABLED = os.getenv("PRELOGIN_ENABLED", "1").strip().lower() not in ("0", "false
 # 会话最长存活时间。正常流程里 6:50 存、7:00 取，只有 10 分钟；
 # 超过这个岁数说明调度出了意外（比如当天的抢座任务压根没跑），一律丢弃重登。
 MAX_AGE_SECONDS = float(os.getenv("PRELOGIN_MAX_AGE_SECONDS", "1800"))
+# 距上次校验/登录不到这么久的会话，take() 直接给，不再问一次服务端。
+# 6:59:30 的复查刚确认过，7:00:00 再校验一遍纯属多花一个来回；2026-09-11 那次
+# webvpn 恰好卡了 5 秒，两个账号就是被这次多余的校验拖到 11 秒后才开枪。
+# 真失效了也不怕：下单请求会认出「会话失效」并现场重登（见 LibrarySystem.reserve_seat）。
+VERIFY_FRESH_SECONDS = float(os.getenv("PRELOGIN_VERIFY_FRESH_SECONDS", "120"))
 
-_pool: Dict[str, Tuple[Any, float]] = {}
+# pid -> (library, 存入时刻, 最近一次确认有效的时刻)
+_pool: Dict[str, Tuple[Any, float, float]] = {}
 _lock = threading.Lock()
 
 
@@ -35,9 +41,10 @@ def _log(level: str, user: str, operation: str, message: str) -> None:
 
 
 def store(pid: str, library: Any) -> None:
-    """存入一个已完成登录的 LibrarySystem。"""
+    """存入一个已完成登录（或刚刚成功用过）的 LibrarySystem。"""
+    now = time.monotonic()
     with _lock:
-        _pool[pid] = (library, time.monotonic())
+        _pool[pid] = (library, now, now)
 
 
 def discard(pid: str) -> None:
@@ -68,19 +75,19 @@ def pooled_pids() -> List[str]:
         return list(_pool)
 
 
-def _pop_fresh(pid: str) -> Optional[Any]:
-    """取出会话并做岁数检查；过期的直接丢掉。"""
+def _pop_fresh(pid: str) -> Optional[Tuple[Any, float]]:
+    """取出会话并做岁数检查；过期的直接丢掉。返回 (会话, 最近确认有效的时刻)。"""
     with _lock:
         entry = _pool.pop(pid, None)
     if entry is None:
         return None
-    library, stored_at = entry
+    library, stored_at, verified_at = entry
     age = time.monotonic() - stored_at
     if age > MAX_AGE_SECONDS:
         _log('warning', pid, '预登录',
              f"预登录会话已存放 {age:.0f} 秒，超过上限 {MAX_AGE_SECONDS:.0f} 秒，丢弃重登")
         return None
-    return library
+    return library, verified_at
 
 
 def is_alive(pid: str) -> bool:
@@ -90,9 +97,10 @@ def is_alive(pid: str) -> bool:
     给 7:00 前 30 秒的复查任务用：这时候发现会话死了还来得及重登，
     比等到 7:00:00 才发现要从容得多。
     """
-    library = _pop_fresh(pid)
-    if library is None:
+    entry = _pop_fresh(pid)
+    if entry is None:
         return False
+    library, _ = entry
     if not _verify(pid, library):
         return False
     store(pid, library)
@@ -103,15 +111,21 @@ def take(pid: str) -> Optional[Any]:
     """
     取出可用的预登录会话；没有、过期或已失效都返回 None。
 
+    VERIFY_FRESH_SECONDS 内刚确认过有效的会话直接给，不再问服务端；
+    更久没确认的才发一次 userInfo 校验。
+
     这个函数在 7:00:00 的关键路径上，任何异常都必须被吞掉——
     宁可退回现场登录慢 8 秒，也不能让预约直接崩掉。
     """
     if not ENABLED:
         return None
     try:
-        library = _pop_fresh(pid)
-        if library is None:
+        entry = _pop_fresh(pid)
+        if entry is None:
             return None
+        library, verified_at = entry
+        if time.monotonic() - verified_at <= VERIFY_FRESH_SECONDS:
+            return library
         if not _verify(pid, library):
             return None
         return library
