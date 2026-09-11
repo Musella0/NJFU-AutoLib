@@ -6,6 +6,9 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- AlarmManager 的排程不跨重启，开机后要重新设置 -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- App 内更新：下完升级包直接拉起系统安装器，不用把用户丢给浏览器。
+         Android 8+ 还要用户在系统设置里单独放行本应用，见 ApkInstaller。 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- Android 11+ 的包可见性：不声明这些，resolveActivity 一律返回 null，
          「发邮件」和更新下载会误判成「没有可用应用」而白白退化。 -->
@@ -18,6 +21,11 @@
             <action android:name="android.intent.action.VIEW" />
             <data android:scheme="https" />
         </intent>
+        <!-- 没有这条，resolveActivity 找不到系统安装器，内部更新会误判成不可用 -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="application/vnd.android.package-archive" />
+        </intent>
     </queries>
 
     <application
@@ -28,6 +36,17 @@
         android:theme="@style/Theme.AutoLib"
         android:usesCleartextTraffic="false"
         android:networkSecurityConfig="@xml/network_security_config">
+
+        <!-- 升级包放在私有缓存里，靠它把临时读权限授给系统安装器 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
         <activity
             android:name=".MainActivity"

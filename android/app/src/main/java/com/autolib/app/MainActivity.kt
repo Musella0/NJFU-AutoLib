@@ -102,8 +102,9 @@ class MainActivity : AppCompatActivity() {
         binding.accountButton.setOnClickListener { showAccountChooser() }
         setupNotifications()
         loadInitialData()
-        // 每天至多一次，且只在确实有新版本时才弹
-        UpdateChecker.checkSilently(this, api) { showUpdateDialog(it) }
+        // 上次更新下的包留在缓存里就没用了。放在这里清是安全的：走到 onCreate
+        // 说明进程是新起的，系统安装器那一趟早已结束，不会把正在装的文件抽掉。
+        ApkInstaller.clearCache(this)
     }
 
     /**
@@ -128,6 +129,10 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         checkSchoolAnnouncements()
+        // 放在 onResume 而不是 onCreate：App 常驻后台，从最近任务切回来走的是这里，
+        // 只挂在 onCreate 上的话，进程不被杀就可能好几天轮不到一次检查。
+        // 每天至多一次由 UpdateChecker 自己拦，切回前台不会次次打网络。
+        UpdateChecker.checkSilently(this, api) { showUpdateDialog(it) }
     }
 
     private fun checkSchoolAnnouncements() {
@@ -1700,7 +1705,7 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle("检查到更新")
             .setView(scrolled(body))
-            .setPositiveButton("立即更新") { _, _ -> openDownload(release.downloadUrl) }
+            .setPositiveButton("立即更新") { _, _ -> startInAppUpdate(release) }
             .setNegativeButton("跳过此版本") { _, _ ->
                 UpdateChecker.skip(this, release.versionCode)
                 toast("已跳过 ${release.versionName}，有更新版本时会再提醒")
@@ -1710,6 +1715,74 @@ class MainActivity : AppCompatActivity() {
                 toast("已关闭自动检查，可在设置页手动检查")
                 if (currentPage == PAGE_SETTINGS) renderCurrentPage()
             }
+            .show()
+    }
+
+    /**
+     * App 内更新：下到私有缓存再拉起系统安装器，不把用户丢给浏览器。
+     * 任何一步走不通都退回浏览器——加了内部通道，不代表要把原来那条路堵死。
+     */
+    private fun startInAppUpdate(release: UpdateChecker.Release) {
+        if (!ApkInstaller.canInstall(this)) {
+            askInstallPermission(release)
+            return
+        }
+        val progress = text("正在下载 ${release.versionName}…", 15, true)
+        val hint = text("下好后会自动弹出安装界面", 12)
+            .apply { setTextColor(color(R.color.text_muted)) }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("下载更新")
+            .setView(vertical().apply { addView(progress); addView(hint) })
+            .setNegativeButton("改用浏览器") { _, _ -> openDownload(release.downloadUrl) }
+            .setCancelable(false)
+            .create()
+        dialog.show()
+
+        ApkInstaller.download(
+            context = this,
+            url = release.downloadUrl,
+            expectedCode = release.versionCode,
+            onProgress = { p ->
+                progress.text = if (p.known) {
+                    "正在下载 ${release.versionName}…  ${p.percent}%"
+                } else {
+                    // 服务端没给 Content-Length 时百分比是假的，只报已下多少
+                    "正在下载 ${release.versionName}…  ${p.downloaded / 1024 / 1024} MB"
+                }
+            },
+            onDone = { file, error ->
+                if (isFinishing || isDestroyed) return@download
+                dialog.dismiss()
+                when {
+                    file == null -> updateFallback(release, error ?: "下载失败")
+                    !ApkInstaller.install(this, file) -> updateFallback(release, "无法启动安装界面")
+                    else -> Unit   // 系统安装器已经接手
+                }
+            },
+        )
+    }
+
+    /** 下载或安装没走通时，说清原因并把浏览器那条路留着。 */
+    private fun updateFallback(release: UpdateChecker.Release, reason: String) {
+        AlertDialog.Builder(this)
+            .setTitle("更新没能完成")
+            .setMessage("$reason。\n\n可以改用浏览器下载，下完在通知栏点开安装。")
+            .setNegativeButton("取消", null)
+            .setPositiveButton("用浏览器下载") { _, _ -> openDownload(release.downloadUrl) }
+            .show()
+    }
+
+    /**
+     * Android 8 起「安装未知应用」按应用单独授权，这个开关只能由用户在系统设置里开，
+     * 没法用运行时权限弹窗代劳，所以先说清楚再送他过去。
+     */
+    private fun askInstallPermission(release: UpdateChecker.Release) {
+        AlertDialog.Builder(this)
+            .setTitle("需要允许安装应用")
+            .setMessage("系统要求你先允许 AutoLib 安装应用，才能在 App 内完成更新。\n\n" +
+                "点「去设置」后打开「允许来自此来源的应用」，再回来点一次「立即更新」即可。")
+            .setNegativeButton("用浏览器下载") { _, _ -> openDownload(release.downloadUrl) }
+            .setPositiveButton("去设置") { _, _ -> ApkInstaller.openInstallPermissionSettings(this) }
             .show()
     }
 

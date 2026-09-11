@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    只暴露缓存目录下的 updates/ 一个子目录，装的是刚下好的升级包。
+    不用 external-path：APK 放在应用私有缓存里，别的应用读不到，
+    系统安装器靠 FLAG_GRANT_READ_URI_PERMISSION 临时授权来读。
+-->
+<paths>
+    <cache-path name="updates" path="updates/" />
+</paths>
