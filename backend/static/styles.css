@@ -704,7 +704,7 @@ body.cozy .box.pad{padding:22px 24px}
 .seatmap-legend i.picked{background:var(--ok);border-color:var(--ok)}
 .seatmap-legend i.here{background:var(--accent);border-color:var(--accent)}
 
-/* ========= 公告栏小互动（临时功能，用完即弃：连同 main.py / app.js 里同名的一段一起删） ========= */
+/* ========= 公告栏小互动（表情按钮 + 应援按钮，配置在后台公告里） ========= */
 .reaction-bar{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
 .rx{
   display:inline-flex;align-items:center;gap:6px;
@@ -719,6 +719,9 @@ body.cozy .box.pad{padding:22px 24px}
 .rx:active{transform:translate(1px,1px);box-shadow:1px 1px 0 var(--line)}
 body.no-wobble .rx{border-radius:10px !important}
 .rx-emoji{font-size:17px}
+/* 应援按钮：文字代替表情，稍微醒目一点 */
+.rx-cheer{border-color:var(--accent)}
+.rx-label{font-size:13px;font-weight:700;color:var(--accent);letter-spacing:.5px}
 .rx-n{font-family:var(--mono);font-size:12px;color:var(--ink3);min-width:1.4em;text-align:left}
 /* 飞行层：盖住页面但不吃点击，overflow 挡住飞出界的那一下带出滚动条 */
 .throw-layer{position:fixed;inset:0;z-index:150;pointer-events:none;overflow:hidden}

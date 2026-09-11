@@ -1503,7 +1503,7 @@ function renderNotices(anns, results){
         <div class="t md" style="margin-top:4px">${mdHtml(a.content)}</div>
         ${a.source_url ? `<div class="tiny" style="margin-top:6px"><a href="${escHtml(a.source_url)}" target="_blank" rel="noopener noreferrer">查看学校原公告</a></div>` : ''}
         <div class="tiny" style="margin-top:6px">${escHtml(a.updated_at || a.created_at || '')}</div>
-        ${i === 0 ? reactionBarHtml() : ''}
+        ${reactionBarHtml(a)}
       </div>`);
   });
 
@@ -1556,66 +1556,120 @@ function dismissSchoolNotice(){
   closeSheet();
 }
 
-// ---------- 公告栏小互动（临时功能，用完即弃） ----------
-// 置顶公告下面三个按钮，点了会有个 emoji 飞向屏幕。前端只显示三个总数，
-// 谁点的、点了几次记在后端（/api/reactions）。下线时删掉本段 +
-// renderNotices 里那行 reactionBarHtml()，再删 main.py / styles.css 里同名的一段。
-const REACTIONS = [
-  { kind:'poop', emoji:'💩', title:'扔一坨' },
-  // 想换表情改这一处就行，后端只认 kind
-  { kind:'whip', emoji:'👊', title:'来一拳' },
-  { kind:'rose', emoji:'🌹', title:'送朵花' },
-];
-const rxTotals = { poop:0, whip:0, rose:0 };
-const rxPending = { poop:0, whip:0, rose:0 };  // 还没发给后端的连点
+// ---------- 公告栏小互动 ----------
+// 每条公告可以在后台配一排表情按钮和一个应援按钮。表情按钮点了 emoji 会飞向屏幕；
+// 应援按钮点了会飘出几个 emoji 淡入淡出。谁点的、点了几次记在后端（/api/reactions），
+// 前端只显示总数。计数按「公告 + 表情」分开。
+const RX_CHEER = 'cheer';
+const rxTotals = {};    // key = annId + '|' + kind
+const rxPending = {};   // 还没发给后端的连点
 let rxFlushTimer = null;
 const RX_MOTION = !(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
-function reactionBarHtml(){
-  return `<div class="reaction-bar">${REACTIONS.map(r => `
-    <button type="button" class="rx" title="${r.title}" aria-label="${r.title}" onclick="throwReaction(this,'${r.kind}')">
-      <span class="rx-emoji">${r.emoji}</span><span class="rx-n" id="rx-n-${r.kind}">${rxTotals[r.kind]}</span>
-    </button>`).join('')}</div>`;
+function rxKey(annId, kind){ return annId + '|' + kind; }
+// 表情和按钮文字是后台填的，进属性前把引号也转掉
+function escAttr(v){ return escHtml(v).replace(/"/g, '&quot;'); }
+
+function reactionBarHtml(a){
+  const emojis = Array.isArray(a.reactions) ? a.reactions : [];
+  const cheer = a.cheer && a.cheer.label && a.cheer.emojis ? a.cheer : null;
+  if(!emojis.length && !cheer) return '';
+  const btn = (kind, inner, title, extra) => `
+    <button type="button" class="rx${extra ? ' rx-cheer' : ''}" title="${escAttr(title)}" aria-label="${escAttr(title)}"
+      data-ann="${escAttr(a.id)}" data-kind="${escAttr(kind)}" ${extra || ''} onclick="throwReaction(this)">
+      ${inner}<span class="rx-n" data-rx="${escAttr(rxKey(a.id, kind))}">${rxTotals[rxKey(a.id, kind)] || 0}</span>
+    </button>`;
+  const parts = emojis.map(e => btn(e, `<span class="rx-emoji">${escHtml(e)}</span>`, e));
+  if(cheer){
+    parts.push(btn(RX_CHEER, `<span class="rx-label">${escHtml(cheer.label)}</span>`, cheer.label,
+      `data-emojis="${escAttr(cheer.emojis)}"`));
+  }
+  return `<div class="reaction-bar">${parts.join('')}</div>`;
 }
 
 function paintReactionCounts(){
-  REACTIONS.forEach(r => {
-    const el = $('rx-n-' + r.kind);
-    if(el) el.textContent = rxTotals[r.kind];
+  document.querySelectorAll('.rx-n[data-rx]').forEach(el => {
+    el.textContent = rxTotals[el.dataset.rx] || 0;
   });
 }
 
 async function loadReactions(){
   const { ok, data } = await api('/api/reactions');
   if(!ok || !data.totals) return;   // 演示模式没有这个接口，静默跳过
-  Object.assign(rxTotals, data.totals);
+  mergeReactionTotals(data.totals);
   paintReactionCounts();
 }
 
-function throwReaction(btn, kind){
-  const item = REACTIONS.find(r => r.kind === kind);
-  if(!item) return;
+// 后端是准的（别人也在点），但本地还没发出去的那几下要补回来
+function mergeReactionTotals(totals){
+  Object.keys(totals || {}).forEach(annId => {
+    Object.keys(totals[annId] || {}).forEach(kind => {
+      const key = rxKey(annId, kind);
+      rxTotals[key] = (totals[annId][kind] || 0) + (rxPending[key] || 0);
+    });
+  });
+}
+
+function throwReaction(btn){
+  const annId = btn.dataset.ann, kind = btn.dataset.kind;
+  if(!annId || !kind) return;
+  const key = rxKey(annId, kind);
   // 先加本地数字再发请求：连点时数字得跟着手指走，等往返就卡住了
-  rxTotals[kind] += 1;
-  rxPending[kind] += 1;
+  rxTotals[key] = (rxTotals[key] || 0) + 1;
+  rxPending[key] = (rxPending[key] || 0) + 1;
   paintReactionCounts();
-  flyEmoji(btn, item.emoji);
+  if(kind === RX_CHEER) cheerEmojis(btn, btn.dataset.emojis || '');
+  else flyEmoji(btn, kind);
   clearTimeout(rxFlushTimer);
   rxFlushTimer = setTimeout(flushReactions, 700);
 }
 
 async function flushReactions(){
-  for(const r of REACTIONS){
-    const n = rxPending[r.kind];
+  for(const key of Object.keys(rxPending)){
+    const n = rxPending[key];
     if(!n) continue;
-    rxPending[r.kind] = 0;
-    const { ok, data } = await api('/api/reactions', { method:'POST', body:{ kind:r.kind, n } });
+    rxPending[key] = 0;
+    const [annId, kind] = key.split('|');
+    const { ok, data } = await api('/api/reactions', { method:'POST', body:{ ann_id: annId, kind, n } });
     if(ok && data.totals){
-      // 后端是准的（别人也在点），但本地还没发出去的那几下要补回来
-      REACTIONS.forEach(x => { rxTotals[x.kind] = (data.totals[x.kind] || 0) + rxPending[x.kind]; });
+      mergeReactionTotals(data.totals);
       paintReactionCounts();
     }
   }
+}
+
+// 把一串 emoji 按字素拆开（🔥 一个码点，👨‍👩‍👧 一串码点，都算一个）
+function splitEmojis(text){
+  try{
+    if(typeof Intl !== 'undefined' && Intl.Segmenter){
+      return Array.from(new Intl.Segmenter(undefined, { granularity:'grapheme' }).segment(text), s => s.segment);
+    }
+  }catch(e){}
+  return Array.from(text);
+}
+
+// 应援：几个 emoji 从按钮上方依次冒出来，边升边放大，淡入再淡出
+function cheerEmojis(btn, emojis){
+  const layer = $('throw-layer');
+  const parts = splitEmojis(emojis).filter(e => e.trim());
+  if(!layer || !RX_MOTION || !parts.length) return;
+  const box = btn.getBoundingClientRect();
+  const x0 = box.left + box.width / 2;
+  const y0 = box.top;
+  parts.forEach((emoji, i) => {
+    const dx = (i - (parts.length - 1) / 2) * 44 + (Math.random() - .5) * 12;
+    const rise = 70 + Math.random() * 30;
+    const at = (y, s) => `translate(${x0 + dx}px,${y}px) translate(-50%,-50%) scale(${s})`;
+    const el = document.createElement('div');
+    el.className = 'thrown';
+    el.textContent = emoji;
+    layer.appendChild(el);
+    el.animate([
+      { transform: at(y0, .5), opacity: 0 },
+      { transform: at(y0 - rise * .45, 1.25), opacity: 1, offset: .35 },
+      { transform: at(y0 - rise, 1.5), opacity: 0 },
+    ], { duration: 1100, delay: i * 130, easing: 'ease-out', fill: 'backwards' }).onfinish = () => el.remove();
+  });
 }
 
 // 从按钮飞向屏幕中间偏上：一路放大 + 乱转，落点砸一下再化开

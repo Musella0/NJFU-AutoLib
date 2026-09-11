@@ -1312,6 +1312,40 @@ def update_user(pid):
 
 _ANN_LEVELS = {"info", "success", "warning", "danger"}
 
+# 一条公告最多挂几个表情按钮；单个表情最长几个字符（复合 emoji 会占好几个码点）
+_ANN_REACTIONS_MAX = 8
+_ANN_EMOJI_MAX_CHARS = 8
+_ANN_CHEER_LABEL_MAX = 12
+_ANN_CHEER_EMOJIS_MAX = 24
+
+
+def _clean_reactions(raw):
+    """公告上的表情按钮列表：去空、去重、限长，不合法的整体当没有。"""
+    if not isinstance(raw, list):
+        return []
+    seen = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        emoji = item.strip()
+        if not emoji or len(emoji) > _ANN_EMOJI_MAX_CHARS or emoji in seen:
+            continue
+        seen.append(emoji)
+        if len(seen) >= _ANN_REACTIONS_MAX:
+            break
+    return seen
+
+
+def _clean_cheer(raw):
+    """应援按钮：{label: 按钮文字, emojis: 点击后飘出来的表情}，缺一样就当没有。"""
+    if not isinstance(raw, dict):
+        return None
+    label = str(raw.get("label") or "").strip()[:_ANN_CHEER_LABEL_MAX]
+    emojis = str(raw.get("emojis") or "").replace(" ", "").strip()[:_ANN_CHEER_EMOJIS_MAX]
+    if not label or not emojis:
+        return None
+    return {"label": label, "emojis": emojis}
+
 
 def _serialize_announcement(doc):
     return {
@@ -1325,6 +1359,9 @@ def _serialize_announcement(doc):
         "source_url": doc.get("source_url", ""),
         "popup_required": bool(doc.get("popup_required", False)),
         "revision": int(doc.get("revision", 1) or 1),
+        # 公告栏小互动：这条公告下面挂哪些表情按钮、有没有应援按钮（见 reactions 一节）
+        "reactions": _clean_reactions(doc.get("reactions")),
+        "cheer": _clean_cheer(doc.get("cheer")),
         "display_from": doc["display_from"].strftime("%Y-%m-%d %H:%M:%S")
             if isinstance(doc.get("display_from"), datetime) else doc.get("display_from", ""),
         "display_until": doc["display_until"].strftime("%Y-%m-%d %H:%M:%S")
@@ -1659,31 +1696,47 @@ def list_announcements():
     return jsonify([_serialize_announcement(d) for d in docs]), 200
 
 
-# ==================== 公告栏小互动（临时功能，用完即弃） ====================
-# 公告置顶卡片下面三个按钮：💩 / 👊 / 🌹。前端只看得到三个总数，
-# 这里额外按 uid 记一行，后台才知道「有多少个学号在玩、各扔了多少」。
-# 下线时删掉本段 + app.js / styles.css 里同名的一段，再 drop 掉
-# reactions、reaction_users 两个集合即可，不牵扯其他数据。
+# ==================== 公告栏小互动 ====================
+# 每条公告可以在后台配一排表情按钮（💩 / 👊 / 🌹 之类）和一个应援按钮（「会赢的」），
+# 计数按「公告 + 表情」分开记：reactions 一行一个 (ann_id, kind) 的总数，
+# reaction_users 额外按 uid 记一行，后台才知道「有多少个学号在玩、各扔了多少」。
+# 应援按钮的 kind 固定叫 "cheer"，其余 kind 就是表情本身。
 
-REACTION_KINDS = ("poop", "whip", "rose")
+REACTION_CHEER_KIND = "cheer"
 # 连点会在前端攒着一起发，一次最多认 20 下，多的丢掉——防的是改包刷榜，不是手速
 REACTION_MAX_PER_POST = 20
 
 
-def _reaction_totals(db):
-    totals = {kind: 0 for kind in REACTION_KINDS}
-    for doc in db.reactions.find({"_id": {"$in": list(REACTION_KINDS)}}):
-        totals[doc["_id"]] = int(doc.get("count", 0) or 0)
+def _reaction_kinds(ann):
+    """这条公告允许的 kind：配置里的每个表情 + 有应援按钮时的 cheer。"""
+    kinds = list(_clean_reactions(ann.get("reactions")))
+    if _clean_cheer(ann.get("cheer")):
+        kinds.append(REACTION_CHEER_KIND)
+    return kinds
+
+
+def _reaction_totals(db, ann_ids):
+    """{ann_id: {kind: count}}，只含查询到的公告；没人点过的表情不出现，前端按 0 显示。"""
+    totals = {ann_id: {} for ann_id in ann_ids}
+    for doc in db.reactions.find({"ann_id": {"$in": list(ann_ids)}}):
+        totals.setdefault(doc["ann_id"], {})[doc.get("kind", "")] = int(doc.get("count", 0) or 0)
     return totals
+
+
+def _visible_announcement_ids(db):
+    return [
+        str(doc["_id"]) for doc in db.announcements.find({"active": True}, {"display_from": 1, "display_until": 1})
+        if _announcement_visible(doc)
+    ]
 
 
 @app.route("/api/reactions", methods=["GET"])
 @limiter.limit("60/minute")
 def list_reactions():
-    """公开总数：只有三个数字，不含任何学号。"""
+    """公开总数：每条可见公告下每个表情的数字，不含任何学号。"""
     client, db = get_db()
     try:
-        return jsonify({"totals": _reaction_totals(db)}), 200
+        return jsonify({"totals": _reaction_totals(db, _visible_announcement_ids(db))}), 200
     finally:
         client.close()
 
@@ -1693,9 +1746,12 @@ def list_reactions():
 def add_reaction():
     """收的是增量 n 而不是固定 +1：连点在前端攒 700ms 才发一包，省往返。"""
     body = request.get_json(silent=True) or {}
-    kind = (body.get("kind") or "").strip()
-    if kind not in REACTION_KINDS:
-        return jsonify({"error": "无效的类型"}), 400
+    ann_id = str(body.get("ann_id") or "").strip()
+    kind = str(body.get("kind") or "").strip()
+    try:
+        oid = ObjectId(ann_id)
+    except (InvalidId, TypeError):
+        return jsonify({"error": "无效的公告"}), 400
     try:
         n = int(body.get("n", 1))
     except (TypeError, ValueError):
@@ -1706,16 +1762,23 @@ def add_reaction():
     now = datetime.now()
     client, db = get_db()
     try:
+        ann = db.announcements.find_one({"_id": oid, "active": True})
+        if not ann or not _announcement_visible(ann) or kind not in _reaction_kinds(ann):
+            return jsonify({"error": "无效的类型"}), 400
         db.reactions.update_one(
-            {"_id": kind},
-            {"$inc": {"count": n}, "$set": {"updated_at": now}},
+            {"_id": f"{ann_id}:{kind}"},
+            {
+                "$inc": {"count": n},
+                "$set": {"ann_id": ann_id, "kind": kind, "updated_at": now},
+            },
             upsert=True,
         )
         db.reaction_users.update_one(
-            {"_id": f"{kind}:{uid}"},
+            {"_id": f"{ann_id}:{kind}:{uid}"},
             {
                 "$inc": {"count": n},
                 "$set": {
+                    "ann_id": ann_id,
                     "kind": kind,
                     "uid": uid,
                     # 没验证学号的访客也能点，但统计时要和真学号分开数
@@ -1726,7 +1789,7 @@ def add_reaction():
             },
             upsert=True,
         )
-        totals = _reaction_totals(db)
+        totals = _reaction_totals(db, [ann_id])
     finally:
         client.close()
     return jsonify({"totals": totals}), 200
@@ -1735,21 +1798,21 @@ def add_reaction():
 @app.route("/api/admin/reactions", methods=["GET"])
 @admin_required
 def admin_list_reactions():
-    """后台看板：每种表情的总数 + 参与人数（学号和游客分开数）。"""
+    """后台看板：每条公告下每种表情的总数 + 参与人数（学号和游客分开数）。"""
     client, db = get_db()
     try:
-        totals = _reaction_totals(db)
-        by_kind = {
-            kind: {
-                "count": totals[kind],
-                "students": len(db.reaction_users.distinct("uid", {"kind": kind, "is_student": True})),
-                "guests": len(db.reaction_users.distinct("uid", {"kind": kind, "is_student": False})),
+        by_announcement = {}
+        for doc in db.reactions.find({}):
+            ann_id, kind = doc.get("ann_id", ""), doc.get("kind", "")
+            by_announcement.setdefault(ann_id, {})[kind] = {
+                "count": int(doc.get("count", 0) or 0),
+                "students": len(db.reaction_users.distinct(
+                    "uid", {"ann_id": ann_id, "kind": kind, "is_student": True})),
+                "guests": len(db.reaction_users.distinct(
+                    "uid", {"ann_id": ann_id, "kind": kind, "is_student": False})),
             }
-            for kind in REACTION_KINDS
-        }
         payload = {
-            "totals": totals,
-            "by_kind": by_kind,
+            "by_announcement": by_announcement,
             "active_students": len(db.reaction_users.distinct("uid", {"is_student": True})),
             "active_guests": len(db.reaction_users.distinct("uid", {"is_student": False})),
         }
@@ -1877,6 +1940,8 @@ def admin_create_announcement():
         "level": level,
         "pinned": bool(data.get("pinned", False)),
         "active": bool(data.get("active", True)),
+        "reactions": _clean_reactions(data.get("reactions")),
+        "cheer": _clean_cheer(data.get("cheer")),
         "created_at": now,
         "updated_at": now,
     }
@@ -1911,6 +1976,10 @@ def admin_update_announcement(ann_id):
         update["pinned"] = bool(data.get("pinned"))
     if "active" in data:
         update["active"] = bool(data.get("active"))
+    if "reactions" in data:
+        update["reactions"] = _clean_reactions(data.get("reactions"))
+    if "cheer" in data:
+        update["cheer"] = _clean_cheer(data.get("cheer"))
     if not update:
         return jsonify({"error": "没有要更新的字段"}), 400
     update["updated_at"] = datetime.now()

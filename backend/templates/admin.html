@@ -354,6 +354,14 @@
           <label><input type="checkbox" id="ann-f-active" checked> 启用</label>
         </div>
       </div>
+      <div class="modal-field"><label>表情按钮</label><input type="text" id="ann-f-reactions" placeholder="空格分隔，如：💩 👊 🌹；留空则不显示"></div>
+      <div class="modal-field">
+        <label>应援按钮</label>
+        <div class="checkbox-row" style="gap:8px">
+          <input type="text" id="ann-f-cheer-label" placeholder="按钮文字，如：会赢的" style="flex:1">
+          <input type="text" id="ann-f-cheer-emojis" placeholder="点击飘出的表情，如：👊📖🔥" style="flex:1">
+        </div>
+      </div>
     </div>
     <div class="modal-footer"><button class="btn btn-ghost" onclick="closeM('m-ann')">取消</button><button class="btn btn-green" onclick="saveAnn()">保存</button></div>
   </div>
@@ -849,7 +857,7 @@ function renderAnnouncements(){
       <div class="ann-main">
         <div class="ann-head"><span class="ann-badge ${lvl}">${lvl}</span>${pinned}${off}<span class="ann-title">${esc(a.title)}</span></div>
         <div class="ann-content md">${renderMarkdown(a.content)}</div>
-        <div class="ann-meta">创建 ${a.created_at||'-'}${a.updated_at&&a.updated_at!==a.created_at?`　·　更新 ${a.updated_at}`:''}</div>
+        <div class="ann-meta">创建 ${a.created_at||'-'}${a.updated_at&&a.updated_at!==a.created_at?`　·　更新 ${a.updated_at}`:''}${annInteractionMeta(a)}</div>
       </div>
       <div class="ann-actions">
         <button class="btn btn-blue btn-sm" onclick="openAnnForm('${a.id}')">编辑</button>
@@ -857,6 +865,12 @@ function renderAnnouncements(){
       </div>
     </div>`;
   }).join('');
+}
+function annInteractionMeta(a){
+  const parts=[];
+  if(Array.isArray(a.reactions)&&a.reactions.length)parts.push('表情 '+a.reactions.map(esc).join(' '));
+  if(a.cheer&&a.cheer.label)parts.push(`应援「${esc(a.cheer.label)}」${esc(a.cheer.emojis||'')}`);
+  return parts.length?'　·　'+parts.join('　·　'):'';
 }
 function openAnnForm(id){
   editAnnId=id||null;
@@ -869,12 +883,18 @@ function openAnnForm(id){
     document.getElementById('ann-f-level').value=a.level||'info';
     document.getElementById('ann-f-pinned').checked=!!a.pinned;
     document.getElementById('ann-f-active').checked=a.active!==false;
+    document.getElementById('ann-f-reactions').value=(a.reactions||[]).join(' ');
+    document.getElementById('ann-f-cheer-label').value=(a.cheer&&a.cheer.label)||'';
+    document.getElementById('ann-f-cheer-emojis').value=(a.cheer&&a.cheer.emojis)||'';
   }else{
     document.getElementById('ann-f-title').value='';
     document.getElementById('ann-f-content').value='';
     document.getElementById('ann-f-level').value='info';
     document.getElementById('ann-f-pinned').checked=false;
     document.getElementById('ann-f-active').checked=true;
+    document.getElementById('ann-f-reactions').value='';
+    document.getElementById('ann-f-cheer-label').value='';
+    document.getElementById('ann-f-cheer-emojis').value='';
   }
   openM('m-ann');
 }
@@ -885,7 +905,12 @@ async function saveAnn(){
     level:document.getElementById('ann-f-level').value,
     pinned:document.getElementById('ann-f-pinned').checked,
     active:document.getElementById('ann-f-active').checked,
+    reactions:document.getElementById('ann-f-reactions').value.split(/\s+/).filter(Boolean),
   };
+  const cheerLabel=document.getElementById('ann-f-cheer-label').value.trim();
+  const cheerEmojis=document.getElementById('ann-f-cheer-emojis').value.replace(/\s+/g,'');
+  if((cheerLabel&&!cheerEmojis)||(!cheerLabel&&cheerEmojis))return toast('应援按钮要同时填文字和表情','error');
+  body.cheer=cheerLabel?{label:cheerLabel,emojis:cheerEmojis}:null;
   if(!body.title||!body.content)return toast('请填写标题和内容','error');
   try{
     const url=editAnnId?`/api/admin/announcements/${editAnnId}`:'/api/admin/announcements';
