@@ -15,7 +15,7 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -46,13 +46,20 @@ def discard(pid: str) -> None:
         _pool.pop(pid, None)
 
 
-def clear() -> None:
-    """清空整个池子。抢座跑完必须调用，避免过期会话漏进后面的任务。"""
+def clear(keep: Optional[Iterable[str]] = None) -> None:
+    """
+    清空池子。抢座跑完必须调用，避免过期会话漏进后面的任务。
+
+    keep 里的账号留下——那是还有段在排队补约的人，会话留给补约 job 复用。
+    """
+    kept = set(keep or ())
     with _lock:
-        count = len(_pool)
-        _pool.clear()
-    if count:
-        _log('info', '系统', '预登录', f"已清空预登录会话池（{count} 个）")
+        dropped = [pid for pid in _pool if pid not in kept]
+        for pid in dropped:
+            _pool.pop(pid, None)
+    if dropped:
+        _log('info', '系统', '预登录',
+             f"已清空预登录会话池（{len(dropped)} 个" + (f"，留下 {len(kept)} 个给补约）" if kept else "）"))
 
 
 def pooled_pids() -> List[str]:

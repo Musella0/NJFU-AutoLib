@@ -3,6 +3,7 @@ import sys
 import tempfile
 import types
 import unittest
+from datetime import datetime
 from unittest.mock import Mock, patch
 
 # 预登录本身不碰数据库、VPN 和真实网络，这里把这几层换成桩件。
@@ -296,17 +297,52 @@ class ProcessPreloginTests(unittest.TestCase):
 
         # 留在池子里的过期会话会被后面的午休/到馆复查任务误用，必须清干净。
         with patch.object(scheduled_task, "get_all_active_reservations", return_value=accounts), \
-             patch.object(scheduled_task, "reservation"):
+             patch.object(scheduled_task, "_plan_reservation_safely", return_value=None):
             scheduled_task.process_reservations()
 
         self.assertEqual(prelogin.pooled_pids(), [])
+
+    def test_sessions_of_accounts_with_queued_segments_are_kept_for_rebooking(self):
+        """还有段在排队补约的账号，会话留下来给 07:02 的补约 job 用，省一次完整登录。"""
+        accounts = self._accounts(2)
+        library = Mock()
+        library.get_reservation_info.return_value = ([], "无预约记录")
+
+        def plan_for(item, now=None):
+            plan = scheduled_task._UserPlan(item, [("b", "e")], ["100455814"], "pwd")
+            plan.library = library
+            plan.items.append(scheduled_task._WorkItem(
+                plan, 1, "2026-09-08 14:30:00", "2026-09-08 22:00:00",
+                datetime(2026, 9, 7, 7, 32), False, None,
+            ))
+            plan.remaining = 1
+            return plan
+
+        with patch.object(scheduled_task, "get_all_active_reservations", return_value=accounts), \
+             patch.object(scheduled_task, "_plan_reservation_safely", side_effect=plan_for), \
+             patch.object(scheduled_task, "queue_pending_segment"), \
+             patch.object(scheduled_task, "update_user_config"), \
+             patch.object(scheduled_task, "notify_user"):
+            scheduled_task.process_reservations()
+
+        self.assertEqual(sorted(prelogin.pooled_pids()), sorted(a["pid"] for a in accounts))
 
     def test_pool_is_emptied_even_when_reservation_blows_up(self):
         accounts = self._accounts(1)
         prelogin.store(accounts[0]["pid"], warm_library())
 
+        def plan_for(item, now=None):
+            plan = scheduled_task._UserPlan(item, [("b", "e")], ["100455814"], "pwd")
+            plan.items.append(scheduled_task._WorkItem(
+                plan, 1, "2026-09-08 09:00:00", "2026-09-08 12:00:00",
+                datetime(2026, 9, 7, 7, 0), True, None,
+            ))
+            plan.remaining = 1
+            return plan
+
         with patch.object(scheduled_task, "get_all_active_reservations", return_value=accounts), \
-             patch.object(scheduled_task, "reservation", side_effect=RuntimeError("炸了")):
+             patch.object(scheduled_task, "_plan_reservation_safely", side_effect=plan_for), \
+             patch.object(scheduled_task, "_run_item", side_effect=RuntimeError("炸了")):
             scheduled_task.process_reservations()
 
         self.assertEqual(prelogin.pooled_pids(), [])

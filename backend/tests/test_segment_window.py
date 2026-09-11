@@ -142,6 +142,8 @@ class ReservationSegmentSplitTests(unittest.TestCase):
     HOLD_ENABLED = False
 
     def setUp(self):
+        scheduled_task.prelogin.clear()
+        self.addCleanup(scheduled_task.prelogin.clear)
         self.now = datetime(2026, 9, 7, 7, 0)
         self.due = ("2026-09-08 09:00:00", "2026-09-08 12:00:00")
         self.queued = ("2026-09-08 14:30:00", "2026-09-08 22:00:00")
@@ -196,6 +198,8 @@ class SegmentHoldTests(unittest.TestCase):
     """开着占位开关：超窗的段先下一张更早开始的单子，把座位先占住。"""
 
     def setUp(self):
+        scheduled_task.prelogin.clear()
+        self.addCleanup(scheduled_task.prelogin.clear)
         self.now = datetime(2026, 9, 7, 7, 0)
         self.due = ("2026-09-08 09:00:00", "2026-09-08 12:00:00")
         self.queued = ("2026-09-08 14:30:00", "2026-09-08 22:00:00")

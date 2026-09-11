@@ -35,7 +35,8 @@
 import os
 import time
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Tuple, Optional
 
@@ -860,174 +861,332 @@ def process_due_segments(now: Optional[datetime] = None) -> None:
                                      f"❌ {seg_label}: 补约异常 {exc}", now)
 
 
+class _WorkItem:
+    """预约队列里的一格：某个账号的某一段。开枪前算好，开枪时只管发。"""
+
+    def __init__(
+        self,
+        plan: "_UserPlan",
+        idx: int,
+        begin: str,
+        end: str,
+        open_at: datetime,
+        due: bool,
+        hold_window: Optional[Tuple[str, str]],
+    ):
+        self.plan = plan
+        self.idx = idx
+        self.begin = begin
+        self.end = end
+        self.open_at = open_at
+        # True：现在就在 31 小时窗口内，直接抢；False：超窗，占位/排队。
+        self.due = due
+        # 超窗段的占位时间窗；None 表示占不了（后天的段、闭馆等），只排队。
+        self.hold_window = hold_window
+
+    @property
+    def seg_label(self) -> str:
+        return f"第{self.idx}段 {self.begin[-8:-3]}-{self.end[-8:-3]}"
+
+    @property
+    def needs_library(self) -> bool:
+        return self.due or self.hold_window is not None
+
+
+class _UserPlan:
+    """
+    一个账号 7:00 要做的全部事，在开枪前算好。
+
+    同一个账号的所有段共用一条登录会话，并且**绝不并行**：图书馆对同一账号同时只受理
+    一个预约操作，第二个会被「您有预约操作正在进行」直接顶掉。
+    """
+
+    def __init__(self, cfg: Dict[str, Any], segments: List[Tuple[str, str]],
+                 seat_ids: List[str], vpn_password: str):
+        self.cfg = cfg
+        self.pid = str(cfg["pid"])
+        self.segments = segments
+        self.seat_ids = seat_ids
+        self.vpn_password = vpn_password
+        self.items: List[_WorkItem] = []
+        self.library: Optional[LibrarySystem] = None
+        # 登录失败一次就记下来，这个账号后面的段不用再各自登一遍。
+        self.login_error: Optional[str] = None
+        self.results: Dict[int, str] = {}
+        self.any_success = False
+        self.any_failure = False
+        self.placed_hold = False
+        self.remaining = 0
+
+    @property
+    def queued_items(self) -> List[_WorkItem]:
+        return [item for item in self.items if not item.due]
+
+
+def _plan_reservation(res_item: Dict[str, Any], now: Optional[datetime] = None) -> Optional[_UserPlan]:
+    """
+    开枪前把一个账号的活算清楚：哪几段、每段直接抢还是占位/排队、用哪些座位。
+
+    休息日、闭馆、没配座位这些不用开枪的情况在这里就写好结果，返回 None。
+    这里只查本地库，不碰 webvpn，26 个账号跑完是几十毫秒的事。
+    """
+    pid = str(res_item["pid"])
+    vpn_password = _dec(res_item["vpn_password"])
+    seat_list = res_item["seat_list"]
+
+    segments = calculate_reservation_time(res_item)
+    if not segments:
+        # 用户自己关掉的那天是正常状态，不能走 handle_reservation_error——
+        # 那条会被前端判成「预约失败」标红，休息日天天弹一次红。
+        rest = rest_day_label(res_item)
+        if rest:
+            message = f"{rest}，已跳过预约"
+            log_with_user(logger, 'info', pid, '休息日', message)
+            update_user_config(pid, message)
+            return None
+        log_with_user(logger, 'error', pid, '预约时间', "未找到有效的预约时间段")
+        handle_reservation_error(pid, "未配置有效的预约时间段")
+        return None
+
+    conflict = find_any_reservation_conflict(db.school_notice_reviews, segments)
+    if conflict:
+        message = _blackout_message(conflict)
+        log_with_user(logger, 'info', pid, '闭馆保护', message)
+        update_user_config(pid, message)
+        return None
+
+    log_with_user(logger, 'info', pid, '预约时间',
+                  f"共 {len(segments)} 段: " + "; ".join([f"{b}~{e}" for b, e in segments]))
+
+    seat_ids = get_seat_ids(seat_list)
+    if not seat_ids:
+        log_with_user(logger, 'error', pid, '座位获取', "未找到有效的座位ID")
+        handle_reservation_error(pid, "未找到有效的座位ID")
+        return None
+
+    now = now or datetime.now()
+    plan = _UserPlan(res_item, segments, seat_ids, vpn_password)
+    for idx, (begin, end) in enumerate(segments, 1):
+        open_at = safe_bookable_at(begin)
+        due = open_at <= now
+        hold_window = None
+        if not due and SEGMENT_HOLD_ENABLED:
+            # 超窗的段不是干等：先算一张起点顶到窗口边界、终点就是本段终点的占位预约，
+            # 它完整盖住目标时段，别人抢不进来。
+            window = plan_hold_window(
+                now, begin, end,
+                prev_segment_end=segments[idx - 2][1] if idx >= 2 else None,
+            )
+            # 占位比目标时段起得早，闭馆窗口要按占位这段重新对一次。
+            if window and not find_reservation_conflict(
+                    db.school_notice_reviews, window[0], window[1]):
+                hold_window = window
+        plan.items.append(_WorkItem(plan, idx, begin, end, open_at, due, hold_window))
+    plan.remaining = len(plan.items)
+    return plan
+
+
+def _plan_reservation_safely(res_item: Dict[str, Any], now: Optional[datetime] = None) -> Optional[_UserPlan]:
+    """规划阶段一个账号出错只影响它自己，写条错误结果就放过。"""
+    pid = res_item.get("pid", "?")
+    try:
+        return _plan_reservation(res_item, now)
+    except Exception as exc:
+        handle_reservation_error(pid, f"预约过程发生异常: {exc}")
+        return None
+
+
+def _ensure_library(plan: _UserPlan) -> LibrarySystem:
+    """
+    拿到这个账号的登录会话；第一次调用时才真正去取。
+
+    优先复用预登录好的会话：webvpn + CAS 那 4~8 秒已经在 6:50 付过了，
+    这里直接就能发预约请求。取不到（没预登录、会话过期）就照旧现场登录。
+    """
+    if plan.library is not None:
+        return plan.library
+    if plan.login_error:
+        raise RuntimeError(plan.login_error)
+    pid = plan.pid
+    try:
+        library = prelogin.take(pid)
+        if library is not None:
+            log_with_user(logger, 'info', pid, '系统初始化', "复用预登录会话")
+        else:
+            log_with_user(logger, 'info', pid, '系统初始化', "开始初始化图书馆系统")
+            library = LibrarySystem(
+                username=pid,
+                password=plan.vpn_password,
+                vpn_password=plan.vpn_password
+            )
+    except Exception as exc:
+        plan.login_error = f"登录失败: {exc}"
+        raise
+    plan.library = library
+    return library
+
+
+def _run_item(item: _WorkItem) -> None:
+    """
+    执行队列里的一格。同一账号的格子由队列保证串行，这里不用再加锁。
+
+    任何异常只算这一段失败，不影响同账号的其他段，更不影响别的账号。
+    """
+    plan = item.plan
+    pid = plan.pid
+    try:
+        if item.due:
+            library = _ensure_library(plan)
+            ok, line = _reserve_one_segment(
+                library, pid, plan.seat_ids, item.begin, item.end, item.seg_label
+            )
+            plan.any_success = plan.any_success or ok
+            plan.any_failure = plan.any_failure or not ok
+        else:
+            hold = None
+            if item.hold_window is not None:
+                hold_begin, hold_end = item.hold_window
+                try:
+                    hold = _place_hold(_ensure_library(plan), pid, plan.seat_ids,
+                                       hold_begin, hold_end, item.seg_label)
+                except Exception as exc:
+                    # 占位失败不能把这段弄丢：照样排队，等补约 job 到点自己登录去约。
+                    log_with_user(logger, 'warning', pid, '占位预约',
+                                  f"{item.seg_label} 占位异常，退回纯排队: {exc}")
+                plan.placed_hold = plan.placed_hold or hold is not None
+            queue_pending_segment(pid, item.begin, item.end, item.open_at, hold=hold)
+            line = _pending_result_line(item.seg_label, item.open_at, hold)
+            log_with_user(logger, 'info', pid, '预约排队',
+                          f"{item.seg_label} 超出提前预约窗口，"
+                          f"{'已占位 ' + str(hold.get('dev_name')) + '，' if hold else ''}"
+                          f"已排到 {item.open_at:%Y-%m-%d %H:%M} 换约")
+    except Exception as exc:
+        line = f"❌ {item.seg_label} 异常: {exc}"
+        plan.any_failure = True
+        log_with_user(logger, 'error', pid, '预约异常', line)
+
+    plan.results[item.idx] = line
+    plan.remaining -= 1
+    # 每段跑完就把已有的结果写回面板，最后一段跑完再做收尾。
+    combined = "\n".join(plan.results[idx] for idx in sorted(plan.results))
+    update_user_config(pid, combined)
+    if plan.remaining <= 0:
+        _finish_user(plan, combined)
+
+
+def _finish_user(plan: _UserPlan, combined: str) -> None:
+    """一个账号的所有段都跑完：刷预约状态、通知用户、留会话给补约。"""
+    pid = plan.pid
+    queued = plan.queued_items
+    # 占位预约也要进 owned_seat：迟到保护和面板都照着它看，
+    # 不刷一次的话，用户手上明明占着座却在系统里查无此约。
+    if (plan.any_success or plan.placed_hold) and plan.library is not None:
+        try:
+            reservations, message = plan.library.get_reservation_info()
+            if reservations:
+                log_with_user(logger, 'info', pid, '预约状态', f"当前预约状态: {message}")
+                for res in reservations:
+                    log_with_user(logger, 'info', pid, '预约详情',
+                                  f"座位 {res.get('devInfo', {}).get('devName', '未知')} "
+                                  f"时间 {res.get('resvBeginTime')} - {res.get('resvEndTime')} "
+                                  f"状态 {res.get('resvStatus')}")
+        except Exception:
+            pass
+
+    segments = plan.segments
+    if plan.any_success:
+        notify_user(plan.cfg, "✅ 预约完成" if len(segments) == 1 else f"✅ 多段预约 ({len(segments)}段)",
+                    f"学号 {pid}\n{combined}")
+    elif queued and not plan.any_failure:
+        # 一段都没约，但也没失败——全都还没到窗口，等补约任务接手就行，不算异常。
+        notify_user(plan.cfg,
+                    f"⏳ 已占位待换约 ({len(queued)}段)" if plan.placed_hold
+                    else f"⏳ 预约已排队 ({len(queued)}段)",
+                    f"学号 {pid}\n{combined}")
+    else:
+        notify_user(plan.cfg, "❌ 预约失败", f"学号 {pid}\n{combined}", always=True)
+
+    if queued and plan.library is not None:
+        # 还有段在排队补约，会话留给补约 job 用，省掉 07:02 那次完整的 webvpn + CAS。
+        prelogin.store(pid, plan.library)
+
+
 def reservation(res_item: Dict[str, Any], now: Optional[datetime] = None) -> None:
     """
-    处理单个预约请求
-
-    完整的预约流程：
-    1. 计算预约时间
-    2. 获取座位ID
-    3. 登录VPN和图书馆系统
-    4. 执行预约（窗口内的段直接约，超窗的段先占位再排队补约）
-    5. 更新用户信息
-    6. 记录预约结果
+    单独跑一个账号的预约（面板上的「立即预约」走这里）：
+    算好计划，按段顺序执行。7:00 的批量流程见 process_reservations。
 
     Args:
         res_item: 用户配置
         now: 仅测试用，默认取当前时间
     """
-    # 加载账号信息
-    pid = res_item["pid"]
-    vpn_password = _dec(res_item["vpn_password"])
-    seat_list = res_item["seat_list"]
+    plan = _plan_reservation_safely(res_item, now)
+    if plan is None:
+        return
+    for item in plan.items:
+        _run_item(item)
 
-    try:
-        # 计算预约时间段列表（支持多段）
-        segments = calculate_reservation_time(res_item)
-        if not segments:
-            # 用户自己关掉的那天是正常状态，不能走 handle_reservation_error——
-            # 那条会被前端判成「预约失败」标红，休息日天天弹一次红。
-            rest = rest_day_label(res_item)
-            if rest:
-                message = f"{rest}，已跳过预约"
-                log_with_user(logger, 'info', pid, '休息日', message)
-                update_user_config(pid, message)
+
+def _build_queue(plans: List[_UserPlan]) -> List[_WorkItem]:
+    """
+    把所有账号的段排成一条队：先所有人的第 1 段，再所有人的第 2 段……
+
+    7:00 真正被抢的是各人的第 1 段——大家偏好从早坐到晚，一张座位只要被约走了
+    上午，下午那截基本没人再来抢。所以第 2 段没必要跟别人的第 1 段抢窗口，
+    统一放到队尾，把开闸后最初那几秒全部让给「从早上开始」的那些段。
+    同一轮内仍按账号优先级排。
+    """
+    rounds = max((len(plan.items) for plan in plans), default=0)
+    queue: List[_WorkItem] = []
+    for position in range(rounds):
+        for plan in plans:
+            if position < len(plan.items):
+                queue.append(plan.items[position])
+    return queue
+
+
+def _drain_queue(queue: List[_WorkItem], workers: int) -> None:
+    """
+    多个工人按队列顺序取活干；同一账号的格子绝不同时被两个工人拿走。
+
+    不用 ThreadPoolExecutor：它只会按提交顺序死板地取，做不到「这个账号正忙，
+    先跳过它拿下一个」。
+    """
+    pending = list(queue)
+    busy: set = set()
+    cond = threading.Condition()
+
+    def take_next() -> Optional[_WorkItem]:
+        with cond:
+            while pending:
+                for index, item in enumerate(pending):
+                    if item.plan.pid not in busy:
+                        busy.add(item.plan.pid)
+                        return pending.pop(index)
+                # 剩下的全是正忙账号的后续段，等谁忙完了再看。
+                cond.wait(timeout=0.2)
+            return None
+
+    def worker() -> None:
+        while True:
+            item = take_next()
+            if item is None:
                 return
-            log_with_user(logger, 'error', pid, '预约时间', "未找到有效的预约时间段")
-            handle_reservation_error(pid, "未配置有效的预约时间段")
-            return
-
-        conflict = find_any_reservation_conflict(db.school_notice_reviews, segments)
-        if conflict:
-            message = _blackout_message(conflict)
-            log_with_user(logger, 'info', pid, '闭馆保护', message)
-            update_user_config(pid, message)
-            return
-
-        log_with_user(logger, 'info', pid, '预约时间',
-                     f"共 {len(segments)} 段: " + "; ".join([f"{b}~{e}" for b, e in segments]))
-
-        # 获取座位ID
-        seat_ids = get_seat_ids(seat_list)
-        if not seat_ids:
-            log_with_user(logger, 'error', pid, '座位获取', "未找到有效的座位ID")
-            handle_reservation_error(pid, "未找到有效的座位ID")
-            return
-
-        # 按提前预约窗口把段分成两拨：现在够得着的照常抢，够不着的排队等窗口打开。
-        now = now or datetime.now()
-        plan = [
-            (idx, begin, end, safe_bookable_at(begin))
-            for idx, (begin, end) in enumerate(segments, 1)
-        ]
-        due = [item for item in plan if item[3] <= now]
-        queued = [item for item in plan if item[3] > now]
-
-        # 超窗的段不是干等：先给它算一张起点顶到窗口边界、终点就是本段终点的占位预约，
-        # 它完整盖住目标时段，别人抢不进来。算在登录之前——一张都占不了（比如后天的段）
-        # 且没有窗口内的段时，照旧连 webvpn 都不用登。
-        hold_plans: Dict[int, Tuple[str, str]] = {}
-        if SEGMENT_HOLD_ENABLED:
-            for idx, resv_begin_time, resv_end_time, _ in queued:
-                window = plan_hold_window(
-                    now, resv_begin_time, resv_end_time,
-                    prev_segment_end=segments[idx - 2][1] if idx >= 2 else None,
-                )
-                # 占位比目标时段起得早，闭馆窗口要按占位这段重新对一次。
-                if window and not find_reservation_conflict(
-                        db.school_notice_reviews, window[0], window[1]):
-                    hold_plans[idx] = window
-
-        # 初始化图书馆系统（多段共享同一会话）
-        # 优先复用预登录好的会话：webvpn + CAS 那 4~8 秒已经在 6:50 付过了，
-        # 这里直接就能发预约请求。取不到（没预登录、会话过期、校验失败）
-        # 就照旧现场登录，行为与加这个功能之前完全一致。
-        library = None
-        if due or hold_plans:
-            library = prelogin.take(pid)
-            if library is not None:
-                log_with_user(logger, 'info', pid, '系统初始化', "复用预登录会话")
-            else:
-                log_with_user(logger, 'info', pid, '系统初始化', "开始初始化图书馆系统")
-                library = LibrarySystem(
-                    username=pid,
-                    password=vpn_password,
-                    vpn_password=vpn_password
-                )
-
-        # 逐段预约
-        segment_results: Dict[int, str] = {}
-        any_success = False
-        any_failure = False
-        for idx, resv_begin_time, resv_end_time, _ in due:
-            seg_label = f"第{idx}段 {resv_begin_time[-8:-3]}-{resv_end_time[-8:-3]}"
-            ok, line = _reserve_one_segment(
-                library, pid, seat_ids, resv_begin_time, resv_end_time, seg_label
-            )
-            any_success = any_success or ok
-            any_failure = any_failure or not ok
-            segment_results[idx] = line
-
-        # 占位下单排在窗口内的段之后：7:00 真正被人抢的是那几段，
-        # 不能为了占位让它们多等一个来回；占位那张这会儿还没人跟你抢。
-        placed_hold = False
-        for idx, resv_begin_time, resv_end_time, open_at in queued:
-            seg_label = f"第{idx}段 {resv_begin_time[-8:-3]}-{resv_end_time[-8:-3]}"
-            hold = None
-            if idx in hold_plans and library is not None:
-                hold_begin, hold_end = hold_plans[idx]
-                hold = _place_hold(library, pid, seat_ids, hold_begin, hold_end, seg_label)
-                placed_hold = placed_hold or hold is not None
-            queue_pending_segment(pid, resv_begin_time, resv_end_time, open_at, hold=hold)
-            segment_results[idx] = _pending_result_line(seg_label, open_at, hold)
-            log_with_user(logger, 'info', pid, '预约排队',
-                          f"{seg_label} 超出提前预约窗口，"
-                          f"{'已占位 ' + str(hold.get('dev_name')) + '，' if hold else ''}"
-                          f"已排到 {open_at:%Y-%m-%d %H:%M} 换约")
-
-        combined = "\n".join(segment_results[idx] for idx in sorted(segment_results))
-        update_user_config(pid, combined)
-
-        # 占位预约也要进 owned_seat：迟到保护和面板都照着它看，
-        # 不刷一次的话，用户手上明明占着座却在系统里查无此约。
-        if (any_success or placed_hold) and library is not None:
             try:
-                reservations, message = library.get_reservation_info()
-                if reservations:
-                    log_with_user(logger, 'info', pid, '预约状态', f"当前预约状态: {message}")
-                    for res in reservations:
-                        log_with_user(logger, 'info', pid, '预约详情',
-                                    f"座位 {res.get('devInfo', {}).get('devName', '未知')} "
-                                    f"时间 {res.get('resvBeginTime')} - {res.get('resvEndTime')} "
-                                    f"状态 {res.get('resvStatus')}")
-            except Exception:
-                pass
+                _run_item(item)
+            except Exception as exc:  # _run_item 自己兜底，这里防万一
+                log_with_user(logger, 'error', item.plan.pid, '预约异常', f"预约线程异常: {exc}")
+            finally:
+                with cond:
+                    busy.discard(item.plan.pid)
+                    cond.notify_all()
 
-        if any_success:
-            notify_user(res_item, "✅ 预约完成" if len(segments) == 1 else f"✅ 多段预约 ({len(segments)}段)",
-                        f"学号 {pid}\n{combined}")
-        elif queued and not any_failure:
-            # 一段都没约，但也没失败——全都还没到窗口，等补约任务接手就行，不算异常。
-            notify_user(res_item,
-                        f"⏳ 已占位待换约 ({len(queued)}段)" if placed_hold
-                        else f"⏳ 预约已排队 ({len(queued)}段)",
-                        f"学号 {pid}\n{combined}")
-        else:
-            notify_user(res_item, "❌ 预约失败", f"学号 {pid}\n{combined}", always=True)
-
-    except Exception as e:
-        error_msg = f"预约过程发生异常: {str(e)}"
-        log_with_user(logger, 'error', pid, '预约异常', error_msg)
-        handle_reservation_error(pid, error_msg)
-
-def _run_reservation_safely(res_item: Dict[str, Any]) -> None:
-    """线程入口：包住 reservation()，任何逃逸异常都不能拖垮整个线程池。"""
-    pid = res_item.get("pid", "?")
-    try:
-        reservation(res_item)
-    except Exception as exc:
-        log_with_user(logger, 'error', pid, '预约异常', f"预约线程异常: {exc}")
-
+    threads = [threading.Thread(target=worker, name=f"reserve-{index}", daemon=True)
+               for index in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
 
 
 def _prelogin_one(res_item: Dict[str, Any]) -> None:
@@ -1122,18 +1281,17 @@ def process_prelogin(refresh: bool = False) -> None:
 
 def process_reservations() -> None:
     """
-    并发处理所有预约请求
+    7:00 的批量抢座。
 
     工作流程：
-    1. 获取所有活动预约记录（已按优先级降序排列）
-    2. 用线程池并发执行，每个账号一条独立的 VPN + 图书馆会话
-    3. 记录处理结果
+    1. 拿到所有活动预约记录（已按优先级降序）
+    2. 开枪前先给每个账号算好计划（只查本地库，几十毫秒）
+    3. 把所有账号的段排成一条队：先所有人的第 1 段，再第 2 段……（见 _build_queue）
+    4. RESERVE_CONCURRENCY 个工人按队列取活；同一账号的段串行、共用一条会话
+    5. 每个账号最后一段跑完时写结果、发通知
 
-    为什么要并发：单个账号跑完「VPN 登录 → CAS SSO → 逐段抢座」通常要好几秒，
-    串行执行会让排在后面的用户错过 7:00 开抢的黄金窗口。线程池按提交顺序取任务，
-    所以高优先级账号仍然先出发，只是不再需要等前一个人跑完。
-
-    并发度由 RESERVE_CONCURRENCY 控制，别调太高——webvpn 网关和图书馆接口都有限流。
+    为什么要并发：单个账号「登录 → 逐段抢座」通常要好几秒，串行会让排在后面的
+    用户错过 7:00 开抢的黄金窗口。并发度别调太高——webvpn 网关和图书馆接口都有限流。
     每个账号仍然互相独立，一个失败不影响其他账号。
     """
     active_list = get_all_active_reservations()
@@ -1141,28 +1299,35 @@ def process_reservations() -> None:
         log_with_user(logger, 'info', '系统', '预约处理', "没有正在预约中的记录")
         return
 
-    workers = max(1, min(RESERVE_CONCURRENCY, len(active_list)))
-    log_with_user(logger, 'info', '系统', '预约处理',
-                  f"开始处理预约列表，共 {len(active_list)} 条，并发度 {workers}")
-
     started = time.time()
+    now = datetime.now()
+    plans: List[_UserPlan] = []
     try:
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="reserve") as pool:
-            futures = {}
-            for item in active_list:
-                log_with_user(logger, 'info', item['pid'], '预约处理',
-                              f"排入预约队列: {item['pid']}, 优先级: {item.get('priority', 0)}")
-                futures[pool.submit(_run_reservation_safely, item)] = item['pid']
-            for future in as_completed(futures):
-                pid = futures[future]
-                try:
-                    future.result()
-                except Exception as exc:
-                    log_with_user(logger, 'error', pid, '预约异常', f"预约任务未正常结束: {exc}")
+        for item in active_list:
+            plan = _plan_reservation_safely(item, now)
+            if plan is not None:
+                plans.append(plan)
+        queue = _build_queue(plans)
+        if not queue:
+            log_with_user(logger, 'info', '系统', '预约处理', "所有账号今天都不用抢座")
+            return
+
+        workers = max(1, min(RESERVE_CONCURRENCY, len(queue)))
+        rounds = max(len(plan.items) for plan in plans)
+        per_round = [sum(1 for plan in plans if len(plan.items) > position)
+                     for position in range(rounds)]
+        log_with_user(logger, 'info', '系统', '预约处理',
+                      f"开始处理预约队列，共 {len(active_list)} 个账号、{len(queue)} 段，"
+                      f"每轮段数 {per_round}，并发度 {workers}")
+        for plan in plans:
+            log_with_user(logger, 'info', plan.pid, '预约处理',
+                          f"排入预约队列: {plan.pid}, 优先级: {plan.cfg.get('priority', 0)}, "
+                          f"{len(plan.items)} 段")
+        _drain_queue(queue, workers)
     finally:
-        # 没被取走的预登录会话到这里就作废了，留着只会被后面的午休/到馆复查
-        # 任务当成有效会话误用。
-        prelogin.clear()
+        # 没被取走的预登录会话到这里就作废了；只留下 _finish_user 刚存回去、
+        # 等着给补约 job 复用的那几条。
+        prelogin.clear(keep=[plan.pid for plan in plans if plan.queued_items and plan.library is not None])
 
     elapsed = time.time() - started
     log_with_user(logger, 'info', '系统', '预约处理', f"预约处理结束，耗时 {elapsed:.1f} 秒")

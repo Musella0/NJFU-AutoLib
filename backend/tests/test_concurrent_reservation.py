@@ -5,6 +5,7 @@ import threading
 import time
 import types
 import unittest
+from datetime import datetime
 from unittest.mock import Mock, patch
 
 # 抢座调度本身不碰数据库、VPN 和真实网络，这里把这几层换成桩件。
@@ -50,6 +51,18 @@ os.environ.setdefault("ENCRYPTION_KEY", "00" * 32)
 import scheduled_task  # noqa: E402
 
 
+def fake_plan(account, segments=1):
+    """造一个已经算好的账号计划：segments 段，全部当作窗口内直接抢。"""
+    plan = scheduled_task._UserPlan(account, [("b", "e")] * segments, ["100455814"], "pwd")
+    for idx in range(1, segments + 1):
+        plan.items.append(scheduled_task._WorkItem(
+            plan, idx, f"2026-09-08 0{idx}:00:00", f"2026-09-08 1{idx}:00:00",
+            datetime(2026, 9, 7, 7, 0), True, None,
+        ))
+    plan.remaining = len(plan.items)
+    return plan
+
+
 class ConcurrentReservationTests(unittest.TestCase):
     """7:00 的抢座必须真的并行，否则排在后面的账号会错过黄金窗口。"""
 
@@ -60,23 +73,28 @@ class ConcurrentReservationTests(unittest.TestCase):
             for index in range(count)
         ]
 
+    def _run(self, accounts, run_item, concurrency, segments=1):
+        with patch.object(scheduled_task, "get_all_active_reservations", return_value=accounts), \
+             patch.object(scheduled_task, "_plan_reservation_safely",
+                          side_effect=lambda item, now=None: fake_plan(item, segments)), \
+             patch.object(scheduled_task, "_run_item", side_effect=run_item), \
+             patch.object(scheduled_task, "RESERVE_CONCURRENCY", concurrency):
+            scheduled_task.process_reservations()
+
     def test_accounts_run_in_parallel(self):
         accounts = self._accounts(12)
         per_account_seconds = 0.2
         processed = []
         lock = threading.Lock()
 
-        def fake_reservation(res_item):
+        def fake_run(item):
             time.sleep(per_account_seconds)
             with lock:
-                processed.append(res_item["pid"])
+                processed.append(item.plan.pid)
 
-        with patch.object(scheduled_task, "get_all_active_reservations", return_value=accounts), \
-             patch.object(scheduled_task, "reservation", side_effect=fake_reservation), \
-             patch.object(scheduled_task, "RESERVE_CONCURRENCY", 8):
-            started = time.monotonic()
-            scheduled_task.process_reservations()
-            elapsed = time.monotonic() - started
+        started = time.monotonic()
+        self._run(accounts, fake_run, concurrency=8)
+        elapsed = time.monotonic() - started
 
         self.assertEqual(sorted(processed), sorted(a["pid"] for a in accounts))
         # 串行需要 12 × 0.2 = 2.4 秒；并发度 8 时两批就能跑完。
@@ -87,16 +105,13 @@ class ConcurrentReservationTests(unittest.TestCase):
         processed = []
         lock = threading.Lock()
 
-        def fake_reservation(res_item):
-            if res_item["pid"] == accounts[1]["pid"]:
+        def fake_run(item):
+            if item.plan.pid == accounts[1]["pid"]:
                 raise RuntimeError("统一认证挂了")
             with lock:
-                processed.append(res_item["pid"])
+                processed.append(item.plan.pid)
 
-        with patch.object(scheduled_task, "get_all_active_reservations", return_value=accounts), \
-             patch.object(scheduled_task, "reservation", side_effect=fake_reservation), \
-             patch.object(scheduled_task, "RESERVE_CONCURRENCY", 4):
-            scheduled_task.process_reservations()
+        self._run(accounts, fake_run, concurrency=4)
 
         self.assertEqual(len(processed), 3)
         self.assertNotIn(accounts[1]["pid"], processed)
@@ -106,24 +121,61 @@ class ConcurrentReservationTests(unittest.TestCase):
         order = []
         lock = threading.Lock()
 
-        def fake_reservation(res_item):
+        def fake_run(item):
             with lock:
-                order.append(res_item["pid"])
+                order.append(item.plan.pid)
             time.sleep(0.05)
 
-        # 并发度 1 时线程池退化成串行，能直接验证提交顺序仍是优先级顺序。
-        with patch.object(scheduled_task, "get_all_active_reservations", return_value=accounts), \
-             patch.object(scheduled_task, "reservation", side_effect=fake_reservation), \
-             patch.object(scheduled_task, "RESERVE_CONCURRENCY", 1):
-            scheduled_task.process_reservations()
+        # 并发度 1 时退化成串行，能直接验证取活顺序仍是优先级顺序。
+        self._run(accounts, fake_run, concurrency=1)
 
         self.assertEqual(order, [a["pid"] for a in accounts])
 
+    def test_second_segments_wait_behind_everyones_first_segment(self):
+        """大家偏好从早坐到晚：第 1 段才是真正被抢的，第 2 段统一排到队尾。"""
+        accounts = self._accounts(3)
+        order = []
+
+        def fake_run(item):
+            order.append((item.plan.pid, item.idx))
+
+        self._run(accounts, fake_run, concurrency=1, segments=2)
+
+        pids = [a["pid"] for a in accounts]
+        self.assertEqual(order, [(pid, 1) for pid in pids] + [(pid, 2) for pid in pids])
+
+    def test_same_account_never_runs_two_segments_at_once(self):
+        """图书馆对同一账号同时只受理一个预约操作，第二个会被直接顶掉。"""
+        accounts = self._accounts(2)
+        active = {}
+        overlaps = []
+        order = []
+        lock = threading.Lock()
+
+        def fake_run(item):
+            pid = item.plan.pid
+            with lock:
+                if pid in active:
+                    overlaps.append(pid)
+                active[pid] = item.idx
+                order.append((pid, item.idx))
+            time.sleep(0.1)
+            with lock:
+                active.pop(pid, None)
+
+        # 并发度远大于账号数，第 2 段本来有机会跟自己的第 1 段同时跑。
+        self._run(accounts, fake_run, concurrency=4, segments=2)
+
+        self.assertEqual(overlaps, [], "同一账号的两段同时在跑")
+        for account in accounts:
+            mine = [idx for pid, idx in order if pid == account["pid"]]
+            self.assertEqual(mine, [1, 2], "同一账号的段必须按配置顺序执行")
+
     def test_empty_queue_is_a_no_op(self):
         with patch.object(scheduled_task, "get_all_active_reservations", return_value=[]), \
-             patch.object(scheduled_task, "reservation") as reservation:
+             patch.object(scheduled_task, "_plan_reservation_safely") as plan:
             scheduled_task.process_reservations()
-        reservation.assert_not_called()
+        plan.assert_not_called()
 
     def test_daily_reservation_stops_before_school_login_when_closed(self):
         account = {"pid": "2021123400", "vpn_password": "encrypted", "seat_list": ["2F-A001"]}
