@@ -677,7 +677,27 @@ def _swap_hold_to_segment(
     if reservations is None:
         return False, f"❌ {seg_label}: 查不到当前预约状态，本轮不动占位，下一轮重试"
 
-    if any(item.get("uuid") == hold_uuid for item in reservations):
+    hold_alive = any(item.get("uuid") == hold_uuid for item in reservations)
+    existing = _find_reservation(reservations, resv_begin_time, resv_end_time)
+    if existing:
+        # 目标时段已经在手上，没什么可换的。2026-09-11 实测：用户在图书馆 App 里看到
+        # 13:58 那张占位不对劲，自己取消后手动约了 14:00——这时再下单只会被
+        # 「用户在当前时段有预约」顶回，而且占位段的重试不封顶，会每分钟登录一次
+        # 直到期限，最后还给用户发一条错误的「换约失败请手动处理」。
+        dev_name = (existing.get("devInfo") or {}).get("devName") or hold.get("dev_name") or "座位"
+        if hold_alive:
+            # 理论上图书馆不允许同一人重叠时段并存，但真出现了就把占位清掉，
+            # 清不掉也不影响结论：目标时段确实已经拿到了。
+            deleted, message = library.delete_seat(hold_uuid)
+            log_with_user(logger, 'warning' if not deleted else 'info', pid, '占位换约',
+                          f"{seg_label} 目标时段已在，占位 {hold.get('dev_name')} "
+                          f"{'已一并取消' if deleted else '取消失败: ' + str(message)}")
+        log_with_user(logger, 'info', pid, '占位换约',
+                      f"{seg_label} 有效预约里已有本段（{dev_name}），无需换约")
+        return True, (f"✅ {resv_begin_time[5:10]} · {resv_begin_time[11:16]}-{resv_end_time[11:16]}"
+                      f" · {dev_name} · 已有本段预约，无需换约")
+
+    if hold_alive:
         deleted, message = library.delete_seat(hold_uuid)
         if not deleted:
             # 没删掉就绝不能往下走：目标时段和占位重叠，发出去必被顶回来，

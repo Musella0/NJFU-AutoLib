@@ -472,6 +472,31 @@ class HoldSwapTests(unittest.TestCase):
         self.library.reserve_seat.assert_called_once()
         self.assertEqual(self._last_status(), "done")
 
+    def test_target_already_held_by_user_is_done_without_a_new_order(self):
+        """2026-09-11 实测：用户自己取消占位、手动约了精确时段。再下单只会撞自己，
+        而占位段的重试不封顶——会每分钟登录一次直到期限，最后还发错误通知。"""
+        self.library.get_reservation_info.side_effect = [
+            ([self.TARGET_RECORD], "查询成功"),
+        ]
+
+        notify = self._run()
+
+        self.library.reserve_seat.assert_not_called()
+        self.library.delete_seat.assert_not_called()
+        self.assertEqual(self._last_status(), "done")
+        self.assertIn("无需换约", notify.call_args.args[2])
+
+    def test_target_present_alongside_hold_cancels_the_hold_and_is_done(self):
+        self.library.get_reservation_info.side_effect = [
+            ([self.HOLD_RECORD, self.TARGET_RECORD], "查询成功"),
+        ]
+
+        self._run()
+
+        self.library.delete_seat.assert_called_once_with("hold-uuid")
+        self.library.reserve_seat.assert_not_called()
+        self.assertEqual(self._last_status(), "done")
+
 
 class ReplaceQueuedResultTests(unittest.TestCase):
     def test_only_the_matching_placeholder_line_is_replaced(self):
