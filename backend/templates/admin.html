@@ -263,6 +263,12 @@
     <div class="ann-grid" id="ann-grid"><div class="loading" style="padding:24px 0"><div>加载中...</div></div></div>
 
     <div class="section-bar">
+      <div class="section-title">客户端版本</div>
+      <button class="btn btn-green btn-sm" onclick="openAppVerForm()">登记新版本</button>
+    </div>
+    <div class="ann-grid" id="appver-box"><div class="loading" style="padding:24px 0"><div>加载中...</div></div></div>
+
+    <div class="section-bar">
       <div class="section-title">用户列表</div>
       <span class="tb-count" id="u-count"></span>
     </div>
@@ -332,6 +338,24 @@
 </div>
 
 <!-- Announcement Form Modal -->
+<!-- 安卓版本登记：网页端的下载卡片和 App 内的升级检查都读这一条 -->
+<div class="modal-overlay" id="m-appver">
+  <div class="modal">
+    <div class="modal-header"><div class="modal-title">登记新版本</div><button class="modal-close" onclick="closeM('m-appver')">✕</button></div>
+    <div class="modal-body">
+      <div class="modal-field"><label>版本名 versionName</label><input type="text" id="av-f-name" placeholder="如：0.2.4" oninput="onAppVerName()"></div>
+      <div class="modal-field"><label>版本号 versionCode</label><input type="number" id="av-f-code" min="1" step="1" placeholder="只增不减，必须比上一版大"></div>
+      <div class="modal-field"><label>下载地址</label><input type="text" id="av-f-url" placeholder="https://.../download/AutoLib-x.y.z.apk" oninput="this.dataset.auto='0'"></div>
+      <div class="modal-field"><label>更新说明</label><textarea id="av-f-notes" placeholder="会显示在网页下载卡片和 App 的升级弹窗里"></textarea></div>
+      <div class="al-hint" id="av-hint" style="margin-top:4px"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeM('m-appver')">取消</button>
+      <button class="btn btn-green" onclick="saveAppVersion()">保存</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="m-ann">
   <div class="modal">
     <div class="modal-header"><div class="modal-title" id="ann-title">新建公告</div><button class="modal-close" onclick="closeM('m-ann')">✕</button></div>
@@ -458,7 +482,7 @@ async function adminLogin(){
 async function adminLogout(){await fetch('/api/admin/logout',{method:'POST'});location.reload();}
 function showAdminLogin(){document.getElementById('password-reset').style.display='none';document.getElementById('admin-main').style.display='none';document.getElementById('admin-nav').style.display='none';document.getElementById('admin-login').style.display='';}
 function showPasswordReset(){document.getElementById('reset-username').value=document.getElementById('adm-username').value.trim();document.getElementById('admin-login').style.display='none';document.getElementById('password-reset').style.display='';}
-function showAdminMain(){document.getElementById('admin-login').style.display='none';document.getElementById('password-reset').style.display='none';document.getElementById('admin-main').style.display='';document.getElementById('admin-nav').style.display='flex';loadUsers();loadSchoolReviews();loadAnnouncements();}
+function showAdminMain(){document.getElementById('admin-login').style.display='none';document.getElementById('password-reset').style.display='none';document.getElementById('admin-main').style.display='';document.getElementById('admin-nav').style.display='flex';loadUsers();loadSchoolReviews();loadAnnouncements();loadAppVersion();}
 async function requestResetCode(){
   const username=document.getElementById('reset-username').value.trim();
   if(!username)return toast('请输入管理员账号','error');
@@ -933,6 +957,85 @@ function delAnn(id){
     }catch(e){toast('失败','error')}
   };
   openM('m-ann-del');
+}
+
+// ===== 安卓版本登记 =====
+// 网页端的下载卡片和 App 内的升级检查读的是同一条记录（/api/app/version）。
+// 以前这里没有界面，只能手敲 curl 去登记，前端那个写死的下载链接就是这么漏掉的。
+let appVersion = null;
+
+async function loadAppVersion(){
+  const box = document.getElementById('appver-box');
+  try{
+    const r = await fetch('/api/app/version');
+    const d = await r.json();
+    appVersion = (d && d.version_code) ? d : null;
+  }catch(e){
+    appVersion = null;
+  }
+  if(!appVersion){
+    box.innerHTML = '<div style="color:var(--text3);text-align:center;padding:30px">还没登记过版本，网页上的下载入口不会显示</div>';
+    return;
+  }
+  box.innerHTML = `<div class="ann-card">
+    <div class="ann-main">
+      <div class="ann-head"><span class="ann-badge info">v${esc(appVersion.version_name)}</span><span class="ann-title">versionCode ${appVersion.version_code}</span></div>
+      <div class="ann-content"><a href="${esc(appVersion.download_url)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);word-break:break-all">${esc(appVersion.download_url)}</a></div>
+      ${appVersion.notes ? `<div class="ann-content" style="white-space:pre-wrap">${esc(appVersion.notes)}</div>` : ''}
+      <div class="ann-meta">更新 ${appVersion.updated_at || '-'}</div>
+    </div>
+    <div class="ann-actions">
+      <button class="btn btn-blue btn-sm" onclick="openAppVerForm()">修改</button>
+    </div>
+  </div>`;
+}
+
+// 下载地址按版本名拼，省得手敲敲错——文件名规则和 downloads/ 里一直用的一致
+function apkUrlFor(name){ return location.origin + '/download/AutoLib-' + name + '.apk'; }
+
+// 版本名一改就跟着更新地址；用户自己动过地址栏就不再覆盖（oninput 里把 auto 标记清掉了）
+function onAppVerName(){
+  const url = document.getElementById('av-f-url');
+  if(url.dataset.auto !== '1' && url.value.trim()) return;
+  url.value = apkUrlFor(document.getElementById('av-f-name').value.trim());
+  url.dataset.auto = '1';
+}
+
+function openAppVerForm(){
+  const name = document.getElementById('av-f-name');
+  const code = document.getElementById('av-f-code');
+  const url = document.getElementById('av-f-url');
+  const notes = document.getElementById('av-f-notes');
+  name.value = appVersion ? appVersion.version_name : '';
+  code.value = appVersion ? appVersion.version_code : '';
+  url.value = appVersion ? appVersion.download_url : '';
+  notes.value = appVersion ? appVersion.notes : '';
+  url.dataset.auto = '0';
+  document.getElementById('av-hint').textContent = appVersion
+    ? `当前线上：v${appVersion.version_name}（versionCode ${appVersion.version_code}）。versionCode 只增不减，填小了客户端认不出新版本。`
+    : 'versionCode 要和 app/build.gradle.kts 里的一致。';
+  openM('m-appver');
+}
+
+async function saveAppVersion(){
+  const body = {
+    version_name: document.getElementById('av-f-name').value.trim(),
+    version_code: parseInt(document.getElementById('av-f-code').value, 10),
+    download_url: document.getElementById('av-f-url').value.trim(),
+    notes: document.getElementById('av-f-notes').value.trim(),
+  };
+  if(!body.version_name) return toast('请填版本名','error');
+  if(!body.version_code || body.version_code <= 0) return toast('versionCode 必须是正整数','error');
+  if(!/^https?:\/\//.test(body.download_url)) return toast('下载地址必须是 http(s) 链接','error');
+  // 后端不拦版本回退，这里问一句：填小了老客户端就检查不到更新
+  if(appVersion && body.version_code < appVersion.version_code
+     && !confirm(`versionCode 比线上的 ${appVersion.version_code} 还小，客户端将认不出新版本。确定要这么登记吗？`)) return;
+  try{
+    const r = await fetch('/api/admin/app_version',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d = await r.json();
+    if(r.ok){toast('已登记 v'+body.version_name,'success');closeM('m-appver');loadAppVersion();}
+    else toast(d.error||'登记失败','error');
+  }catch(e){toast('网络错误','error')}
 }
 
 buildColPick();
