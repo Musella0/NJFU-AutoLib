@@ -270,6 +270,8 @@ class ProcessDueSegmentsTests(unittest.TestCase):
     """窗口一到，常驻 job 把队列里的段补约上。"""
 
     def setUp(self):
+        scheduled_task.prelogin.clear()
+        self.addCleanup(scheduled_task.prelogin.clear)
         self.now = datetime(2026, 9, 7, 10, 30, 20)
         self.doc = {
             "_id": "seg-1",
@@ -308,6 +310,25 @@ class ProcessDueSegmentsTests(unittest.TestCase):
         self.assertEqual(self.pending.updates[0]["update"]["$set"]["status"], "done")
         self.assertIn("预约成功", update.call_args.args[1])
         self.assertIn("补约成功", notify.call_args.args[1])
+
+    def test_pooled_session_is_reused_instead_of_logging_in_again(self):
+        """7:00 留下的会话拿来补约，省掉一次完整的 webvpn + CAS。"""
+        pooled = Mock()
+        pooled.reserve_seat.return_value = ("✅ 09-08 · 17:30-22:00 · 2F-B013 · 预约成功", None)
+        pooled.get_reservation_info.return_value = ([], "无预约记录")
+        scheduled_task.prelogin.store("2310102110", pooled)
+
+        self._run()
+
+        pooled.reserve_seat.assert_called_once()
+        self.library.reserve_seat.assert_not_called()
+
+    def test_failed_attempt_keeps_the_session_for_the_next_round(self):
+        self.library.reserve_seat.return_value = ("❌ 网络请求异常", None)
+
+        self._run()
+
+        self.assertEqual(scheduled_task.prelogin.pooled_pids(), ["2310102110"])
 
     def test_segment_whose_start_already_passed_is_dropped(self):
         self.doc["resv_begin_time"] = "2026-09-07 09:00:00"
@@ -368,6 +389,8 @@ class HoldSwapTests(unittest.TestCase):
     }
 
     def setUp(self):
+        scheduled_task.prelogin.clear()
+        self.addCleanup(scheduled_task.prelogin.clear)
         self.now = datetime(2026, 9, 7, 7, 33)
         self.doc = {
             "_id": "seg-1",
@@ -463,6 +486,39 @@ class HoldSwapTests(unittest.TestCase):
         self.assertEqual(self._last_status(), "failed")
         self.assertTrue(notify.call_args.kwargs.get("always"))
         self.assertIn("占位", notify.call_args.args[2])
+
+    def test_early_swap_failures_retry_next_minute(self):
+        self.library.delete_seat.return_value = (False, "删除座位失败")
+
+        self._run()
+
+        changes = self.pending.updates[-1]["update"]["$set"]
+        self.assertEqual(changes["attempts"], 1)
+        self.assertNotIn("open_at", changes, "前几次失败下一分钟就该再试")
+
+    def test_repeated_swap_failures_back_off_to_the_slow_interval(self):
+        """试了几次都没成就不是抖动了：每分钟登一次会把网关打穿，放慢到十分钟一次。"""
+        self.doc["attempts"] = scheduled_task.SEGMENT_SWAP_FAST_ATTEMPTS - 1
+        self.library.delete_seat.return_value = (False, "删除座位失败")
+
+        self._run()
+
+        changes = self.pending.updates[-1]["update"]["$set"]
+        self.assertEqual(
+            changes["open_at"],
+            self.now + timedelta(minutes=scheduled_task.SEGMENT_SWAP_SLOW_INTERVAL_MINUTES),
+        )
+        self.assertNotEqual(self._last_status(), "failed")
+
+    def test_slow_retry_never_overshoots_the_deadline(self):
+        self.now = datetime(2026, 9, 8, 13, 22)  # 距 13:28 的最后期限只剩 6 分钟
+        self.doc["attempts"] = scheduled_task.SEGMENT_SWAP_FAST_ATTEMPTS
+        self.library.delete_seat.return_value = (False, "删除座位失败")
+
+        self._run()
+
+        changes = self.pending.updates[-1]["update"]["$set"]
+        self.assertEqual(changes["open_at"], datetime(2026, 9, 8, 13, 28))
 
     def test_hold_already_gone_falls_back_to_plain_rebooking(self):
         self.library.get_reservation_info.side_effect = [

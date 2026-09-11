@@ -170,6 +170,11 @@ SEGMENT_HOLD_ENABLED = os.getenv("SEGMENT_HOLD_ENABLED", "1").strip().lower() no
 )
 # 换约失败后一直重试，直到占位预约开始前这么多分钟；之后才放弃并报警。
 SEGMENT_SWAP_DEADLINE_MINUTES = int(os.getenv("SEGMENT_SWAP_DEADLINE_MINUTES", "30"))
+# 换约的重试节奏：前几次每分钟一次（吃掉窗口边界那一两分钟的抖动），
+# 之后放慢到每隔这么多分钟一次。占位段要试二十多个小时，每分钟登一次会把网关打穿
+# （2026-09-11 一个账号两个半小时登了 148 次）。
+SEGMENT_SWAP_FAST_ATTEMPTS = int(os.getenv("SEGMENT_SWAP_FAST_ATTEMPTS", "5"))
+SEGMENT_SWAP_SLOW_INTERVAL_MINUTES = int(os.getenv("SEGMENT_SWAP_SLOW_INTERVAL_MINUTES", "10"))
 # 纯排队（没占上位）的段补约失败后最多再试这么多次，每分钟一次。
 # 原先一次失败就判死，窗口边界、网络抖动、登录失败这种一次性问题会白白烧掉一个时段。
 # 但也不能无限试：每次重试都要重走一遍 webvpn + CAS，二十几个账号一起转扛不住。
@@ -748,6 +753,7 @@ def _retry_or_finish_segment(
     hold = doc.get("hold") or {}
     attempts = int(doc.get("attempts") or 0) + 1
 
+    deadline: Optional[datetime] = None
     if hold:
         hold_begin = hold.get("resv_begin_time") or ""
         deadline = (datetime.strptime(hold_begin, TIME_FMT)
@@ -769,12 +775,18 @@ def _retry_or_finish_segment(
         notify_user(cfg, give_up_title, f"学号 {pid}\n{final_line}", always=True)
         return
 
-    pending_segments.update_one(
-        {"_id": doc["_id"]},
-        {"$set": {"attempts": attempts, "message": line, "updated_at": datetime.now()}},
-    )
+    changes: Dict[str, Any] = {"attempts": attempts, "message": line, "updated_at": datetime.now()}
+    when = "下一轮"
+    if hold and attempts >= SEGMENT_SWAP_FAST_ATTEMPTS:
+        # 快试几次没成，多半不是抖动，放慢节奏；但不能慢过最后期限。
+        next_at = now + timedelta(minutes=SEGMENT_SWAP_SLOW_INTERVAL_MINUTES)
+        if deadline is not None and next_at > deadline:
+            next_at = deadline
+        changes["open_at"] = next_at
+        when = f"{next_at:%H:%M}"
+    pending_segments.update_one({"_id": doc["_id"]}, {"$set": changes})
     log_with_user(logger, 'warning', pid, '排队补约',
-                  f"{seg_label} 第 {attempts} 次未成功，保持排队下一轮重试: {line}")
+                  f"{seg_label} 第 {attempts} 次未成功，保持排队{when}重试: {line}")
     if attempts == 1:
         notify_user(cfg, retry_title, f"学号 {pid}\n{retry_body}", always=True)
 
@@ -824,12 +836,16 @@ def process_due_segments(now: Optional[datetime] = None) -> None:
                 _finish_pending_segment(doc, "failed", f"❌ {seg_label}: 未找到有效的座位ID")
                 continue
 
-            vpn_password = _dec(cfg["vpn_password"])
-            library = LibrarySystem(
-                username=pid,
-                password=vpn_password,
-                vpn_password=vpn_password
-            )
+            # 7:00 抢完留下的会话（或上一轮补约用过的）优先复用，
+            # 省掉每分钟一次完整的 webvpn + CAS；没有或已失效才现场登录。
+            library = prelogin.take(pid)
+            if library is None:
+                vpn_password = _dec(cfg["vpn_password"])
+                library = LibrarySystem(
+                    username=pid,
+                    password=vpn_password,
+                    vpn_password=vpn_password
+                )
             hold = doc.get("hold") or {}
             if hold:
                 # 7:00 已经拿一张更早开始的预约把座位占住了，这里做的是「换」不是「抢」：
@@ -854,6 +870,9 @@ def process_due_segments(now: Optional[datetime] = None) -> None:
                 # 一次失败不收尾：占位过的段收尾等于接受更早的时间，
                 # 纯排队的段收尾等于让一次抖动白吃掉一个时段。
                 _retry_or_finish_segment(doc, cfg, seg_label, line, now)
+            # 会话留给同一账号的下一段 / 下一轮；take() 会按新鲜度决定要不要先校验。
+            # 没人再用的话到岁数自然作废。
+            prelogin.store(pid, library)
         except Exception as exc:
             log_with_user(logger, 'error', pid, '排队补约', f"{seg_label} 补约异常: {exc}")
             # 异常同样走重试：占位过的段还占着更早的时段，纯排队的段也可能只是抖了一下。
