@@ -19,6 +19,8 @@ from utils.account_config import (
     NOTIFY_MODES,
     RESERVATION_MODES,
     account_config_for_client,
+    CREDENTIAL_INVALID_RESULT,
+    CREDENTIAL_REVERIFIED_RESULT,
     default_account_config,
     validate_time_config,
 )
@@ -413,10 +415,12 @@ def _upsert_verified_account(db, pid: str, password: str) -> None:
                 "web_uid": pid,
                 "vpn_password": _enc(password),
                 "verified": True,
+                # 新密码验证通过，之前累计的「密码被拒」记录一并清掉。
+                "credential_failures": 0,
                 "updated_at": datetime.now(),
             },
             "$setOnInsert": default_account_config(),
-            "$unset": {"lib_password": ""},
+            "$unset": {"lib_password": "", "credential_invalid_at": ""},
         },
         upsert=True,
     )
@@ -647,9 +651,7 @@ def get_my_accounts():
             continue
         seen_pids.add(pid)
         accounts.append(account)
-    for a in accounts:
-        if isinstance(a.get("updated_at"), datetime):
-            a["updated_at"] = a["updated_at"].strftime("%Y-%m-%d %H:%M:%S")
+    accounts = [account_config_for_client(a) for a in accounts]
     return jsonify(accounts), 200
 
 
@@ -668,8 +670,6 @@ def get_my_account(pid):
     # Defense in depth: never serialize credentials even if the DB projection
     # is changed or bypassed in a future refactor.
     cfg = account_config_for_client(cfg)
-    if isinstance(cfg.get("updated_at"), datetime):
-        cfg["updated_at"] = cfg["updated_at"].strftime("%Y-%m-%d %H:%M:%S")
     return jsonify(cfg), 200
 
 
@@ -998,6 +998,11 @@ def verify_account(pid):
     try:
         _cache_identity(db2, pid, vpn_password)
         _upsert_verified_account(db2, pid, vpn_password)
+        # 之前因为密码失效挂在面板上的红字，验证通过就换成恢复提示。
+        db2.user_config_info.update_one(
+            {"pid": pid, "result": CREDENTIAL_INVALID_RESULT},
+            {"$set": {"result": CREDENTIAL_REVERIFIED_RESULT}},
+        )
         _login_as(db2, pid)
         # Cookie 会话之外再回一个令牌：浏览器存不下 Cookie（Safari + 明文 HTTP、
         # 无痕模式、WebView）时，客户端拿它走 Authorization 头照样是登录态。

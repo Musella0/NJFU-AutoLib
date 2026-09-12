@@ -210,6 +210,7 @@ class ArrivalCheckRegistrationTests(unittest.TestCase):
         self, db, user_config, library_system, record_visit
     ):
         user_config.find_one.return_value = {
+            "pid": "12345678",
             "vpn_password": "encrypted-password",
             "verified": True,
         }
@@ -245,6 +246,7 @@ class ArrivalCheckRegistrationTests(unittest.TestCase):
         self, db, user_config, library_system
     ):
         user_config.find_one.return_value = {
+            "pid": "12345678",
             "vpn_password": "encrypted-password",
             "verified": True,
         }

@@ -132,6 +132,7 @@ def _is_credentials_error(message: str) -> bool:
         "登录名或密码不正确",
         "密码错误",
         "密码不正确",
+        "密码有误",
     )
     return any(marker in normalized for marker in credential_markers)
 
@@ -301,13 +302,18 @@ class LibrarySystem(BaseSystem):
             vpn_password: VPN密码
 
         Raises:
-            Exception: VPN登录失败时抛出异常
+            LibraryCredentialsError: 统一身份认证明确返回密码错误
+            Exception: 其他原因导致 VPN 登录失败
         """
         try:
             self.vpn = VPNSystem(self.username, vpn_password)
             self.vpn.session = self.session
 
             if not self.vpn.vpn_login():
+                if self.vpn.credentials_rejected:
+                    # CAS 明确说密码不对：抛带 is_credentials_error 的异常，
+                    # 定时任务据此判断用户是不是改了学校密码，而不是当成网络抽风重试。
+                    raise LibraryCredentialsError(f"VPN登录失败：{self.vpn.last_error}")
                 raise Exception("VPN登录失败")
 
             # 等待VPN连接稳定（0.5秒）

@@ -148,11 +148,27 @@ def default_account_config() -> Dict[str, Any]:
     }
 
 
+# 定时任务连续几次被 CAS 拒绝密码后写进 result 的提示；main.py 在用户重新验证成功时
+# 靠它认出「这条 result 只是密码失效提示」并替换掉，别让红字一直挂到下次抢座。
+CREDENTIAL_INVALID_RESULT = (
+    "🔑 学校统一身份认证密码已失效（可能你刚改过密码），自动预约已暂停。\n"
+    "请到「配置」页重新填写密码并点「验证并保存」，验证通过后自动恢复。"
+)
+CREDENTIAL_REVERIFIED_RESULT = "✅ 新密码验证成功，自动预约已恢复，下个抢座窗口正常执行。"
+
+
 def account_config_for_client(document: Dict[str, Any]) -> Dict[str, Any]:
-    """Return an independent account document with all credentials removed."""
+    """Return an independent account document with all credentials removed.
+
+    Top-level datetimes are rendered as local "YYYY-MM-DD HH:MM:SS" strings so the
+    client never sees Flask's RFC 822 default.
+    """
     public_document = deepcopy(document)
     for field in CLIENT_SENSITIVE_FIELDS:
         public_document.pop(field, None)
+    for key, value in list(public_document.items()):
+        if isinstance(value, datetime):
+            public_document[key] = value.strftime("%Y-%m-%d %H:%M:%S")
     return public_document
 
 

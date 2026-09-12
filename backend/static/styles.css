@@ -191,6 +191,8 @@ body.no-wobble .chip,body.no-wobble .pill{border-radius:999px !important}
   position:relative;
 }
 .box.tight{padding:10px 14px}
+.cred-banner{border-left:5px solid var(--danger);background:var(--danger-soft)}
+.cred-banner .t{margin-top:4px;white-space:pre-wrap}
 .box.pad{padding:18px 20px}
 .box.accent{background:var(--accent-soft);border-color:var(--accent)}
 .box.accent .stamp{color:var(--accent);border-color:var(--accent)}

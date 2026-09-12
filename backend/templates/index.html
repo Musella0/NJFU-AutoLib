@@ -39,6 +39,9 @@
   <!-- =============== PAGE: HOME =============== -->
   <div class="page show" id="page-home">
 
+    <!-- 学校密码失效横幅：定时任务连续被 CAS 拒绝密码后由后端置 verified=false 触发 -->
+    <div class="box tight mb-lg cred-banner" id="cred-banner-home" style="display:none"></div>
+
     <!-- TODAY -->
     <div class="sec-head">
       <div class="t">TODAY</div>
@@ -166,6 +169,8 @@
     </div>
 
     <div id="cfg-form" style="display:none">
+
+      <div class="box tight mb-lg cred-banner" id="cred-banner-config" style="display:none"></div>
 
       <div class="box pad mb-lg">
         <div class="row-between">

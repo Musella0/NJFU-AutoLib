@@ -39,6 +39,21 @@ def log_with_user(level: str, user: str, operation: str, message: str) -> None:
     elif level == 'debug':
         logger.debug(message, extra=extra)
 
+# 统一身份认证明确拒绝密码时的提示语。只认这几种明说「密码」的文案，
+# 账号锁定、需要验证码之类的都不算——那些不是用户改了密码，不能拿去翻 verified。
+CREDENTIAL_REJECTED_MARKERS = (
+    "密码有误",
+    "密码错误",
+    "密码不正确",
+)
+
+
+def is_credentials_rejected_message(message: str) -> bool:
+    """CAS 返回的错误文案是否明确说了「用户名或密码不对」。"""
+    normalized = (message or "").replace(" ", "")
+    return any(marker in normalized for marker in CREDENTIAL_REJECTED_MARKERS)
+
+
 class VPNSystem(BaseSystem):
     def __init__(self, username, password):
         super().__init__(
@@ -47,6 +62,10 @@ class VPNSystem(BaseSystem):
             base_url="https://webvpn.njfu.edu.cn/webvpn/LjIwMS4xNjkuMjE4LjE2OC4xNjc=/LjIxNC4xNTguMTk5LjEwMi4xNjIuMTU5LjIwMi4xNjguMTQ3LjE1MS4xNTYuMTczLjE0OC4xNTMuMTY1/",
             vpn_suffix=""
         )
+        # 上一次 vpn_login() 失败时 CAS 给出的文案；明确是密码被拒时 credentials_rejected 为 True。
+        # vpn_login() 的返回值仍然只是 True/False，调用方想区分「密码错」和「网络抽风」看这两个字段。
+        self.last_error: str = ""
+        self.credentials_rejected: bool = False
 
     def fetch_vpn_initial_page(self, login_url, params):
         """
@@ -131,6 +150,8 @@ class VPNSystem(BaseSystem):
             'rmShown': '1'
         }
 
+        self.last_error = ""
+        self.credentials_rejected = False
         try:
             response = self.session.post(login_url, data=data)
 
@@ -144,7 +165,9 @@ class VPNSystem(BaseSystem):
                     soup = BeautifulSoup(response.text, 'html.parser')
                     error_message = soup.find(class_='errortip') or soup.find(id='msg')
                     if error_message:
-                        log_with_user('error', self.username, 'VPN登录', f"登录错误信息: {error_message.get_text(strip=True)}")
+                        self.last_error = error_message.get_text(strip=True)
+                        self.credentials_rejected = is_credentials_rejected_message(self.last_error)
+                        log_with_user('error', self.username, 'VPN登录', f"登录错误信息: {self.last_error}")
                     else:
                         log_with_user('error', self.username, 'VPN登录', "响应内容中未找到明显的错误信息元素")
                 except Exception as parse_error:

@@ -474,6 +474,7 @@ function renderConfig(){
   $('cfg-pid-label').textContent = cfg.pid;
   $('cfg-verify-badge').textContent = cfg.verified ? '✓ 已验证' : '⚠ 未验证';
   $('cfg-verify-badge').className = 'pill ' + (cfg.verified ? 'ok' : 'warn');
+  renderCredentialBanner('cred-banner-config', false);
 
   $('email-label').textContent = emailLabelText(cfg.notify_email, cfg.notify_mode);
 }
@@ -849,6 +850,9 @@ async function verifyAndSaveCfg(){
   }
   $('cfg-vpn').value = '';
   state.currentCfg.verified = true;
+  delete state.currentCfg.credential_invalid_at;
+  renderCredentialBanner('cred-banner-config', false);
+  renderCredentialBanner('cred-banner-home', true);
   $('cfg-verify-badge').textContent = '✓ 已验证';
   $('cfg-verify-badge').className = 'pill ok';
   await saveCfg({ verified: true });
@@ -1066,7 +1070,26 @@ async function doCancelTomorrow(){
 }
 
 // ---------- home rendering ----------
+// 后端连续几次被学校 CAS 拒绝密码后会把 verified 翻成 false 并记下 credential_invalid_at；
+// 这时小徽章不够醒目，首页和配置页都挂一条红横幅，直到用户重新验证。
+function renderCredentialBanner(elId, withLink){
+  const el = $(elId);
+  if(!el) return;
+  const cfg = state.currentCfg;
+  const invalid = cfg && cfg.verified !== true && cfg.credential_invalid_at;
+  if(!invalid){ el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.style.display = '';
+  el.innerHTML = `
+    <div class="row-flex" style="gap:6px;flex-wrap:wrap">
+      <span class="pill accent">🔑 密码失效</span>
+      <div class="sub" style="font-weight:700">自动预约已暂停</div>
+    </div>
+    <div class="t">学校统一身份认证从 ${escHtml(cfg.credential_invalid_at)} 起连续拒绝了你的密码，多半是你改过密码。${withLink ? '' : '请在下方重新填写新密码并点「验证并保存」，验证通过后自动恢复。'}</div>
+    ${withLink ? `<div class="row-flex mt"><button class="btn sm accent" onclick="go('config')">去重新验证 →</button></div>` : ''}`;
+}
+
 function renderHome(){
+  renderCredentialBanner('cred-banner-home', true);
   const d = new Date();
   $('today-date-label').textContent = `周${WEEK_LABELS[d.getDay()===0?6:d.getDay()-1]} · ${d.getMonth()+1}月${d.getDate()}日`;
   const tmr = new Date(d.getTime() + 86400000);

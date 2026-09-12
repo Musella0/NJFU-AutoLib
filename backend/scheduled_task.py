@@ -50,6 +50,7 @@ from utils.crypto import decrypt as _dec
 from utils import prelogin
 from utils import config
 from utils.reservation_blackout import find_any_reservation_conflict, find_reservation_conflict
+from utils.account_config import CREDENTIAL_INVALID_RESULT
 
 # 日志配置
 def setup_logging() -> logging.Logger:
@@ -146,6 +147,11 @@ _arrival_checks_backfilled = False
 RESERVE_CONCURRENCY = int(os.getenv("RESERVE_CONCURRENCY", "8"))
 # 午休功能总开关，见 main.py 的同名说明。关掉时每日自动午休整个不跑。
 NAP_ENABLED = os.getenv("NAP_ENABLED", "0").strip().lower() not in ("0", "false", "no", "off")
+
+# 统一身份认证连续几次明确返回「密码错误」，才把账号标成未验证并通知用户。
+# 6:50 预登录 + 6:59:30 复查就是两次，所以真改了密码的账号在 7:00 前就会被摘出队列；
+# 要求连续两次是为了防 CAS 偶发一次假阳性就把人家当天的抢座取消掉。
+CREDENTIAL_FAILURE_THRESHOLD = int(os.getenv("CREDENTIAL_FAILURE_THRESHOLD", "2"))
 
 # 图书馆服务端规则 resvRule.earliestResvTime（实测 1860 分钟 = 31 小时）：一个时段
 # 最早只能提前这么久下单，而且是相对「预约开始时间」算的。所以 7:00 那批最远只够得到
@@ -412,6 +418,96 @@ def calculate_reservation_time(res_item: Dict[str, Any]) -> List[Tuple[str, str]
             f"{date_str} {end_time}:00"
         ))
     return result
+
+def _record_credential_success(pid: str) -> None:
+    """登录成功：清掉之前累计的密码错误次数。没累计过的账号一次写都不发生。"""
+    try:
+        user_config_info.update_one(
+            {"pid": pid, "credential_failures": {"$gt": 0}},
+            {"$set": {"credential_failures": 0}},
+        )
+    except Exception as exc:
+        log_with_user(logger, 'warning', pid, '凭据核对', f"清零密码错误计数失败: {exc}")
+
+
+def _record_credential_failure(cfg: Dict[str, Any], exc: Exception) -> None:
+    """
+    统一身份认证明确拒绝了密码：累计一次，连续达到阈值就把账号标成未验证并通知。
+
+    只翻 verified 和 result 这两个系统字段，座位、时段、优先级一概不碰——
+    用户重新验证密码后队列自动恢复，配置原样还在。
+    通知只在 True→False 那一刻发一次；之后到馆复查、迟到保护再撞上同样的错，
+    只记日志，不反复骚扰。
+    """
+    pid = cfg.get("pid", "?")
+    now = datetime.now()
+    try:
+        user_config_info.update_one(
+            {"pid": pid},
+            {"$inc": {"credential_failures": 1}, "$set": {"credential_failed_at": now}},
+        )
+        doc = user_config_info.find_one({"pid": pid}, {"_id": 0, "credential_failures": 1}) or {}
+    except Exception as db_exc:
+        log_with_user(logger, 'warning', pid, '凭据核对', f"记录密码错误次数失败: {db_exc}")
+        return
+    count = int(doc.get("credential_failures") or 0)
+    log_with_user(logger, 'warning', pid, '凭据核对',
+                  f"统一身份认证拒绝密码（连续第 {count} 次，阈值 {CREDENTIAL_FAILURE_THRESHOLD}）: {exc}")
+    if count < CREDENTIAL_FAILURE_THRESHOLD:
+        return
+    try:
+        flipped = user_config_info.update_one(
+            {"pid": pid, "verified": True},
+            {"$set": {
+                "verified": False,
+                "credential_invalid_at": now,
+                "result": CREDENTIAL_INVALID_RESULT,
+                "updated_at": now,
+            }},
+        )
+    except Exception as db_exc:
+        log_with_user(logger, 'warning', pid, '凭据核对', f"标记账号未验证失败: {db_exc}")
+        return
+    if flipped.matched_count == 0:
+        return  # 早就翻过了，别重复通知
+    prelogin.discard(pid)
+    log_with_user(logger, 'error', pid, '凭据失效',
+                  f"连续 {count} 次密码被拒，已标记为未验证并暂停自动预约，等待用户重新验证")
+    notify_user(
+        cfg,
+        "🔑 学校密码已失效，自动预约已暂停",
+        f"学号 {pid}\n"
+        f"统一身份认证连续 {count} 次返回「密码错误」，多半是你刚改过学校密码。\n"
+        f"自动预约已暂停；请打开 AutoLib 的「配置」页，重新填写新密码并点「验证并保存」，"
+        f"验证通过后会自动恢复。\n最近一次错误：{exc}",
+        always=True,
+    )
+
+
+def login_library(cfg: Dict[str, Any], vpn_password: Optional[str] = None) -> LibrarySystem:
+    """
+    定时任务里所有「拿账号密码登一次图书馆」都走这里。
+
+    除了建会话之外只多做一件事：登录结果喂给密码失效判定——
+    成功就清零计数，被 CAS 明确拒绝密码就累计一次（见 _record_credential_failure）。
+    其他异常（超时、网关 5xx）原样抛出，不计数。
+    """
+    pid = cfg["pid"]
+    if vpn_password is None:
+        vpn_password = _dec(cfg["vpn_password"])
+    try:
+        library = LibrarySystem(
+            username=pid,
+            password=vpn_password,
+            vpn_password=vpn_password,
+        )
+    except Exception as exc:
+        if getattr(exc, "is_credentials_error", False):
+            _record_credential_failure(cfg, exc)
+        raise
+    _record_credential_success(pid)
+    return library
+
 
 def update_user_config(pid: str, result: str) -> None:
     """
@@ -840,12 +936,7 @@ def process_due_segments(now: Optional[datetime] = None) -> None:
             # 省掉每分钟一次完整的 webvpn + CAS；没有或已失效才现场登录。
             library = prelogin.take(pid)
             if library is None:
-                vpn_password = _dec(cfg["vpn_password"])
-                library = LibrarySystem(
-                    username=pid,
-                    password=vpn_password,
-                    vpn_password=vpn_password
-                )
+                library = login_library(cfg)
             hold = doc.get("hold") or {}
             if hold:
                 # 7:00 已经拿一张更早开始的预约把座位占住了，这里做的是「换」不是「抢」：
@@ -1033,11 +1124,7 @@ def _ensure_library(plan: _UserPlan) -> LibrarySystem:
             log_with_user(logger, 'info', pid, '系统初始化', "复用预登录会话")
         else:
             log_with_user(logger, 'info', pid, '系统初始化', "开始初始化图书馆系统")
-            library = LibrarySystem(
-                username=pid,
-                password=plan.vpn_password,
-                vpn_password=plan.vpn_password
-            )
+            library = login_library(plan.cfg, plan.vpn_password)
     except Exception as exc:
         plan.login_error = f"登录失败: {exc}"
         raise
@@ -1217,12 +1304,7 @@ def _prelogin_one(res_item: Dict[str, Any]) -> None:
     """
     pid = res_item["pid"]
     try:
-        vpn_password = _dec(res_item["vpn_password"])
-        library = LibrarySystem(
-            username=pid,
-            password=vpn_password,
-            vpn_password=vpn_password
-        )
+        library = login_library(res_item)
         prelogin.store(pid, library)
         log_with_user(logger, 'info', pid, '预登录', "预登录成功，会话已就绪")
     except Exception as exc:
@@ -1471,7 +1553,8 @@ def check_arrival_after_grace(
         return
 
     user = user_config_info.find_one(
-        {"pid": pid}, {"vpn_password": 1, "verified": 1}
+        {"pid": pid},
+        {"pid": 1, "vpn_password": 1, "verified": 1, "notify_email": 1, "notify_mode": 1},
     )
     if not user or not user.get("vpn_password"):
         db.visit_logs.delete_one({"uuid": uuid})
@@ -1480,11 +1563,7 @@ def check_arrival_after_grace(
         return
 
     try:
-        library = LibrarySystem(
-            username=pid,
-            password=_dec(user["vpn_password"]),
-            vpn_password=_dec(user["vpn_password"]),
-        )
+        library = login_library(user)
         reservations, message = library.get_reservation_info()
         if reservations is None:
             raise RuntimeError(message or "图书馆预约查询失败")
@@ -1663,11 +1742,7 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
             log_with_user(logger, 'info', pid, '闭馆保护', _blackout_message(conflict))
             return
 
-        library = LibrarySystem(
-            username=user["pid"],
-            password=_dec(user["vpn_password"]),
-            vpn_password=_dec(user["vpn_password"])
-        )
+        library = login_library(user)
 
         # 检查这条预约的实时状态，决定要不要保护。
         # 只有 1027（待签到）才继续往下取消重约；其余一律保守跳过：
@@ -1903,13 +1978,7 @@ def auto_nap_action(pid: str) -> None:
             log_with_user(logger, 'info', pid, '闭馆保护', _blackout_message(conflict))
             return
 
-        vpn_password = _dec(cfg["vpn_password"])
-
-        library = LibrarySystem(
-            username=pid,
-            password=vpn_password,
-            vpn_password=vpn_password,
-        )
+        library = login_library(cfg)
 
         reservations, _ = library.get_reservation_info()
         if not reservations:
@@ -2008,7 +2077,7 @@ def scan_and_record_visits() -> None:
     try:
         users = list(user_config_info.find(
             {"owned_seat": {"$exists": True, "$ne": {}}, "verified": True},
-            {"pid": 1, "vpn_password": 1, "owned_seat": 1}
+            {"pid": 1, "vpn_password": 1, "owned_seat": 1, "notify_email": 1, "notify_mode": 1}
         ))
     except Exception as e:
         log_with_user(logger, 'error', '系统', '道馆统计', f"查询用户列表异常: {str(e)}")
@@ -2024,11 +2093,7 @@ def scan_and_record_visits() -> None:
         ):
             continue
         try:
-            library = LibrarySystem(
-                username=pid,
-                password=_dec(user["vpn_password"]),
-                vpn_password=_dec(user["vpn_password"])
-            )
+            library = login_library(user)
             res_list, _ = library.get_reservation_info()
             if not res_list:
                 continue
