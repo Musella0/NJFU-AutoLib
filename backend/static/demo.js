@@ -230,10 +230,21 @@
         const ramp = m < 450 ? 0 : m < 600 ? (m - 450) / 150 : m >= 1260 ? 0.9 : 1;
         occupied.push(Math.round(post * ramp));
       }
+      // 探针：开闸后前 10 秒抢走大头，之后一整天慢慢涨到 post 的两倍多
+      const fill = [];
+      const hhmmss = sec => { const t = 7 * 3600 + sec; return `${String(Math.floor(t/3600)).padStart(2,'0')}:${String(Math.floor(t%3600/60)).padStart(2,'0')}:${String(t%60).padStart(2,'0')}`; };
+      [-10, 1, 5, 10, 60, 300, 900].forEach(sec => {
+        const ramp = sec < 0 ? 0 : sec <= 10 ? 0.35 + sec * 0.03 : sec <= 60 ? 0.7 : sec <= 300 ? 0.95 : 1.1;
+        fill.push({ offset: sec, at: hhmmss(Math.max(0, sec)), booked: Math.round(post * ramp), rooms: 12 });
+      });
+      for (let sec = 1800; sec <= 15 * 3600; sec += 1800) {
+        fill.push({ offset: sec, at: hhmmss(sec), booked: Math.min(total, Math.round(post * (1.15 + sec / 15 / 3600 * 1.2))), rooms: 12 });
+      }
       days.push({
         date: dateKey(d), weekday: isoOf(d), seats_total: total,
         booked: { pre: 0, rush, post },
         curve: { from: 420, step: 30, occupied },
+        fill,
         rooms: roomRows,
         captured_at: `${dateKey(offsetDate(-i - 1))} 07:05`,
         generated_at: `${dateKey(offsetDate(-i - 1))} 07:10`,

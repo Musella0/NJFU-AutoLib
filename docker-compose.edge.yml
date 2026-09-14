@@ -30,6 +30,30 @@ services:
       - caddy_data:/data
       - caddy_config:/config
 
+  # 开闸那一刻钟的秒级占用采样（utils/seat_rush_probe.py）。7:00 这台闲着，
+  # 而且和抢座不同机不同出口，12 路并发也不会跟下单抢带宽。07:30 之后每半小时
+  # 那张由 backend 的 scheduler 补，这边白天不发请求。
+  # 结果穿隧道直接写 backend 的 mongo（见 docker-compose.backend.yml）。
+  probe:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        APT_MIRROR: ${APT_MIRROR:-}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+    container_name: autolib-probe
+    restart: unless-stopped
+    command: python -m utils.seat_rush_probe --daily --every 0
+    environment:
+      - DB_IP=${PROBE_DB_IP:?edge 模式必须指定隧道对面的 mongo，例如 PROBE_DB_IP=10.8.0.2:27017}
+      - MONGO_USER=${MONGO_USER:-autolib}
+      - MONGO_PASS=${MONGO_PASS:-autolib123}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
+      - SEAT_SNAPSHOT_PID=${SEAT_SNAPSHOT_PID:-}
+      - LOG_FILE=logs/auto_lib.log
+      - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
+
 volumes:
   # 与 docker-compose.yml 同名。配合 -p autolib 复用现网那两个卷，
   # 已签发的证书和 OCSP 缓存原地保留。

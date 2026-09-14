@@ -3235,6 +3235,13 @@ function occDateLabel(day, withWeekday){
 function occMinuteLabel(m){
   return `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}`;
 }
+// 探针采样点：开闸后的秒数 → 「7:00前 / +1s / +5m / 8:30」这样的短标签
+function occFillLabel(offset){
+  if(offset < 0) return '7:00前';
+  if(offset < 60) return `+${offset}s`;
+  if(offset < 1800) return `+${Math.round(offset / 60)}m`;
+  return occMinuteLabel(7 * 60 + Math.round(offset / 60));
+}
 
 async function loadOccupancy(){
   const card = $('occupancy-card');
@@ -3358,6 +3365,12 @@ function renderOccupancyDay(day){
   const rooms = (day.rooms || []).slice().sort((a, b) => (b.booked / (b.seats || 1)) - (a.booked / (a.seats || 1)));
   const curve = day.curve || {};
   const occupied = curve.occupied || [];
+  // 探针的填充曲线：横轴是查询时刻，不是使用时段。开闸那一刻钟按秒/分钟，
+  // 点与点之间不等距，和白天每半小时那段分开画，免得前 15 分钟被压成一条竖线。
+  const fill = Array.isArray(day.fill) ? day.fill : [];
+  const rushFill = fill.filter(f => f.offset <= 900);
+  const dayFill = fill.filter(f => f.offset >= 1800);
+  const fillPct = f => day.seats_total ? f.booked / day.seats_total * 100 : 0;
   const slotLabels = occupied.map((_, i) => occMinuteLabel((curve.from || 420) + i * (curve.step || 30)));
   box.innerHTML = `
     <div class="row-between">
@@ -3369,6 +3382,12 @@ function renderOccupancyDay(day){
     </div>
     <div class="tiny" style="margin-top:10px">这天从早到晚每个时段有多少座位被约（按 07:05 那批预约算）</div>
     <div class="occ-chart sm" id="occ-curve"></div>
+    ${rushFill.length ? `
+    <div class="tiny" style="margin-top:10px">开闸那一刻钟：第几秒被抢走多少</div>
+    <div class="occ-chart sm" id="occ-fill-rush"></div>` : ''}
+    ${dayFill.length ? `
+    <div class="tiny" style="margin-top:10px">前一天从早到晚每半小时查一次，这块板子是几点被填满的</div>
+    <div class="occ-chart sm" id="occ-fill-day"></div>` : ''}
     <div class="tiny" style="margin-top:8px">各区域 07:05 已约占比</div>
     <div class="occ-rooms">
       ${rooms.map(r => {
@@ -3389,6 +3408,26 @@ function renderOccupancyDay(day){
     tooltipTitle: i => `${slotLabels[i]} 起半小时`,
     tooltipExtra: i => `${occupied[i]} 张`,
   });
+  if(rushFill.length){
+    drawLineChart($('occ-fill-rush'), {
+      labels: rushFill.map(f => occFillLabel(f.offset)),
+      series: [{ name: '已约', color: 'var(--tmr)', area: true, values: rushFill.map(fillPct) }],
+      height: 120,
+      xEvery: 1,
+      tooltipTitle: i => `${occFillLabel(rushFill[i].offset)}${rushFill[i].at ? ' · ' + rushFill[i].at : ''}`,
+      tooltipExtra: i => `${rushFill[i].booked} 张${rushFill[i].rooms < 12 ? '（区域没拍全）' : ''}`,
+    });
+  }
+  if(dayFill.length){
+    drawLineChart($('occ-fill-day'), {
+      labels: dayFill.map(f => occFillLabel(f.offset)),
+      series: [{ name: '已约', color: 'var(--tmr)', area: true, values: dayFill.map(fillPct) }],
+      height: 120,
+      xEvery: 4,
+      tooltipTitle: i => `${occFillLabel(dayFill[i].offset)} 查到`,
+      tooltipExtra: i => `${dayFill[i].booked} 张${dayFill[i].rooms < 12 ? '（区域没拍全）' : ''}`,
+    });
+  }
 }
 
 function renderOccupancyTable(days){

@@ -7,7 +7,12 @@ seat_snapshots 里一天一个 tag 存 12 条区域文档、2700 多张座位的
 
     booked   pre / rush / post 三张各自已约的座位数（配上 seats_total 就是百分比）
     curve    post 那张按半小时切片，每个时段有多少座位被约——一天从早到晚的形状
+    fill     探针（seat_rush_probe）各采样时刻全馆已约数：开闸后第 1/5/10 秒、
+             1/5/15 分钟，再每半小时到闭馆——板子是几点被填满的
     rooms    各区域座位数和 rush / post 已约数
+
+curve 和 fill 是两个正交的维度：curve 横轴是「明天几点到几点」（使用时段），
+fill 横轴是「今天几点查的」（查询时刻）。
 
 一天一条，按 date 唯一。重跑同一天是覆盖，不会攒重复；旧的日子永远不动，
 所以折线往前能一直翻。
@@ -15,6 +20,7 @@ seat_snapshots 里一天一个 tag 存 12 条区域文档、2700 多张座位的
 跑的时机是 07:10（SEAT_OCCUPANCY_STATS_DELAY_MINUTES），跟在 07:05 那张 post
 后面——它不再访问图书馆，只读库，晚几分钟跑也没关系。调度器启动时也会先跑
 一次，把库里有快照但还没汇总的日子补齐，第一次部署不用手工回填。
+探针每拍一张也会重算一遍当天，fill 就是这样一整天慢慢长出来的。
 
 用法
 ----
@@ -50,6 +56,9 @@ CURVE_STEP = 30
 
 TAGS = (PRE_TAG, RUSH_TAG, POST_TAG)
 
+# 探针的 tag：probe-10s / probe+1s / probe+1800s …，见 utils/seat_rush_probe.py
+FILL_TAG_PREFIX = "probe"
+
 
 def ensure_indexes(db) -> None:
     db[STATS_COLLECTION].create_index([("date", ASCENDING)], name="date", unique=True)
@@ -78,6 +87,40 @@ def _curve(docs: Sequence[Dict[str, Any]]) -> List[int]:
                 if _slot_occupied(intervals, begin, begin + CURVE_STEP):
                     counts[index] += 1
     return counts
+
+
+def _fill_offset(tag: str) -> Optional[int]:
+    try:
+        return int(tag[len(FILL_TAG_PREFIX):].rstrip("s"))
+    except ValueError:
+        return None
+
+
+def _fill(db, day_str: str) -> List[Dict[str, Any]]:
+    """探针各采样点的全馆已约数，按开闸后的秒数排序。区域没拍全的也带上 rooms 数。"""
+    by_tag: Dict[str, Dict[str, Any]] = {}
+    cursor = db[SNAPSHOT_COLLECTION].find(
+        {"date": day_str, "tag": {"$regex": f"^{FILL_TAG_PREFIX}[+-]"}},
+        {"tag": 1, "captured_at": 1, "stats.booked_seats": 1},
+    )
+    for doc in cursor:
+        offset = _fill_offset(doc["tag"])
+        if offset is None:
+            continue
+        item = by_tag.setdefault(doc["tag"], {
+            "offset": offset, "at": doc.get("captured_at"), "booked": 0, "rooms": 0})
+        item["booked"] += int((doc.get("stats") or {}).get("booked_seats") or 0)
+        item["rooms"] += 1
+    out = []
+    for item in sorted(by_tag.values(), key=lambda x: x["offset"]):
+        at = item["at"]
+        out.append({
+            "offset": item["offset"],
+            "at": at.strftime("%H:%M:%S") if isinstance(at, datetime) else None,
+            "booked": item["booked"],
+            "rooms": item["rooms"],
+        })
+    return out
 
 
 def summarize_day(db, day: date_cls) -> Optional[Dict[str, Any]]:
@@ -117,6 +160,7 @@ def summarize_day(db, day: date_cls) -> Optional[Dict[str, Any]]:
         "seats_total": sum(r["seats"] for r in rooms),
         "booked": booked,
         "curve": {"from": CURVE_FROM, "step": CURVE_STEP, "occupied": _curve(post_docs)},
+        "fill": _fill(db, day_str),
         "rooms": rooms,
         "captured_at": post_docs[0].get("captured_at"),
         "generated_at": datetime.now(),

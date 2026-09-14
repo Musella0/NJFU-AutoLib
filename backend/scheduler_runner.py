@@ -125,6 +125,22 @@ def run_occupancy_stats_task():
         logger.error(f"预约概况汇总异常: {e}", exc_info=True)
 
 
+def run_seat_fill_task(hour, minute):
+    """07:30 起每半小时补一张全馆占用（tag=probe+Ns），看明天的板子一天里怎么被填满。
+
+    开闸那一刻钟的秒级采样在 edge 上跑（utils/seat_rush_probe.py），这里只管
+    之后不着急的部分：一个区域一个区域慢慢拉，跟每日三张一样。观测会话
+    跨次复用，失效才重登。闭馆后（22:00，周五 20:00）fill_sample 自己会返回 None。
+    """
+    try:
+        from utils.seat_rush_probe import fill_sample
+        now = datetime.now()
+        open_at = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        fill_sample(open_at, now)
+    except Exception as e:
+        logger.error(f"占用填充采样异常: {e}", exc_info=True)
+
+
 def run_study_time_sync():
     """闭馆后把当天勾了同意的用户的到馆记录换成真实在馆时长。
 
@@ -377,6 +393,21 @@ def main():
             max_instances=1,
             # 晚半小时拍也还有用（抢座早结束了），再晚就没必要补了。
             misfire_grace_time=1800,
+            replace_existing=True
+        )
+        # 07:30 起每半小时一张，到 22:00（周五 20:00，fill_sample 里判）。
+        # 整点/半点都注册，早于 07:30 或晚于闭馆的由 fill_sample 自己跳过。
+        scheduler.add_job(
+            run_seat_fill_task,
+            'cron',
+            hour='7-22',
+            minute='0,30',
+            id='seat_fill_probe',
+            args=[hour, minute],
+            coalesce=True,
+            max_instances=1,
+            # 晚几分钟拍也还归到同一个半小时点；再晚就等下一个
+            misfire_grace_time=600,
             replace_existing=True
         )
         scheduler.add_job(

@@ -1,0 +1,16 @@
+# ============================================================================
+# backend（宿迁）—— 叠在 docker-compose.yml 上的分机部署补丁
+#
+# 只做一件事：把 mongo 绑到 WireGuard 隧道地址上，让 edge 上的探针
+# （utils/seat_rush_probe.py，开闸那一刻钟的秒级采样）能把结果直接写进线上库。
+# 隧道是点对点私网，mongo 本身有账号密码，不绑 0.0.0.0。
+#
+# 用法：backend 的 .env 里写一行，之后 `docker compose up -d` 照旧：
+#     COMPOSE_FILE=docker-compose.yml:docker-compose.backend.yml
+#     MONGO_BIND=10.8.0.2
+# 单机部署不用碰这个文件，mongo 仍然不暴露任何端口。
+# ============================================================================
+services:
+  mongo:
+    ports:
+      - "${MONGO_BIND:?分机部署必须指定 mongo 绑定的隧道地址，例如 MONGO_BIND=10.8.0.2}:27017:27017"

@@ -286,3 +286,24 @@ docker compose up -d
 - `TRUSTED_PROXY_COUNT` **不用改**：链路仍是 CF → Caddy → flask-api 三段，
   Caddy 只是换了上游地址，没有多加一层。
 - 隧道断了只有用户会告诉你。edge 上挂个一分钟一次的 curl 检查，成本很低。
+
+### 占用探针（edge 上唯一一个业务进程）
+
+`utils/seat_rush_probe.py`：7:00 开闸那一刻钟按秒采样全馆占用（-10s / +1s / +5s /
++10s / +1m / +5m / +15m），每张 12 个区域并发拉。放在 edge 是因为它 7:00 闲着，
+而且和抢座不同机不同出口，并发再多也不会跟下单抢带宽。07:30 起每半小时那张
+由 backend 的 scheduler 补（`run_seat_fill_task`），白天 edge 不再发请求。
+
+结果穿隧道直接写 backend 的 mongo，所以 backend 要把 mongo 绑到隧道地址：
+
+```bash
+# backend 的 .env 加两行，之后 docker compose up -d 照旧
+COMPOSE_FILE=docker-compose.yml:docker-compose.backend.yml
+MONGO_BIND=10.8.0.2
+# edge 的 .env 加一行，probe 服务随 Caddy 一起起
+PROBE_DB_IP=10.8.0.2:27017
+```
+
+edge 上 `docker compose -p autolib -f docker-compose.edge.yml up -d --build probe`。
+镜像和 backend 同一个 Dockerfile，`.env` 里的 `MONGO_USER/PASS`、`ENCRYPTION_KEY`、
+`SEAT_SNAPSHOT_PID` 两边必须一致（本来就是同一份）。
