@@ -2017,6 +2017,22 @@ def admin_update_announcement(ann_id):
     return jsonify(_serialize_announcement(doc)), 200
 
 
+def _purge_reactions(db, ann_id):
+    """公告没了，它下面的表情计数也跟着走。
+
+    不清的话 reactions / reaction_users 会留下一堆认不出是谁的孤儿行：前台看不见
+    （_visible_announcement_ids 会把它们滤掉），但后台看板的 by_announcement 里会
+    一直挂着一条没有标题的记录，而且再没有任何入口能删掉它——公告都不在了，
+    删除接口也就够不着这些行了。所以只能在删公告的同一步里清掉。
+
+    Returns:
+        Tuple[int, int]: (清掉的计数行, 清掉的参与人行)
+    """
+    totals = db.reactions.delete_many({"ann_id": ann_id}).deleted_count
+    users = db.reaction_users.delete_many({"ann_id": ann_id}).deleted_count
+    return totals, users
+
+
 @app.route("/api/admin/announcements/<ann_id>", methods=["DELETE"])
 @admin_required
 def admin_delete_announcement(ann_id):
@@ -2025,11 +2041,20 @@ def admin_delete_announcement(ann_id):
     except (InvalidId, TypeError):
         return jsonify({"error": "无效的公告 ID"}), 400
     client, db = get_db()
-    result = db.announcements.delete_one({"_id": oid})
-    client.close()
-    if result.deleted_count:
-        return jsonify({"message": "已删除"}), 200
-    return jsonify({"error": "公告不存在"}), 404
+    try:
+        result = db.announcements.delete_one({"_id": oid})
+        if not result.deleted_count:
+            return jsonify({"error": "公告不存在"}), 404
+        # 用 str(oid) 而不是 URL 里那串原文：ObjectId() 连大写十六进制也认，
+        # 而 reactions 里存的是前端拿到的标准小写形式，照原文删会一行都匹配不上。
+        totals, users = _purge_reactions(db, str(oid))
+    finally:
+        client.close()
+    return jsonify({
+        "message": "已删除",
+        "removed_reactions": totals,
+        "removed_reaction_users": users,
+    }), 200
 
 
 HEATMAP_DAYS = 371  # 53 周，正好铺满一整年的热力图
