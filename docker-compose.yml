@@ -27,6 +27,18 @@ services:
         PIP_INDEX_URL: ${PIP_INDEX_URL:-}
     container_name: autolib-api
     restart: unless-stopped
+    # 不用 python main.py：Werkzeug 开发服务器每个响应都带 Connection: close，Caddy 的
+    # keepalive 连接池形同虚设。分机部署时每个 API 请求都要跨境重新握手，隧道 RTT 240ms
+    # 就是每次白付 0.5s，SYN 一丢就是 1.2s 或 502（09-15 实测）。gunicorn 长连接后一条
+    # 连接反复用，每请求只剩单程往返，SYN 丢包也影响不到已建立的连接。
+    # 单 worker 多线程：flask-limiter 用的是进程内存，多 worker 会各限各的。
+    # 后端 keep-alive 要比 Caddyfile 里的 keepalive 5m 长，让 Caddy 先关，不会拿到半死连接。
+    command: >
+      gunicorn main:app
+      --bind 0.0.0.0:5004
+      --workers 1 --threads 8 --worker-class gthread
+      --keep-alive 330 --timeout 180
+      --access-logfile - --error-logfile -
     depends_on:
       mongo:
         condition: service_healthy

@@ -1,4 +1,7 @@
 flask
+# API 进程的 WSGI 服务器。Werkzeug 自带的开发服务器每个响应都 Connection: close，
+# 分机部署时 Caddy 穿隧道过来的每个请求都得重新握手（见 docker-compose.yml flask-api.command）
+gunicorn
 pycryptodome
 cryptography
 flask-limiter
