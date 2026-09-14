@@ -4,7 +4,7 @@ import secrets
 import time
 from functools import wraps
 from threading import Lock
-from flask import Flask, g, render_template, jsonify, request, session
+from flask import Flask, Response, g, render_template, jsonify, request, session
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -38,6 +38,7 @@ from utils.admin_credentials import (
 )
 from utils.crypto import encrypt as _enc, decrypt as _dec
 from utils.student_id import parse_student_id
+from utils import study_time
 from utils.notify import queue_email, send_email
 from utils.reservation_blackout import (
     BEIJING_TZ,
@@ -783,6 +784,145 @@ def cancel_account_reservation(pid):
         return jsonify({"success": success, "message": message}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/my/accounts/<pid>/credit", methods=["GET"])
+@own_account_required
+def get_account_credit(pid):
+    """用户在设置页主动点「查信用分」才查，没有任何定时任务会碰这两个接口。"""
+    cfg = _get_decrypted_cfg(pid)
+    if not cfg or not cfg.get("vpn_password"):
+        return jsonify({"error": "请先保存统一身份认证密码"}), 400
+
+    try:
+        from utils.library_system import LibrarySystem
+        library = LibrarySystem(
+            username=pid,
+            password=cfg["vpn_password"],
+            vpn_password=cfg["vpn_password"]
+        )
+        summary, message = library.get_credit_summary()
+        if summary is None:
+            return jsonify({"error": message}), 502
+        records, _, count = library.get_credit_records(page=1, page_num=20)
+        return jsonify({
+            "score": summary.get("score"),
+            "total": summary.get("total"),
+            "records": [
+                {**r, "created_at": r["created_at"].strftime("%Y-%m-%d %H:%M")
+                 if r.get("created_at") else ""}
+                for r in (records or [])
+            ],
+            "count": count,
+            "queried_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/my/accounts/<pid>/study_time_consent", methods=["POST"])
+@own_account_required
+def set_study_time_consent(pid):
+    """开/关「真实在馆时长」。
+
+    开：之后每晚会拉这个用户的签到/暂离/返回/结束流水，存进 visit_logs，只有本人可见。
+    关：已采集的记录按 keep 处理——
+        delete  全部删掉（不可恢复，前端在这之前给过导出的机会）
+        blur    只留半小时粒度的起止和总时长，暂离细节删掉
+        keep    原样保留，只是不再采集新的
+    """
+    body = request.get_json(silent=True) or {}
+    enabled = str(body.get("enabled", "")).strip().lower() == "true"
+    keep = str(body.get("keep") or "keep").strip().lower()
+    if not enabled and keep not in ("delete", "blur", "keep"):
+        return jsonify({"error": "keep 只能是 delete / blur / keep"}), 400
+
+    client, db = get_db()
+    try:
+        if not db.user_config_info.find_one(_account_filter(pid), {"_id": 1}):
+            return jsonify({"error": "账号不存在"}), 404
+        if enabled:
+            db.user_config_info.update_one(
+                _account_filter(pid),
+                {"$set": {study_time.CONSENT_FIELD: True,
+                          study_time.CONSENT_AT_FIELD: datetime.now()}},
+            )
+            return jsonify({"enabled": True, "message": "已开启，今晚起按真实在馆时长统计"}), 200
+
+        db.user_config_info.update_one(
+            _account_filter(pid),
+            {"$set": {study_time.CONSENT_FIELD: False},
+             "$unset": {study_time.CONSENT_AT_FIELD: ""}},
+        )
+        if keep == "delete":
+            n = study_time.clear_user_details(db, pid)
+            message = f"已关闭，删除了 {n} 条采集明细"
+        elif keep == "blur":
+            n = study_time.blur_user_details(db, pid)
+            message = f"已关闭，{n} 条记录已降为半小时粒度"
+        else:
+            n = 0
+            message = "已关闭，已有记录原样保留"
+        return jsonify({"enabled": False, "keep": keep, "affected": n, "message": message}), 200
+    finally:
+        client.close()
+
+
+@app.route("/api/my/accounts/<pid>/study_time_sync", methods=["POST"])
+@limiter.limit("3 per 10 minutes")
+@own_account_required
+def manual_study_time_sync(pid):
+    """用户手动触发一次同步：只补自己还没折算的记录，已经算过的不会重算或累加。"""
+    client, db = get_db()
+    try:
+        account = db.user_config_info.find_one(
+            _account_filter(pid), {study_time.CONSENT_FIELD: 1})
+    finally:
+        client.close()
+    if not account or not account.get(study_time.CONSENT_FIELD):
+        return jsonify({"error": "请先开启「真实在馆时长」"}), 400
+    try:
+        from scheduled_task import sync_actual_study_time
+        result = sync_actual_study_time(pid=pid)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    if result["pending"] == 0:
+        message = "没有待同步的记录"
+    else:
+        parts = [f"新写入 {result['synced']} 条"]
+        if result["open"]:
+            parts.append(f"{result['open']} 条还没结束，等结束后再算")
+        if result["failed"]:
+            parts.append(f"{result['failed']} 条查询失败，稍后会自动重试")
+        message = "，".join(parts)
+    return jsonify({**result, "message": message}), 200
+
+
+@app.route("/api/my/study_time/export", methods=["GET"])
+@login_required
+def export_study_time():
+    """把自己的在馆明细导成 CSV（带 BOM，Excel / WPS 直接双击能打开，中文不乱码）。"""
+    import csv
+    import io
+
+    uid = current_uid()
+    client, db = get_db()
+    try:
+        rows = study_time.export_rows(db, uid)
+    finally:
+        client.close()
+    buf = io.StringIO()
+    fields = ["日期", "座位", "区域", "预约开始", "预约结束", "预约时长(分钟)",
+              "签到", "结束", "离座(分钟)", "在馆(分钟)", "精度", "操作流水"]
+    writer = csv.DictWriter(buf, fieldnames=fields)
+    writer.writeheader()
+    writer.writerows(rows)
+    filename = f"autolib-study-time-{datetime.now():%Y%m%d}.csv"
+    return Response(
+        "\ufeff" + buf.getvalue(),
+        mimetype="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 # 午休功能总开关。图书馆没有给我们「离馆」接口，已刷卡入座的预约删不掉，
@@ -2089,6 +2229,11 @@ def admin_delete_announcement(ann_id):
 HEATMAP_DAYS = 371  # 53 周，正好铺满一整年的热力图
 
 
+# 分钟数取哪个字段：有真实在馆时长就用它（只有用户同意采集过才会有，关掉开关时
+# 选「保留 / 模糊保留」留下的也算数），没有的（当天、老记录没 resv_id、被删掉的）退回预约时长
+MINUTES_EXPR = {"$ifNull": ["$actual_minutes", {"$ifNull": ["$planned_duration_minutes", 0]}]}
+
+
 def _visit_totals(db, match):
     """聚合出次数和分钟数。放在数据库端算，避免把全部日志拉进内存。"""
     rows = list(db.visit_logs.aggregate([
@@ -2096,7 +2241,7 @@ def _visit_totals(db, match):
         {"$group": {
             "_id": None,
             "visits": {"$sum": 1},
-            "minutes": {"$sum": {"$ifNull": ["$planned_duration_minutes", 0]}},
+            "minutes": {"$sum": MINUTES_EXPR},
         }},
     ]))
     if not rows:
@@ -2109,11 +2254,15 @@ def _visit_totals(db, match):
 def my_visit_stats():
     uid = current_uid()
     client, db = get_db()
-    if not db.user_config_info.find_one(_account_filter(uid), {"_id": 1}):
+    account = db.user_config_info.find_one(
+        _account_filter(uid), {"_id": 1, study_time.CONSENT_FIELD: 1})
+    if not account:
         client.close()
         return jsonify({"total_visits": 0, "total_minutes": 0,
                         "this_week_visits": 0, "this_week_minutes": 0,
-                        "recent": [], "daily": [], "heatmap_days": HEATMAP_DAYS}), 200
+                        "recent": [], "daily": [], "heatmap_days": HEATMAP_DAYS,
+                        "real_time": False}), 200
+    real_time = bool(account.get(study_time.CONSENT_FIELD))
 
     now = datetime.now()
     week_start = (now - timedelta(days=now.weekday())).replace(
@@ -2144,7 +2293,7 @@ def my_visit_stats():
             {"$group": {
                 "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$planned_begin"}},
                 "visits": {"$sum": 1},
-                "minutes": {"$sum": {"$ifNull": ["$planned_duration_minutes", 0]}},
+                "minutes": {"$sum": MINUTES_EXPR},
             }},
             {"$sort": {"_id": 1}},
         ])
@@ -2154,14 +2303,17 @@ def my_visit_stats():
     for l in db.visit_logs.find(
         owned,
         {"_id": 0, "seat_name": 1, "location": 1,
-         "planned_begin": 1, "planned_duration_minutes": 1},
+         "planned_begin": 1, "planned_duration_minutes": 1, "actual_minutes": 1},
     ).sort("planned_begin", DESCENDING).limit(10):
         pb = l.get("planned_begin")
+        is_actual = l.get("actual_minutes") is not None
         recent.append({
             "date": pb.strftime("%Y-%m-%d") if isinstance(pb, datetime) else str(pb)[:10],
             "seat_name": l.get("seat_name", ""),
             "location": l.get("location", ""),
-            "duration_minutes": l.get("planned_duration_minutes", 0),
+            "duration_minutes": (l.get("actual_minutes") if is_actual
+                                 else l.get("planned_duration_minutes", 0)),
+            "actual": is_actual,
         })
 
     client.close()
@@ -2173,6 +2325,7 @@ def my_visit_stats():
         "recent": recent,
         "daily": daily,
         "heatmap_days": HEATMAP_DAYS,
+        "real_time": real_time,
     }), 200
 
 

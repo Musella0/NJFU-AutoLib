@@ -282,6 +282,34 @@
           <button class="btn sm" onclick="openSheet('accounts')">切换学号</button>
         </div>
       </div>
+      <!-- 只在点的时候去图书馆查一次，没有任何定时任务会自动查；结果就展开在按钮下面 -->
+      <div class="toggle-row" style="border:0;padding-bottom:0;margin-top:8px">
+        <div class="info">
+          <div class="t1">图书馆信用分</div>
+          <div class="t2" id="credit-label">当前分数和扣分记录，点了才查</div>
+        </div>
+        <button class="btn sm" id="credit-btn" onclick="queryCredit()">查询</button>
+      </div>
+      <div id="credit-box" style="display:none;margin-top:8px"></div>
+    </div>
+
+    <div class="box pad mb-lg">
+      <div class="label" style="margin-bottom:4px">学习记录</div>
+      <div class="toggle-row">
+        <div class="info">
+          <div class="t1">真实在馆时长</div>
+          <div class="t2">按签到 / 暂离 / 返回记录统计实际在座时间。<a href="#" onclick="openSheet('study-time-info');return false" style="color:var(--accent)">说明</a></div>
+        </div>
+        <div class="toggle" id="cfg-toggle-study" onclick="toggleStudyTime(this,event)"></div>
+      </div>
+      <!-- 只在开关打开时显示：补齐还没折算的记录，已经算过的不会重算 -->
+      <div class="toggle-row" id="study-sync-row" style="cursor:pointer;display:none" onclick="syncStudyTimeNow()">
+        <div class="info">
+          <div class="t1">立即同步</div>
+          <div class="t2" id="study-sync-label">每晚 22:10 自动同步；没结束的预约会等结束后再算</div>
+        </div>
+        <div class="sub" style="color:var(--ink3)">同步 ›</div>
+      </div>
     </div>
 
     <div class="box pad mb-lg">

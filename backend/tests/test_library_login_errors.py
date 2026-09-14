@@ -216,6 +216,7 @@ class ArrivalCheckRegistrationTests(unittest.TestCase):
         }
         library_system.return_value.get_reservation_info.return_value = ([{
             "uuid": "reservation-uuid",
+            "resvId": 147050870,
             "resvStatus": 1093,
             "resvBeginTime": "2026-08-17 08:00:00",
             "resvEndTime": "2026-08-17 22:00:00",
@@ -230,11 +231,13 @@ class ArrivalCheckRegistrationTests(unittest.TestCase):
 
         check_arrival_after_grace(check, now=datetime(2026, 8, 17, 8, 32))
 
+        # resv_id 要一起落库：晚上同步真实在馆时长靠它拉操作流水
         record_visit.assert_called_once_with(
             "12345678",
             "reservation-uuid",
             "2026-08-17 08:00:00-22:00:00",
             "2F-A001",
+            resv_id=147050870,
         )
         finish_update = db.arrival_checks.update_one.call_args.args[1]
         self.assertEqual(finish_update["$set"]["status"], "arrived")

@@ -468,6 +468,8 @@ function renderConfig(){
   $('cfg-toggle-reserve').classList.toggle('on', cfg.is_reserved === 'True');
   $('cfg-toggle-lp').classList.toggle('on', cfg.late_protection === 'True');
   $('cfg-toggle-nap').classList.toggle('on', !NAP_DISABLED && !!(state.napConfig && state.napConfig.auto_daily));
+  $('cfg-toggle-study').classList.toggle('on', !!cfg.study_time_consent);
+  $('study-sync-row').style.display = cfg.study_time_consent ? '' : 'none';
 
   // Stored credentials are never returned by the API or kept in page state.
   $('cfg-vpn').value = '';
@@ -2191,6 +2193,121 @@ function cancelLP(){
   closeSheet();
 }
 
+// ---------- 真实在馆时长（需要用户同意） ----------
+// 开：先弹说明，用户点「同意并开启」才写；关：直接关，服务端顺手删掉已采集的明细。
+// 不走 saveCfg 的自动保存——这是一个独立的同意动作，不该被别的配置改动顺带提交。
+function toggleStudyTime(el, e){
+  if(e) e.stopPropagation();
+  if(!state.currentPid || !state.currentCfg){ toast('请先添加学号','error'); return; }
+  // 关要二次确认：已采集的记录删、留、还是模糊保留由用户选，删之前可以先导出
+  openSheet(el.classList.contains('on') ? 'study-time-off' : 'study-time-consent');
+}
+
+async function setStudyTimeConsent(enabled, keep){
+  const body = enabled ? { enabled: true } : { enabled: false, keep: keep || 'keep' };
+  const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/study_time_consent`,
+    { method:'POST', body });
+  if(!ok){ toast(data.error || '保存失败','error'); return; }
+  state.currentCfg.study_time_consent = enabled;
+  $('cfg-toggle-study').classList.toggle('on', enabled);
+  $('study-sync-row').style.display = enabled ? '' : 'none';
+  toast(data.message || (enabled ? '已开启' : '已关闭'), 'success');
+  closeSheet();
+  loadVisitStats();
+}
+
+function confirmStudyTimeOff(){
+  const picked = document.querySelector('input[name="study-keep"]:checked');
+  const keep = picked ? picked.value : 'keep';
+  if(keep === 'delete' && !confirm('确定永久删除已采集的在馆明细？删除后无法恢复。')) return;
+  setStudyTimeConsent(false, keep);
+}
+
+// 手动同步：只补还没折算的记录，服务端每条只写一次，点多少次都不会把时长累加
+async function syncStudyTimeNow(){
+  if(!state.currentPid){ toast('请先添加学号','error'); return; }
+  const label = $('study-sync-label');
+  label.textContent = '正在查询…';
+  const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/study_time_sync`, { method:'POST' });
+  if(!ok){
+    label.textContent = data.error || '同步失败';
+    toast(data.error || '同步失败','error');
+    return;
+  }
+  label.textContent = data.message || '已同步';
+  toast(data.message || '已同步','success');
+  if(data.synced) loadVisitStats();
+}
+
+// 导出走 fetch 再落成文件：Authorization 头只有 api() 会带，直接 location.href 在令牌登录下拿不到
+async function exportStudyTime(){
+  try{
+    const token = getToken();
+    const r = await fetch('/api/my/study_time/export', {
+      credentials: 'same-origin',
+      headers: token ? { 'Authorization': 'Bearer ' + token } : {},
+    });
+    if(!r.ok){ toast('导出失败','error'); return; }
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `autolib-study-time-${localDateKey(new Date()).replace(/-/g,'')}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    toast('已导出 CSV，Excel / WPS 可直接打开','success');
+  }catch(e){
+    toast('导出失败','error');
+  }
+}
+
+// ---------- 信用分（只在用户点的时候查） ----------
+// 结果直接展开在按钮下面：先「查询中…」，回来了换成分数 + 扣分记录；再点一次收起。
+async function queryCredit(){
+  if(!state.currentPid || !state.currentCfg){ toast('请先添加学号','error'); return; }
+  const box = $('credit-box'), btn = $('credit-btn');
+  if(box.style.display !== 'none' && box.dataset.loaded === '1'){
+    box.style.display = 'none';
+    btn.textContent = '查询';
+    return;
+  }
+  box.style.display = '';
+  box.dataset.loaded = '';
+  btn.disabled = true;
+  btn.textContent = '查询中…';
+  box.innerHTML = '<div class="tiny" style="color:var(--ink3);text-align:center;padding:10px 0">正在查询…</div>';
+  const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/credit`);
+  btn.disabled = false;
+  if(!ok){
+    btn.textContent = '重试';
+    box.innerHTML = `<div class="sub" style="color:var(--danger);text-align:center;padding:6px 0">${escHtml(data.error || '查询失败')}</div>`;
+    return;
+  }
+  btn.textContent = '收起';
+  box.dataset.loaded = '1';
+  const score = data.score == null ? '—' : data.score;
+  const total = data.total == null ? '' : ` / ${data.total}`;
+  $('credit-label').textContent = `${score}${total} 分 · ${data.queried_at || ''} 查询`;
+  // status 文字照图书馆网页：1「已记录」、2「已取消，已违约」
+  const rows = (data.records || []).map(r => `<div class="toggle-row">
+      <div class="info">
+        <div class="t1">${escHtml(r.kind_name || '扣分')} <span class="tiny" style="color:var(--ink3)">${escHtml(r.dev_name || '')}</span></div>
+        <div class="t2">${escHtml(r.created_at || '')}${r.status_name ? ' · ' + escHtml(r.status_name) : ''}${r.memo ? ' · ' + escHtml(r.memo) : ''}</div>
+      </div>
+      <div class="sub" style="color:var(--danger);white-space:nowrap">-${r.score == null ? '?' : r.score}</div>
+    </div>`).join('');
+  const shown = (data.records || []).length;
+  box.innerHTML = `
+    <div style="text-align:center;margin:4px 0 10px">
+      <div class="h1" style="color:var(--accent)">${score}<span class="sub" style="color:var(--ink3)">${total}</span></div>
+      <div class="tiny" style="color:var(--ink3)">座位信用分 · ${escHtml(data.queried_at || '')} 查询</div>
+    </div>
+    ${rows ? `<div class="label" style="margin-bottom:4px">扣分记录${data.count ? `（共 ${data.count} 条${data.count > shown ? '，只显示最近 ' + shown + ' 条' : ''}）` : ''}</div>${rows}`
+          : '<div class="sub" style="color:var(--ink3);text-align:center">没有扣分记录</div>'}
+    <div class="tiny mt" style="color:var(--ink3)">「预约不来」是预约后没到馆签到；「预约结束后未操作离开」是走的时候没在系统里结束。</div>`;
+}
+
 // ---------- sheets ----------
 const SHEETS = {
   profile: () => `
@@ -2534,6 +2651,36 @@ const SHEETS = {
   // 全馆预约概况：数据在 loadOccupancy() 里已经拉好，这里只是画
   'lib-occupancy': () => occupancySheetHtml(),
 
+  'study-time-info': () => studyTimeSheetHtml(false),
+  'study-time-consent': () => studyTimeSheetHtml(true),
+  'study-time-off': () => `
+    <div class="grab"></div>
+    <h3>关闭真实在馆时长</h3>
+    <div class="desc">关闭后不再采集新的记录。已经采集到的明细怎么处理？</div>
+    <div class="col gap-sm">
+      <label class="box tight" style="display:flex;gap:10px;align-items:flex-start;cursor:pointer">
+        <input type="radio" name="study-keep" value="keep" checked style="margin-top:3px">
+        <div><div class="sub" style="font-weight:700">保留</div>
+        <div class="t">已有的精确记录原样留着，学习记录继续按它们统计。</div></div>
+      </label>
+      <label class="box tight" style="display:flex;gap:10px;align-items:flex-start;cursor:pointer">
+        <input type="radio" name="study-keep" value="blur" style="margin-top:3px">
+        <div><div class="sub" style="font-weight:700">模糊保留</div>
+        <div class="t">只留每次从签到到结束的时长，起止时间按半小时取整；中间的暂离、返回明细删掉。</div></div>
+      </label>
+      <label class="box tight" style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;border-left:4px solid var(--danger)">
+        <input type="radio" name="study-keep" value="delete" style="margin-top:3px">
+        <div><div class="sub" style="font-weight:700">删除</div>
+        <div class="t">永久删除全部采集明细，无法恢复；学习记录退回按预约时段统计。删之前可以先导出一份。</div></div>
+      </label>
+    </div>
+    <button class="btn ghost mt" style="width:100%" onclick="exportStudyTime()">⬇ 导出明细（CSV，Excel 可打开）</button>
+    <div class="row-flex mt">
+      <button class="btn ghost grow" onclick="closeSheet()">取消</button>
+      <button class="btn accent grow" onclick="confirmStudyTimeOff()">确认关闭</button>
+    </div>
+  `,
+
   'nap-about': () => `
     <div class="grab"></div>
     <h3>😴 一键午休</h3>
@@ -2872,13 +3019,42 @@ async function doReserveToday(){
   }
 }
 
+// 说明和同意用同一份文案：用户点「说明」看的和点开关时看的必须是同一段话
+function studyTimeSheetHtml(asking){
+  return `
+    <div class="grab"></div>
+    <h3>真实在馆时长</h3>
+    <div class="desc">默认的学习时长按预约时段算，中午出去吃饭、提前离开都算在里面。开启后改用图书馆记录的实际在座时间。</div>
+    <div class="col gap-sm">
+      <div class="box tight" style="border-left:4px solid var(--accent)">
+        <div class="sub" style="font-weight:700">会查询什么</div>
+        <div class="t">每晚 22:10（也可以随时手动点「立即同步」），用你的账号向图书馆查询当天每条预约的操作记录：具体的签到、暂离、返回、结束时刻。</div>
+      </div>
+      <div class="box tight" style="border-left:4px solid var(--warn)">
+        <div class="sub" style="font-weight:700">保存在哪、谁能看</div>
+        <div class="t">这些时刻会保存在本站服务器上，只有你自己能看到。管理员仅在排查故障等技术原因时可能接触到，不会用于其他用途。</div>
+      </div>
+      <div class="box tight" style="border-left:4px solid var(--ok)">
+        <div class="sub" style="font-weight:700">随时可以关</div>
+        <div class="t">关闭时由你选：已采集的明细删除、原样保留、或只留半小时粒度的起止时长；删除前可以先导出成表格。</div>
+      </div>
+    </div>
+    ${asking
+      ? `<div class="row-flex mt-lg">
+          <button class="btn ghost grow" onclick="closeSheet()">暂不开启</button>
+          <button class="btn accent grow" onclick="setStudyTimeConsent(true)">同意并开启</button>
+        </div>`
+      : `<button class="btn primary mt-lg" style="width:100%" onclick="closeSheet()">我知道了</button>`}
+  `;
+}
+
 function openSheet(name){
   const sc = $('scrim');
   const content = $('sheet-content');
   const tpl = SHEETS[name];
   content.innerHTML = tpl ? tpl() : '<div class="grab"></div><h3>未实现</h3>';
   sc.classList.add('show');
-  if(name === 'welcome' || name === 'school-notice' || name === 'lp-info' || name === 'lp-warning' || name === 'cancel' || name === 'cancel-tomorrow' || name === 'nap-info' || name === 'nap-about') sc.classList.add('center');
+  if(name === 'welcome' || name === 'school-notice' || name === 'lp-info' || name === 'lp-warning' || name === 'cancel' || name === 'cancel-tomorrow' || name === 'nap-info' || name === 'nap-about' || name === 'study-time-info' || name === 'study-time-consent' || name === 'study-time-off') sc.classList.add('center');
   else sc.classList.remove('center');
   if(name === 'lib-occupancy') renderOccupancySheet();
 }
@@ -3036,7 +3212,8 @@ function renderVisitStats(d){
         <div class="tiny">累计时长</div>
       </div>
     </div>
-    ${heatmapHtml((d.daily && d.daily.length) ? d.daily : dailyFromRecent(d.recent))}`;
+    ${heatmapHtml((d.daily && d.daily.length) ? d.daily : dailyFromRecent(d.recent))}
+    ${d.real_time ? '<div class="tiny mt" style="color:var(--ink3);text-align:center">按真实在馆时长统计，每晚 22:10 更新；还没结束的预约暂按预约时段计</div>' : ''}`;
 }
 
 // ---------- 全馆预约概况 ----------

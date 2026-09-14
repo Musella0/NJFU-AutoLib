@@ -64,9 +64,16 @@ def setup_logging() -> logging.Logger:
     Returns:
         logging.Logger: 配置好的日志记录器
     """
-    log_path = os.path.dirname(config.LOG_FILE)
-    if not os.path.exists(log_path):
-        os.makedirs(log_path)
+    # 日志目录建不了 / 文件写不了（比如只读挂载的预览容器）就只打控制台，
+    # 别让 import 本身炸掉——main.py 会按需 import 这个模块。
+    file_handler = None
+    try:
+        log_path = os.path.dirname(config.LOG_FILE)
+        if not os.path.exists(log_path):
+            os.makedirs(log_path)
+        file_handler = logging.FileHandler(config.LOG_FILE, encoding="utf-8")
+    except OSError as exc:
+        print(f"日志文件不可写，只输出到控制台: {exc}")
 
     # 自定义日志格式
     log_format = (
@@ -85,24 +92,21 @@ def setup_logging() -> logging.Logger:
             return True
 
     # 创建处理器
-    file_handler = logging.FileHandler(config.LOG_FILE, encoding="utf-8")
     console_handler = logging.StreamHandler()
+    handlers = [h for h in (file_handler, console_handler) if h is not None]
 
-    # 设置处理器格式
+    # 设置处理器格式和过滤器
     formatter = logging.Formatter(log_format)
-    file_handler.setFormatter(formatter)
-    console_handler.setFormatter(formatter)
-
-    # 添加过滤器
     user_filter = UserFilter()
-    file_handler.addFilter(user_filter)
-    console_handler.addFilter(user_filter)
+    for handler in handlers:
+        handler.setFormatter(formatter)
+        handler.addFilter(user_filter)
 
     # 配置根日志记录器
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
-    root_logger.addHandler(file_handler)
-    root_logger.addHandler(console_handler)
+    for handler in handlers:
+        root_logger.addHandler(handler)
 
     # 获取当前模块的日志记录器
     logger = logging.getLogger(__name__)
@@ -1496,8 +1500,13 @@ def _mark_seat_by_protection(pid: str, dev_name: str, target_date: str) -> None:
         log_with_user(logger, 'warning', pid, '迟到保护', f"标记 by_protection 失败: {str(e)}")
 
 
-def _record_visit_log(pid: str, uuid: str, target_time_str: str, seat_name: str) -> None:
-    """记录一次道馆（按 uuid upsert，防重复写入）"""
+def _record_visit_log(pid: str, uuid: str, target_time_str: str, seat_name: str,
+                      resv_id: Optional[int] = None) -> None:
+    """记录一次道馆（按 uuid upsert，防重复写入）
+
+    resv_id 是图书馆侧的预约编号，晚上同步真实在馆时长要拿它去拉操作流水；
+    没有它这条记录就只能停留在预约时长。
+    """
     try:
         date_str, time_range = target_time_str.split(' ')
         begin_str, end_str = time_range.split('-', 1)
@@ -1517,6 +1526,7 @@ def _record_visit_log(pid: str, uuid: str, target_time_str: str, seat_name: str)
                     "planned_begin": begin_dt,
                     "planned_end": end_dt,
                     "planned_duration_minutes": duration_minutes,
+                    **({"resv_id": resv_id} if resv_id else {}),
                 },
                 "$setOnInsert": {
                     "uuid": uuid,
@@ -1613,6 +1623,7 @@ def check_arrival_after_grace(
                 uuid,
                 _reservation_target_time(matched, target_time),
                 actual_seat,
+                resv_id=matched.get("resvId"),
             )
             result_message = f"已到馆（状态码: {status_code}），学习时间已同步"
             _finish_arrival_check(uuid, "arrived", result_message, now)
@@ -2132,10 +2143,80 @@ def scan_and_record_visits() -> None:
                     seat_name = dev_info.get("devName", "")
                     if uuid and seat_name and begin_time and end_time:
                         target_time_str = f"{begin_time}-{end_time[-8:]}"
-                        _record_visit_log(pid, uuid, target_time_str, seat_name)
+                        _record_visit_log(pid, uuid, target_time_str, seat_name,
+                                          resv_id=res.get("resvId"))
         except Exception as e:
             log_with_user(logger, 'warning', pid, '道馆统计', f"扫描签到状态失败: {str(e)}")
 
+
+def sync_actual_study_time(now: Optional[datetime] = None,
+                           pid: Optional[str] = None) -> Dict[str, int]:
+    """把到馆记录的「预约时长」换成真实在馆时长。每晚闭馆后跑一次，用户也能手动点。
+
+    只处理勾了 study_time_consent 的用户；没勾的记录原样留着，下次也不会碰。
+    一个用户登一次图书馆，逐条拉 reserve/operate/rec，不赶时间，用户之间歇一秒。
+    每条记录只写一次，所以定时和手动重叠也不会把时长累加；还没「结束」的预约
+    （开区间）先跳过，等它真正结束再算。失败的接下来几晚会继续补。
+
+    pid 给了就只处理这一个用户（手动同步）。返回 synced / pending / skipped 计数。
+    """
+    from utils import study_time
+
+    now = now or datetime.now()
+    result = {"synced": 0, "pending": 0, "open": 0, "failed": 0, "skipped_users": 0}
+    try:
+        pending = study_time.pending_logs(db, now, pid=pid)
+    except Exception as exc:
+        log_with_user(logger, 'error', '系统', '在馆时长', f"查询待同步记录异常: {exc}")
+        return result
+    result["pending"] = len(pending)
+    if not pending:
+        return result
+
+    by_pid: Dict[str, List[Dict[str, Any]]] = {}
+    for log in pending:
+        by_pid.setdefault(str(log.get("pid") or ""), []).append(log)
+
+    for user_pid, logs in by_pid.items():
+        user = user_config_info.find_one(
+            {"pid": user_pid},
+            {"pid": 1, "vpn_password": 1, "verified": 1, study_time.CONSENT_FIELD: 1},
+        )
+        if not user or not user.get(study_time.CONSENT_FIELD) or not user.get("vpn_password"):
+            result["skipped_users"] += 1
+            continue
+        try:
+            library = login_library(user)
+        except Exception as exc:
+            result["failed"] += len(logs)
+            log_with_user(logger, 'warning', user_pid, '在馆时长', f"登录失败，本轮跳过: {exc}")
+            continue
+        for log in logs:
+            records, message = library.get_operate_records(log["resv_id"])
+            if records is None:
+                result["failed"] += 1
+                log_with_user(logger, 'warning', user_pid, '在馆时长',
+                              f"{log.get('seat_name')} 拉取操作流水失败: {message}")
+                continue
+            summary = study_time.store_summary(
+                db, log["uuid"], records, log.get("planned_end"), now)
+            if summary is None:
+                result["open"] += 1
+                log_with_user(logger, 'info', user_pid, '在馆时长',
+                              f"{log.get('seat_name')} 还没有结束事件，等下次")
+                continue
+            result["synced"] += 1
+            log_with_user(logger, 'info', user_pid, '在馆时长',
+                          f"{log.get('seat_name')} 实际 {summary['actual_minutes']} 分钟"
+                          f"（离座 {summary['away_minutes']} 分钟，结束依据 {summary['end_source']}）")
+        if len(by_pid) > 1:
+            time.sleep(1)
+
+    log_with_user(logger, 'info', pid or '系统', '在馆时长',
+                  f"同步完成：写入 {result['synced']}/{result['pending']} 条，"
+                  f"未结束 {result['open']}，失败 {result['failed']}，"
+                  f"{result['skipped_users']} 个用户未开启")
+    return result
 
 if __name__ == "__main__":
     """

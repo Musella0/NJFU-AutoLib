@@ -1109,6 +1109,172 @@ class LibrarySystem(BaseSystem):
             print(error_msg)
             return False, error_msg
 
+    # reserve/operate/rec 的 kind 位，文字照图书馆网页「操作记录」的操作类型一列；
+    # consoleKind 是操作端：1 系统、8 闸机、16 电脑端、32 现场预约台。
+    # 2「已生效」是系统到点把预约置为生效，人还没进馆；真正的签到是 4（闸机）。
+    OPERATE_KIND_NAMES = {
+        1: "预约成功",
+        2: "已生效",
+        4: "已签到",
+        8: "暂离",
+        16: "返回",
+        32: "已结束",
+    }
+
+    # creditRec/getOwn 的 status，文字照图书馆网页上显示的
+    CREDIT_STATUS_NAMES = {1: "已记录", 2: "已取消，已违约"}
+
+    def get_operate_records(
+        self,
+        resv_id: int,
+        page_num: int = 1,
+        page_size: int = 50
+    ) -> Tuple[Optional[List[Dict[str, Any]]], str]:
+        """
+        查询一条预约的操作流水（个人预约页「操作记录」按钮背后的接口）。
+
+        只读；比 resvInfo 的 resvStatus 多出精确的签到/暂离/返回/结束时间。
+
+        Args:
+            resv_id: 预约的 resvId（不是 uuid）
+            page_num: 页码
+            page_size: 每页条数
+
+        Returns:
+            Tuple[Optional[List[Dict[str, Any]]], str]: (按时间升序的流水, 结果消息)
+            每条含 kind / kind_name / console_kind / create_time(datetime) / uuid / sid / dev_name
+        """
+        try:
+            self.ensure_login()
+            if not self.user_info:
+                return None, "图书馆登录失败，无法查询操作记录"
+
+            url = f"{self.base_url}ic-web/reserve/operate/rec{self.vpn_suffix}"
+            params = {
+                "resvId": resv_id,
+                "pageNum": page_num,
+                "pageSize": page_size,
+                "orderKey": "createTime",
+                "orderModel": "desc",
+            }
+            try:
+                response = self.session.get(url, params=params)
+                result = response.json()
+            except Exception as e:
+                return None, f"查询请求失败: {str(e)}"
+
+            if response.status_code != 200:
+                return None, f"查询请求失败: 状态码 {response.status_code}"
+            if result.get('code') != 0:
+                return None, f"查询失败: {result.get('message', '未知错误')}"
+
+            records = []
+            for item in result.get('data') or []:
+                kind = item.get('kind')
+                create_ms = item.get('createTime')
+                records.append({
+                    "uuid": item.get('uuid'),
+                    "sid": item.get('sid'),
+                    "resvId": item.get('resvId'),
+                    "kind": kind,
+                    "kind_name": self.OPERATE_KIND_NAMES.get(kind, f"未知({kind})"),
+                    "console_kind": item.get('consoleKind'),
+                    "dev_name": item.get('devName'),
+                    "create_time": (datetime.fromtimestamp(create_ms / 1000)
+                                    if create_ms else None),
+                })
+            records.sort(key=lambda r: r["create_time"] or datetime.min)
+            return records, "查询成功" if records else "无操作记录"
+
+        except Exception as e:
+            return None, f"查询操作记录时发生异常: {str(e)}"
+
+    CREDIT_SEAT_KEY = "8"   # classKind 8 = 座位；surPlus 按 classKind 分组给分数
+
+    def get_credit_summary(self) -> Tuple[Optional[Dict[str, Any]], str]:
+        """
+        查询座位信用分：ic-web/creditPunishRec/surPlus。
+
+        只读，用户在设置页主动点才查，定时任务不碰它。
+
+        Returns:
+            Tuple[Optional[Dict[str, Any]], str]: ({"score": 当前分, "total": 满分}, 结果消息)
+        """
+        try:
+            self.ensure_login()
+            if not self.user_info:
+                return None, "图书馆登录失败，无法查询信用分"
+
+            url = f"{self.base_url}ic-web/creditPunishRec/surPlus{self.vpn_suffix}"
+            try:
+                response = self.session.get(url)
+                result = response.json()
+            except Exception as e:
+                return None, f"查询请求失败: {str(e)}"
+
+            if response.status_code != 200:
+                return None, f"查询请求失败: 状态码 {response.status_code}"
+            if result.get('code') != 0:
+                return None, f"查询失败: {result.get('message', '未知错误')}"
+
+            data = result.get('data') or {}
+            key = self.CREDIT_SEAT_KEY
+            return {
+                "score": data.get(key),
+                "total": data.get(f"total{key}"),
+            }, "查询成功"
+
+        except Exception as e:
+            return None, f"查询信用分时发生异常: {str(e)}"
+
+    def get_credit_records(
+        self,
+        page: int = 1,
+        page_num: int = 10
+    ) -> Tuple[Optional[List[Dict[str, Any]]], str, int]:
+        """
+        查询扣分记录：ic-web/creditRec/getOwn，按时间倒序。
+
+        Returns:
+            Tuple[Optional[List[Dict[str, Any]]], str, int]: (记录列表, 结果消息, 总条数)
+            每条含 kind_name / dev_name / score / status / created_at(datetime) / memo
+        """
+        try:
+            self.ensure_login()
+            if not self.user_info:
+                return None, "图书馆登录失败，无法查询扣分记录", 0
+
+            url = f"{self.base_url}ic-web/creditRec/getOwn{self.vpn_suffix}"
+            try:
+                response = self.session.get(url, params={"page": page, "pageNum": page_num})
+                result = response.json()
+            except Exception as e:
+                return None, f"查询请求失败: {str(e)}", 0
+
+            if response.status_code != 200:
+                return None, f"查询请求失败: 状态码 {response.status_code}", 0
+            if result.get('code') != 0:
+                return None, f"查询失败: {result.get('message', '未知错误')}", 0
+
+            records = []
+            for item in result.get('data') or []:
+                created_ms = item.get('gmtCreate')
+                records.append({
+                    "kind_id": item.get('creditKindId'),
+                    "kind_name": item.get('creditKindName') or "",
+                    "dev_name": item.get('devName') or "",
+                    "score": item.get('thisUseScore'),
+                    "status": item.get('status'),
+                    "status_name": self.CREDIT_STATUS_NAMES.get(item.get('status'), ""),
+                    "created_at": (datetime.fromtimestamp(created_ms / 1000)
+                                   if created_ms else None),
+                    "memo": item.get('memo') or "",
+                })
+            return records, "查询成功", int(result.get('count') or len(records))
+
+        except Exception as e:
+            return None, f"查询扣分记录时发生异常: {str(e)}", 0
+
     def insert_or_update_mongo(
         self,
         collection_name: str,
@@ -1326,6 +1492,7 @@ class LibrarySystem(BaseSystem):
             # 构建格式化数据
             formatted_item = {
                 "uuid": item.get('uuid', ''),
+                "resvId": item.get('resvId'),
                 "resvBeginTime": begin_time.strftime("%Y-%m-%d %H:%M:%S"),
                 "resvEndTime": end_time.strftime("%Y-%m-%d %H:%M:%S"),
                 "resvStatus": item.get('resvStatus', ''),

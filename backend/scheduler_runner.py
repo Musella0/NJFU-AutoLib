@@ -18,6 +18,7 @@
   SEAT_SNAPSHOT_DELAY_MINUTES - 抢座后多少分钟拍第三张 (默认 5，即 7:05)
   SEAT_SNAPSHOT_PID - 拍快照用的观测账号 (见 utils/seat_snapshot.py)
   SEAT_OCCUPANCY_STATS_DELAY_MINUTES - 抢座后多少分钟汇总全馆预约概况 (默认 10，即 7:10)
+  STUDY_TIME_SYNC_AT    - 每晚几点同步真实在馆时长 (默认 22:10，闭馆之后)
 """
 
 import os
@@ -124,6 +125,19 @@ def run_occupancy_stats_task():
         logger.error(f"预约概况汇总异常: {e}", exc_info=True)
 
 
+def run_study_time_sync():
+    """闭馆后把当天勾了同意的用户的到馆记录换成真实在馆时长。
+
+    一个用户登一次图书馆，逐条拉操作流水，没有任何时间压力；
+    失败的记录接下来几晚会自动补。
+    """
+    try:
+        from scheduled_task import sync_actual_study_time
+        sync_actual_study_time()
+    except Exception as e:
+        logger.error(f"在馆时长同步异常: {e}", exc_info=True)
+
+
 def run_school_notice_check():
     """20:00 检查学校公告；20:05/20:15 只在前次失败时继续。"""
     try:
@@ -221,6 +235,9 @@ def main():
     snapshot_enabled = os.getenv("SEAT_SNAPSHOT_ENABLED", "1").strip().lower() not in (
         "0", "false", "no", "off"
     )
+    # 闭馆 22:00 之后再拉操作流水，「结束」那条事件才写全
+    study_sync_at = datetime.strptime(
+        os.getenv("STUDY_TIME_SYNC_AT", "22:10").strip() or "22:10", "%H:%M")
 
     logger.info(f"定时预约调度器启动，每天 {hour:02d}:{minute:02d} 执行预约")
 
@@ -376,6 +393,18 @@ def main():
             misfire_grace_time=3600,
             replace_existing=True
         )
+    scheduler.add_job(
+        run_study_time_sync,
+        'cron',
+        hour=study_sync_at.hour,
+        minute=study_sync_at.minute,
+        id='study_time_sync',
+        coalesce=True,
+        max_instances=1,
+        # 晚几个小时补也没关系，流水一直在图书馆那边
+        misfire_grace_time=3600 * 3,
+        replace_existing=True
+    )
     scheduler.add_job(
         run_school_notice_check,
         'cron',

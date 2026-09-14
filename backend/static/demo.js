@@ -252,6 +252,13 @@
     [/^\/api\/my\/accounts\/[^/]+\/reservations$/, () => ({ reservations })],
     [/^\/api\/my\/accounts\/[^/]+\/nap_config$/, () => napConfig],
     [/^\/api\/my\/visit_stats$/, () => visitStats],
+    [/^\/api\/my\/accounts\/[^/]+\/credit$/, () => ({
+      score: 500, total: 600, count: 2, queried_at: `${dateKey(offsetDate(0))} 12:00`,
+      records: [
+        { kind_name: '预约不来', dev_name: randomSeat(), score: 100, status: 1, status_name: '已记录', created_at: `${dateKey(offsetDate(-9))} 09:31`, memo: '' },
+        { kind_name: '预约结束后未操作离开', dev_name: randomSeat(), score: 100, status: 2, status_name: '已取消，已违约', created_at: `${dateKey(offsetDate(-80))} 22:03`, memo: '' },
+      ],
+    })],
     [/^\/api\/seats$/, () => ({ seats: seatCatalog() })],
     [/^\/api\/announcements$/, () => announcements],
     [/^\/api\/my\/reservation_results$/, () => reservationResults],
