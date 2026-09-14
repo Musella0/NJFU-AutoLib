@@ -2512,6 +2512,9 @@ const SHEETS = {
     </div>`;
   },
 
+  // 全馆预约概况：数据在 loadOccupancy() 里已经拉好，这里只是画
+  'lib-occupancy': () => occupancySheetHtml(),
+
   'nap-about': () => `
     <div class="grab"></div>
     <h3>😴 一键午休</h3>
@@ -2858,6 +2861,7 @@ function openSheet(name){
   sc.classList.add('show');
   if(name === 'welcome' || name === 'school-notice' || name === 'lp-info' || name === 'lp-warning' || name === 'cancel' || name === 'cancel-tomorrow' || name === 'nap-info' || name === 'nap-about') sc.classList.add('center');
   else sc.classList.remove('center');
+  if(name === 'lib-occupancy') renderOccupancySheet();
 }
 function closeSheet(){
   $('scrim').classList.remove('show');
@@ -3014,6 +3018,307 @@ function renderVisitStats(d){
       </div>
     </div>
     ${heatmapHtml((d.daily && d.daily.length) ? d.daily : dailyFromRecent(d.recent))}`;
+}
+
+// ---------- 全馆预约概况 ----------
+// 每天 07:10 调度器把早上三张占用快照压成一条（seat_occupancy_daily），
+// 这里读 /api/library/occupancy 画折线：横轴是日子，纵轴是 07:05 时全馆被约走的比例。
+// 只有区域级的数字，不带座位号也不带人。
+const OCC = { days: [], range: 90, selected: -1 };
+const WEEKDAY_CN = ['', '周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+
+function occPct(day, tag){
+  const n = day && day.booked ? day.booked[tag] : null;
+  if(n == null || !day.seats_total) return null;
+  return n / day.seats_total * 100;
+}
+function occDateLabel(day, withWeekday){
+  const md = day.date.slice(5).replace('-', '/');
+  return withWeekday ? `${md} ${WEEKDAY_CN[day.weekday] || ''}` : md;
+}
+function occMinuteLabel(m){
+  return `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}`;
+}
+
+async function loadOccupancy(){
+  const card = $('occupancy-card');
+  if(!card) return;
+  try{
+    const { ok, data } = await api('/api/library/occupancy?days=366');
+    if(!ok || !data || !Array.isArray(data.days) || !data.days.length) return;   // 还没汇总过就不显示入口
+    OCC.days = data.days;
+    OCC.selected = OCC.days.length - 1;
+    renderOccupancyCard();
+  }catch(e){ /* 概况只是锦上添花，拉不到就不显示 */ }
+}
+
+function renderOccupancyCard(){
+  const card = $('occupancy-card');
+  const last = OCC.days[OCC.days.length - 1];
+  if(!card || !last) return;
+  const pct = occPct(last, 'post');
+  const prev = OCC.days.length > 1 ? occPct(OCC.days[OCC.days.length - 2], 'post') : null;
+  const delta = (pct != null && prev != null) ? pct - prev : null;
+  const updated = $('occupancy-updated');
+  if(updated) updated.textContent = last.generated_at ? `${last.generated_at} 更新` : '';
+  $('occupancy-preview').innerHTML = `
+    <div class="row-between" style="align-items:flex-end;gap:14px">
+      <div style="flex:0 0 auto">
+        <div class="h2" style="color:var(--accent)">${pct == null ? '--' : pct.toFixed(1) + '%'}</div>
+        <div class="tiny">${escHtml(occDateLabel(last, true))} 开抢 5 分钟后全馆已约</div>
+        ${delta == null ? '' : `<div class="tiny" style="margin-top:2px">较前一天 ${delta >= 0 ? '+' : ''}${delta.toFixed(1)} 个百分点</div>`}
+      </div>
+      <div style="flex:1;min-width:0">${occSparklineSvg(OCC.days.slice(-30))}</div>
+    </div>
+    <div class="tiny mt" style="color:var(--ink3)">点开看逐日折线、一天里从早到晚的曲线和各区域 ›</div>`;
+  card.style.display = '';
+}
+
+// 设置页卡片上的迷你折线，只画 07:05 那条，不带轴
+function occSparklineSvg(days){
+  const pts = days.map(d => occPct(d, 'post')).filter(v => v != null);
+  if(pts.length < 2) return '';
+  const W = 120, H = 40, max = Math.max(...pts, 1);
+  const x = i => (i / (pts.length - 1)) * (W - 8) + 4;
+  const y = v => H - 4 - (v / max) * (H - 8);
+  const path = pts.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  const lastX = x(pts.length - 1), lastY = y(pts[pts.length - 1]);
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:${W}px;height:${H}px;display:block;margin-left:auto" aria-hidden="true">
+    <path d="${path} L${lastX.toFixed(1)},${H} L4,${H} Z" fill="var(--accent)" opacity=".1"/>
+    <path d="${path}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+    <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="4" fill="var(--accent)" stroke="var(--surface)" stroke-width="2"/>
+  </svg>`;
+}
+
+function occVisibleDays(){
+  return OCC.range > 0 ? OCC.days.slice(-OCC.range) : OCC.days;
+}
+
+function occupancySheetHtml(){
+  if(!OCC.days.length){
+    return `<div class="grab"></div><h3>📈 图书馆预约情况</h3>
+      <div class="desc">还没有汇总数据，每天早上 7:10 统计一次。</div>
+      <button class="btn primary mt-lg" style="width:100%" onclick="closeSheet()">我知道了</button>`;
+  }
+  const ranges = [[30, '30 天'], [90, '90 天'], [0, '全部']];
+  return `
+    <div class="grab"></div>
+    <h3>📈 图书馆预约情况</h3>
+    <div class="seg" id="occ-range">
+      ${ranges.map(([n, label]) => `<button type="button" class="${n === OCC.range ? 'on' : ''}" onclick="setOccRange(${n})">${label}</button>`).join('')}
+    </div>
+    <div class="occ-legend">
+      <span><i class="occ-key" style="background:var(--accent)"></i>07:05 开抢五分钟后</span>
+      <span><i class="occ-key" style="background:var(--tmr)"></i>07:01 开抢一分钟后</span>
+    </div>
+    <div class="occ-chart" id="occ-trend"></div>
+    <div class="tiny" style="color:var(--ink3);text-align:center">点一下折线上的某一天，下面看那天的详情</div>
+    <div class="box tight mt" id="occ-day"></div>
+    <details class="occ-table mt">
+      <summary class="tiny">查看数据表</summary>
+      <div id="occ-table-body"></div>
+    </details>
+    <button class="btn primary mt-lg" style="width:100%" onclick="closeSheet()">我知道了</button>`;
+}
+
+function setOccRange(n){
+  OCC.range = n;
+  document.querySelectorAll('#occ-range > button').forEach((b, i) => b.classList.toggle('on', [30, 90, 0][i] === n));
+  const visible = occVisibleDays();
+  if(!visible.includes(OCC.days[OCC.selected])) OCC.selected = OCC.days.length - 1;
+  renderOccupancySheet();
+}
+
+function selectOccDay(index){
+  OCC.selected = index;
+  renderOccupancySheet();
+}
+
+function renderOccupancySheet(){
+  const trend = $('occ-trend');
+  if(!trend) return;
+  const visible = occVisibleDays();
+  const selected = OCC.days[OCC.selected];
+  drawLineChart(trend, {
+    labels: visible.map(d => occDateLabel(d)),
+    series: [
+      { name: '07:05', color: 'var(--accent)', area: true, values: visible.map(d => occPct(d, 'post')) },
+      { name: '07:01', color: 'var(--tmr)', values: visible.map(d => occPct(d, 'rush')) },
+    ],
+    selected: visible.indexOf(selected),
+    height: 180,
+    tooltipTitle: i => occDateLabel(visible[i], true),
+    onSelect: i => selectOccDay(OCC.days.indexOf(visible[i])),
+  });
+  renderOccupancyDay(selected);
+  renderOccupancyTable(visible);
+}
+
+function renderOccupancyDay(day){
+  const box = $('occ-day');
+  if(!box || !day) return;
+  const post = day.booked.post, rush = day.booked.rush, pre = day.booked.pre;
+  const pct = occPct(day, 'post');
+  const rooms = (day.rooms || []).slice().sort((a, b) => (b.booked / (b.seats || 1)) - (a.booked / (a.seats || 1)));
+  const curve = day.curve || {};
+  const occupied = curve.occupied || [];
+  const slotLabels = occupied.map((_, i) => occMinuteLabel((curve.from || 420) + i * (curve.step || 30)));
+  box.innerHTML = `
+    <div class="row-between">
+      <div class="sub" style="font-weight:700">${escHtml(occDateLabel(day, true))}</div>
+      <div class="tiny">07:05 已约 <b>${post}</b> / ${day.seats_total}（${pct == null ? '--' : pct.toFixed(1) + '%'}）</div>
+    </div>
+    <div class="tiny" style="color:var(--ink3);margin-top:2px">
+      7:00 前 ${pre == null ? '未拍' : pre + ' 张'} · 07:01 已约 ${rush == null ? '未拍' : rush + ' 张'} · 07:05 已约 ${post} 张
+    </div>
+    <div class="tiny" style="margin-top:10px">这天从早到晚每个时段有多少座位被约（按 07:05 那批预约算）</div>
+    <div class="occ-chart sm" id="occ-curve"></div>
+    <div class="tiny" style="margin-top:8px">各区域 07:05 已约占比</div>
+    <div class="occ-rooms">
+      ${rooms.map(r => {
+        const p = r.seats ? r.booked / r.seats * 100 : 0;
+        return `<div class="occ-room">
+          <div class="occ-room-name">${escHtml(r.name || '')}</div>
+          <div class="occ-room-bar"><i style="width:${p.toFixed(1)}%"></i></div>
+          <div class="occ-room-val">${r.booked}/${r.seats} · ${p.toFixed(0)}%</div>
+        </div>`;
+      }).join('')}
+    </div>`;
+  drawLineChart($('occ-curve'), {
+    labels: slotLabels,
+    series: [{ name: '在约座位', color: 'var(--accent)', area: true,
+               values: occupied.map(n => day.seats_total ? n / day.seats_total * 100 : 0) }],
+    height: 120,
+    xEvery: 4,   // 每两小时标一个
+    tooltipTitle: i => `${slotLabels[i]} 起半小时`,
+    tooltipExtra: i => `${occupied[i]} 张`,
+  });
+}
+
+function renderOccupancyTable(days){
+  const body = $('occ-table-body');
+  if(!body) return;
+  body.innerHTML = `<table>
+    <tr><th>日期</th><th>07:01</th><th>07:05</th><th>占比</th></tr>
+    ${days.slice().reverse().map(d => {
+      const p = occPct(d, 'post');
+      return `<tr><td>${escHtml(occDateLabel(d, true))}</td><td>${d.booked.rush ?? '--'}</td><td>${d.booked.post}</td><td>${p == null ? '--' : p.toFixed(1) + '%'}</td></tr>`;
+    }).join('')}
+  </table>`;
+}
+
+// 通用的小折线图：inline SVG，十字线 + 提示框，点一下选中某个 x。
+// series 里的 values 允许 null（那天没拍到），线在那一段断开。
+function drawLineChart(el, opts){
+  if(!el) return;
+  const { labels, series, height = 160, selected = -1, xEvery = 0,
+          tooltipTitle, tooltipExtra, onSelect } = opts;
+  const n = labels.length;
+  const W = 400, H = height, padL = 34, padR = 12, padT = 12, padB = 22;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const all = series.flatMap(s => s.values).filter(v => v != null);
+  const rawMax = all.length ? Math.max(...all) : 0;
+  // 纵轴顶到刻度的整数倍，至少 10%，别让一条 18% 的线贴着天花板
+  const yStep = rawMax <= 30 ? 5 : (rawMax <= 60 ? 10 : 20);
+  const yMax = Math.max(10, Math.ceil(rawMax / yStep) * yStep);
+  const x = i => n > 1 ? padL + (i / (n - 1)) * plotW : padL + plotW / 2;
+  const y = v => padT + plotH - (v / yMax) * plotH;
+
+  let grid = '';
+  for(let v = 0; v <= yMax; v += yStep){
+    grid += `<line x1="${padL}" x2="${W - padR}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}" stroke="var(--ink4)" stroke-width="1"/>
+             <text x="${padL - 6}" y="${(y(v) + 3).toFixed(1)}" text-anchor="end" class="occ-tick">${v}%</text>`;
+  }
+  // 横轴标签：最多 6 个，或者按 xEvery 固定间隔
+  const every = xEvery || Math.max(1, Math.ceil(n / 6));
+  let xLabels = '';
+  for(let i = 0; i < n; i += every){
+    xLabels += `<text x="${x(i).toFixed(1)}" y="${H - 6}" text-anchor="${i === 0 ? 'start' : (i >= n - every ? 'end' : 'middle')}" class="occ-tick">${escHtml(labels[i])}</text>`;
+  }
+
+  let marks = '';
+  series.forEach(s => {
+    let d = '', open = false, segs = [];
+    s.values.forEach((v, i) => {
+      if(v == null){ open = false; return; }
+      d += `${open ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)} `;
+      if(!open) segs.push([i]);
+      segs[segs.length - 1][1] = i;
+      open = true;
+    });
+    if(s.area){
+      segs.forEach(([a, b]) => {
+        let ad = '';
+        for(let i = a; i <= b; i++) if(s.values[i] != null) ad += `${ad ? 'L' : 'M'}${x(i).toFixed(1)},${y(s.values[i]).toFixed(1)} `;
+        marks += `<path d="${ad} L${x(b).toFixed(1)},${(padT + plotH).toFixed(1)} L${x(a).toFixed(1)},${(padT + plotH).toFixed(1)} Z" fill="${s.color}" opacity=".1"/>`;
+      });
+    }
+    marks += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+    // 只给最后一个点画圆点 + 直接标值，别每个点都写数字
+    const lastIdx = s.values.length - 1 - s.values.slice().reverse().findIndex(v => v != null);
+    if(lastIdx >= 0 && s.values[lastIdx] != null){
+      marks += `<circle cx="${x(lastIdx).toFixed(1)}" cy="${y(s.values[lastIdx]).toFixed(1)}" r="4" fill="${s.color}" stroke="var(--paper)" stroke-width="2"/>`;
+    }
+  });
+  const first = series[0];
+  const lastIdx = first.values.length - 1 - first.values.slice().reverse().findIndex(v => v != null);
+  if(lastIdx >= 0 && first.values[lastIdx] != null && series.length > 1){
+    marks += `<text id="occ-endlabel" x="${(x(lastIdx) - 8).toFixed(1)}" y="${(y(first.values[lastIdx]) - 8).toFixed(1)}" text-anchor="end" class="occ-endlabel">${first.values[lastIdx].toFixed(1)}%</text>`;
+  }
+
+  el.innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;touch-action:pan-y">
+      ${grid}${xLabels}${marks}
+      <line id="occ-cross" x1="0" x2="0" y1="${padT}" y2="${padT + plotH}" stroke="var(--ink3)" stroke-width="1" style="display:none"/>
+      <g id="occ-dots"></g>
+      <rect x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" fill="transparent"/>
+    </svg>
+    <div class="occ-tip" style="display:none"></div>`;
+
+  const svg = el.querySelector('svg');
+  const cross = el.querySelector('#occ-cross');
+  const dots = el.querySelector('#occ-dots');
+  const tip = el.querySelector('.occ-tip');
+  const endLabel = el.querySelector('#occ-endlabel');
+  const showAt = (i, pinned) => {
+    if(i < 0 || i >= n) return;
+    // 提示框停在最后一天时会压住末端的数字，那会儿提示框里有同一个数，直接藏掉
+    if(endLabel) endLabel.style.display = (i === n - 1) ? 'none' : '';
+    cross.setAttribute('x1', x(i)); cross.setAttribute('x2', x(i));
+    cross.style.display = '';
+    dots.innerHTML = series.map(s => s.values[i] == null ? '' :
+      `<circle cx="${x(i).toFixed(1)}" cy="${y(s.values[i]).toFixed(1)}" r="${pinned ? 5 : 4}" fill="${s.color}" stroke="var(--paper)" stroke-width="2"/>`).join('');
+    tip.innerHTML = '';
+    const title = document.createElement('div'); title.className = 'occ-tip-title';
+    title.textContent = tooltipTitle ? tooltipTitle(i) : labels[i];
+    tip.appendChild(title);
+    series.forEach(s => {
+      const row = document.createElement('div'); row.className = 'occ-tip-row';
+      const key = document.createElement('i'); key.className = 'occ-key'; key.style.background = s.color;
+      const val = document.createElement('b'); val.textContent = s.values[i] == null ? '未拍' : s.values[i].toFixed(1) + '%';
+      const name = document.createElement('span'); name.textContent = s.name + (tooltipExtra && s.values[i] != null ? ' · ' + tooltipExtra(i) : '');
+      row.append(key, val, name); tip.appendChild(row);
+    });
+    tip.style.display = '';
+    // 提示框贴着十字线放，靠右时翻到左边
+    const rect = el.getBoundingClientRect();
+    const px = (x(i) / W) * rect.width;
+    tip.style.left = ''; tip.style.right = '';
+    if(px > rect.width * 0.6) tip.style.right = (rect.width - px + 8) + 'px';
+    else tip.style.left = (px + 8) + 'px';
+  };
+  const indexAt = evt => {
+    const rect = svg.getBoundingClientRect();
+    const px = (evt.clientX - rect.left) / rect.width * W;
+    return n > 1 ? Math.round((px - padL) / plotW * (n - 1)) : 0;
+  };
+  svg.addEventListener('pointermove', evt => showAt(Math.max(0, Math.min(n - 1, indexAt(evt))), false));
+  svg.addEventListener('pointerleave', () => {
+    if(selected >= 0) showAt(selected, true);
+    else { cross.style.display = 'none'; tip.style.display = 'none'; dots.innerHTML = ''; if(endLabel) endLabel.style.display = ''; }
+  });
+  if(onSelect) svg.addEventListener('pointerdown', evt => onSelect(Math.max(0, Math.min(n - 1, indexAt(evt)))));
+  if(selected >= 0) showAt(selected, true);
 }
 
 // ---------- 安卓客户端下载 ----------
@@ -3207,6 +3512,7 @@ async function enterDemoMode(){
   renderHome();
   loadNotices();
   renderVisitStats(demoVisitStats());
+  loadOccupancy();   // demo.js 会拦下接口给一份假数据
 }
 
 // ---------- init ----------
@@ -3228,6 +3534,7 @@ async function init(){
   loadNotices();
   loadVisitStats();
   loadApkInfo();
+  loadOccupancy();
 }
 
 init();

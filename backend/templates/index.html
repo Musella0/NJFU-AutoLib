@@ -344,6 +344,15 @@
       </div>
     </div>
 
+    <!-- 全馆预约概况：每天 07:10 由调度器汇总（/api/library/occupancy），没数据就整张卡片不显示 -->
+    <div class="box pad mb-lg clickable" id="occupancy-card" style="display:none" onclick="openSheet('lib-occupancy')">
+      <div class="row-between">
+        <div class="label" style="margin-bottom:4px">图书馆预约情况</div>
+        <div class="tiny" id="occupancy-updated" style="color:var(--ink3)"></div>
+      </div>
+      <div id="occupancy-preview"></div>
+    </div>
+
     {% if contacts %}
     <div class="box pad mb-lg">
       <div class="label" style="margin-bottom:4px">联系方式</div>

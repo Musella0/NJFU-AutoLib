@@ -639,6 +639,38 @@ body.cozy .box.pad{padding:22px 24px}
 .heatmap-legend .cell.l3{background:var(--heat3)}
 .heatmap-legend .cell.l4{background:var(--heat4)}
 
+/* ========= 全馆预约概况折线 ========= */
+.occ-chart{position:relative;margin-top:6px}
+.occ-chart.sm{margin-top:4px}
+.occ-chart svg{cursor:crosshair}
+.occ-tick{font-family:var(--sans);font-size:10px;fill:var(--ink3)}
+.occ-endlabel{font-family:var(--sans);font-size:11px;font-weight:700;fill:var(--ink)}
+.occ-legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:12px;font-family:var(--sans);font-size:11px;color:var(--ink2)}
+.occ-legend span{display:inline-flex;align-items:center;gap:5px}
+.occ-key{display:inline-block;width:12px;height:2px;border-radius:1px;flex:0 0 auto}
+.occ-tip{
+  position:absolute;top:6px;pointer-events:none;z-index:2;
+  background:var(--surface);border:1.5px solid var(--line);border-radius:8px;
+  box-shadow:var(--shadow-sm);padding:6px 9px;
+  font-family:var(--sans);font-size:11px;color:var(--ink2);white-space:nowrap;
+}
+.occ-tip-title{font-weight:700;color:var(--ink);margin-bottom:2px}
+.occ-tip-row{display:flex;align-items:center;gap:6px;line-height:1.6}
+.occ-tip-row b{color:var(--ink);font-variant-numeric:tabular-nums}
+.occ-rooms{display:flex;flex-direction:column;gap:4px;margin-top:6px}
+.occ-room{display:grid;grid-template-columns:70px 1fr 84px;align-items:center;gap:8px;font-family:var(--sans);font-size:11px;color:var(--ink2)}
+.occ-room-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.occ-room-bar{height:10px;background:var(--heat0);border-radius:2px 4px 4px 2px;overflow:hidden}
+.occ-room-bar i{display:block;height:100%;background:var(--accent);border-radius:0 4px 4px 0;min-width:0}
+.occ-room-val{text-align:right;font-variant-numeric:tabular-nums;color:var(--ink3)}
+.occ-table summary{cursor:pointer;color:var(--ink3);list-style:none;text-align:center;padding:6px 0}
+.occ-table summary::before{content:'▸ '}
+.occ-table[open] summary::before{content:'▾ '}
+.occ-table table{width:100%;border-collapse:collapse;font-family:var(--sans);font-size:11px;color:var(--ink2)}
+.occ-table th,.occ-table td{padding:4px 6px;text-align:right;border-bottom:1px dashed var(--ink4)}
+.occ-table th:first-child,.occ-table td:first-child{text-align:left}
+.occ-table th{color:var(--ink3);font-weight:600}
+
 /* ========= 平面图选座 ========= */
 .seatmap{
   --seat-dot:6px;              /* 与 app.js 的 SEAT_DOT_PX 保持一致 */

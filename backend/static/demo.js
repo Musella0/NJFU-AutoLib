@@ -203,6 +203,45 @@
     },
   ];
 
+  // 全馆预约概况：最近 45 天，07:05 约走 15%~20%，开学后慢慢往上走
+  const occupancy = (() => {
+    const rooms = [
+      ['二层A区', 441], ['二层B区', 96], ['三层A区', 404], ['三层B区', 132], ['三层C区', 162],
+      ['四层A区', 428], ['五层A区', 360], ['六层', 344], ['七层北侧', 224],
+      ['三楼夹层', 20], ['四楼夹层', 24], ['七层南侧', 114],
+    ];
+    const weight = { '三楼夹层': 0.95, '四楼夹层': 0.35, '七层南侧': 0.45, '二层B区': 0.5, '三层C区': 0.5,
+                     '三层B区': 0.33, '三层A区': 0.25, '二层A区': 0.15, '四层A区': 0.1,
+                     '五层A区': 0.01, '六层': 0.01, '七层北侧': 0 };
+    const total = rooms.reduce((a, [, n]) => a + n, 0);
+    const days = [];
+    for (let i = 44; i >= -1; i--) {
+      const d = offsetDate(-i);
+      const trend = 0.85 + (44 - i) / 44 * 0.35;
+      const roomRows = rooms.map(([name, seats]) => {
+        const booked = Math.min(seats, Math.round(seats * weight[name] * trend * (0.85 + Math.random() * 0.3)));
+        return { room_id: name, name, seats, booked, booked_rush: Math.round(booked * 0.7) };
+      });
+      const post = roomRows.reduce((a, r) => a + r.booked, 0);
+      const rush = roomRows.reduce((a, r) => a + r.booked_rush, 0);
+      // 从早到晚：8 点前很少，10 点后基本满上，21 点后掉一点
+      const occupied = [];
+      for (let m = 420; m < 1320; m += 30) {
+        const ramp = m < 450 ? 0 : m < 600 ? (m - 450) / 150 : m >= 1260 ? 0.9 : 1;
+        occupied.push(Math.round(post * ramp));
+      }
+      days.push({
+        date: dateKey(d), weekday: isoOf(d), seats_total: total,
+        booked: { pre: 0, rush, post },
+        curve: { from: 420, step: 30, occupied },
+        rooms: roomRows,
+        captured_at: `${dateKey(offsetDate(-i - 1))} 07:05`,
+        generated_at: `${dateKey(offsetDate(-i - 1))} 07:10`,
+      });
+    }
+    return { days };
+  })();
+
   // ---------- 路由表 ----------
   const REFUSED = { success: false, message: '演示模式：不会真的执行操作', error: '演示模式：不会真的执行操作' };
 
@@ -216,6 +255,7 @@
     [/^\/api\/seats$/, () => ({ seats: seatCatalog() })],
     [/^\/api\/announcements$/, () => announcements],
     [/^\/api\/my\/reservation_results$/, () => reservationResults],
+    [/^\/api\/library\/occupancy$/, () => occupancy],
   ];
 
   function jsonResponse(body, status = 200) {

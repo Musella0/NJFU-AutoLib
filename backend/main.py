@@ -1706,6 +1706,35 @@ def list_contacts():
     return jsonify({"contacts": _contacts()}), 200
 
 
+@app.route("/api/library/occupancy", methods=["GET"])
+@limiter.limit("30/minute")
+def library_occupancy():
+    """全馆预约概况：每天 07:10 由调度器汇总一条（utils/occupancy_stats.py）。
+
+    只有区域级的座位数和已约数，不带座位号也不带任何人，所以游客也能看。
+    默认回最近 90 天，?days= 最多拉到一年；旧数据永远留在库里，只是不一次全吐。
+    """
+    try:
+        days = int(request.args.get("days", 90))
+    except (TypeError, ValueError):
+        return jsonify({"error": "days 必须是整数"}), 400
+    days = max(1, min(days, 366))
+
+    client, db = get_db()
+    docs = list(
+        db.seat_occupancy_daily.find({}, {"_id": 0})
+        .sort("date", DESCENDING)
+        .limit(days)
+    )
+    client.close()
+    docs.reverse()
+    for doc in docs:
+        for key in ("captured_at", "generated_at"):
+            value = doc.get(key)
+            doc[key] = value.strftime("%Y-%m-%d %H:%M") if isinstance(value, datetime) else None
+    return jsonify({"days": docs}), 200
+
+
 @app.route("/api/announcements", methods=["GET"])
 def list_announcements():
     """Public list of active announcements — visible to guests and logged-in users."""

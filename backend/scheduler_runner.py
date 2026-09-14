@@ -17,6 +17,7 @@
   SEAT_SNAPSHOT_RUSH_SECONDS - 抢座后多少秒拍第二张 (默认 60，即 7:01)
   SEAT_SNAPSHOT_DELAY_MINUTES - 抢座后多少分钟拍第三张 (默认 5，即 7:05)
   SEAT_SNAPSHOT_PID - 拍快照用的观测账号 (见 utils/seat_snapshot.py)
+  SEAT_OCCUPANCY_STATS_DELAY_MINUTES - 抢座后多少分钟汇总全馆预约概况 (默认 10，即 7:10)
 """
 
 import os
@@ -111,6 +112,18 @@ def run_seat_snapshot_task(tag, keep_session=False, reuse_session=False):
         logger.error(f"座位占用快照异常: {e}", exc_info=True)
 
 
+def run_occupancy_stats_task():
+    """07:10 把早上三张快照压成一条「全馆预约概况」，设置页的折线图读它。
+
+    只读库不碰图书馆；顺手补齐历史上有快照但没汇总的日子，所以启动时也跑一次。
+    """
+    try:
+        from utils.occupancy_stats import refresh
+        refresh()
+    except Exception as e:
+        logger.error(f"预约概况汇总异常: {e}", exc_info=True)
+
+
 def run_school_notice_check():
     """20:00 检查学校公告；20:05/20:15 只在前次失败时继续。"""
     try:
@@ -200,6 +213,10 @@ def main():
     )
     snapshot_at = reserve_at + timedelta(
         minutes=max(1, int(os.getenv("SEAT_SNAPSHOT_DELAY_MINUTES", "5")))
+    )
+    # 07:10 汇总：跟在 post 后面，只读库，给网页的折线图用
+    stats_at = reserve_at + timedelta(
+        minutes=max(1, int(os.getenv("SEAT_OCCUPANCY_STATS_DELAY_MINUTES", "10")))
     )
     snapshot_enabled = os.getenv("SEAT_SNAPSHOT_ENABLED", "1").strip().lower() not in (
         "0", "false", "no", "off"
@@ -300,7 +317,7 @@ def main():
         logger.info(
             f"座位占用快照已启用：{snapshot_pre_at:%H:%M} 抢座前 / "
             f"{snapshot_rush_at:%H:%M:%S} 抢座刚结束 / {snapshot_at:%H:%M} 尘埃落定，"
-            f"三张的差分出「抢不过」和「本来拿得到」"
+            f"三张的差分出「抢不过」和「本来拿得到」；{stats_at:%H:%M} 汇总预约概况"
         )
         scheduler.add_job(
             run_seat_snapshot_task,
@@ -343,6 +360,20 @@ def main():
             max_instances=1,
             # 晚半小时拍也还有用（抢座早结束了），再晚就没必要补了。
             misfire_grace_time=1800,
+            replace_existing=True
+        )
+        scheduler.add_job(
+            run_occupancy_stats_task,
+            'cron',
+            hour=stats_at.hour,
+            minute=stats_at.minute,
+            id='seat_occupancy_stats',
+            # 启动先跑一次：把有快照没汇总的日子补上，第一次部署不用手工回填
+            next_run_time=datetime.now(),
+            coalesce=True,
+            max_instances=1,
+            # 只是读库算几个数，什么时候补都行
+            misfire_grace_time=3600,
             replace_existing=True
         )
     scheduler.add_job(
