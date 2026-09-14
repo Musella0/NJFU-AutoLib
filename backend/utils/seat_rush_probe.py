@@ -3,8 +3,11 @@
 
 seat_snapshot 每天拍的三张（06:45 / 07:01 / 07:05）只能回答「7:00 那一波抢走了
 多少」，回答不了「那一波持续了几秒」「第 1 秒和第 10 秒差多少」。这个脚本就干
-这一件事：在 07:00:01、07:00:05、07:00:10、07:00:30、07:01、07:05……各拍一张，
-每张 12 个区域**并发**拉（串行一遍要 10~25 秒，采样点之间根本塞不下）。
+这一件事：在 07:00:01、07:00:05、07:00:10、07:01、07:05、07:15 各拍一张，
+之后每半小时一张一直拍到闭馆（22:00，周五 20:00），把明天那块板子一整天
+的填充过程记下来——31 小时窗口意味着明天下午/晚上的时段是今天白天陆续
+放开的。每张 12 个区域**并发**拉（串行一遍要 10~25 秒，采样点之间塞不下）。
+观测日撞上已确认的闭馆通知就直接退出，不白拍。
 
 跑在哪
 ------
@@ -30,7 +33,8 @@ backend 不是同一台机器、不是同一条出口，采样再密也不会跟
       -v "$PWD/backend:/app:ro" -w /app -e PYTHONDONTWRITEBYTECODE=1 \\
       autolib-scheduler python -m utils.seat_rush_probe --out /dev/stdout
 
-    python -m utils.seat_rush_probe --open 07:00:00 --offsets=-10,1,5,10,30,60,300
+    python -m utils.seat_rush_probe --open 07:00:00 --offsets=-10,1,5,10,60,300,900 --every 1800
+    python -m utils.seat_rush_probe --until 20:00      # 手动指定收工时刻
     python -m utils.seat_rush_probe --open now+90s --offsets 1,5 --dry-run   # 自测
 """
 
@@ -48,6 +52,7 @@ from pymongo import MongoClient
 from requests.adapters import HTTPAdapter
 
 from utils import config
+from utils.reservation_blackout import find_reservation_conflict
 from utils.seat_snapshot import (
     SNAPSHOT_COLLECTION,
     _areas,
@@ -61,11 +66,18 @@ from utils.seat_snapshot import (
 
 logger = logging.getLogger(__name__)
 
-# 开闸后的采样点（秒）。前 60 秒密、之后疏：seat_snapshot 的经验是 1400 多条
-# 预约全挤在 07:00~07:05，五分钟后曲线就平了，后面几张只是确认它真的平了。
-# -10s 那张既是开闸前的白板基线，也把 12 条 TLS 连接提前握好：自测里冷连接
-# 并发 12 路首拍要 3.3s，热连接 0.7s——不预热，+1s 那张拍到的其实是 +4s。
-DEFAULT_OFFSETS = "-10,1,5,10,30,60,120,300,600,900,1800,3600,7200,18000"
+# 开闸后的密集采样点（秒）。seat_snapshot 的经验是 1400 多条预约全挤在
+# 07:00~07:05，所以前一分钟按秒、前一刻钟按分钟；之后交给 --every 每半小时一张。
+# -10s 那张既是开闸前的白板基线，也把 12 条 TLS 连接提前握好。
+DEFAULT_OFFSETS = "-10,1,5,10,60,300,900"
+DEFAULT_EVERY_SECONDS = 1800
+
+# 收工时刻：图书馆 22:00 闭馆，周五 20:00。
+CLOSE_HHMM = "22:00"
+FRIDAY_CLOSE_HHMM = "20:00"
+
+# 长会话：超过这个偏移的采样点开拍前先校验会话，失效就重登再拍。
+VERIFY_AFTER_OFFSET_SECONDS = 600
 
 # requests 默认每主机只留 10 条连接，12 个区域并发会有两路被丢掉重新握手。
 POOL_SIZE = 32
@@ -184,6 +196,31 @@ def _sample(
     )
 
 
+def expand_offsets(offsets: Sequence[int], every: int, open_at: datetime, until: datetime) -> List[int]:
+    """显式采样点之后，按 every 的整倍数补到 until 为止。"""
+    result = set(int(o) for o in offsets)
+    if every > 0:
+        k = max(result) // every + 1 if result else 0
+        while open_at + timedelta(seconds=k * every) <= until:
+            result.add(k * every)
+            k += 1
+    return sorted(result)
+
+
+def default_until(open_at: datetime) -> datetime:
+    hhmm = FRIDAY_CLOSE_HHMM if open_at.weekday() == 4 else CLOSE_HHMM
+    hour, minute = (int(x) for x in hhmm.split(":"))
+    return open_at.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
+def _fresh_session(pid: str, db):
+    library = _login(pid, db)
+    if not library.ensure_login():
+        raise RuntimeError("观测账号登录失败")
+    library.session.mount("https://", HTTPAdapter(pool_connections=4, pool_maxsize=POOL_SIZE))
+    return library
+
+
 def run(
     open_at: datetime,
     offsets: Sequence[int],
@@ -210,11 +247,15 @@ def run(
             ensure_indexes(db)
             collection = db[SNAPSHOT_COLLECTION]
 
+        day_begin = datetime.combine(target_date, datetime.min.time())
+        conflict = find_reservation_conflict(
+            db.school_notice_reviews, day_begin + timedelta(hours=8), day_begin + timedelta(hours=22))
+        if conflict:
+            logger.info("观测日 %s 闭馆（%s），不采样", day_str_iso(target_date), conflict.get("title"))
+            return []
+
         _sleep_until(open_at - timedelta(seconds=login_lead))
-        library = _login(pid, db)
-        if not library.ensure_login():
-            raise RuntimeError("观测账号登录失败")
-        library.session.mount("https://", HTTPAdapter(pool_connections=4, pool_maxsize=POOL_SIZE))
+        library = _fresh_session(pid, db)
         logger.info("观测账号已登录，会话建好")
 
         def api(path: str, params: Optional[Dict[str, Any]] = None):
@@ -231,14 +272,18 @@ def run(
             _sleep_until(verify_at)
             if not library.verify_session():
                 logger.warning("会话在开闸前失效，重新登录")
-                library = _login(pid, db)
-                library.ensure_login()
-                library.session.mount("https://", HTTPAdapter(pool_connections=4, pool_maxsize=POOL_SIZE))
+                library = _fresh_session(pid, db)
 
         results: List[Dict[str, Any]] = []
         lock = threading.Lock()
         threads: List[threading.Thread] = []
         for offset in offsets:
+            if offset >= VERIFY_AFTER_OFFSET_SECONDS:
+                # 会话要撑一整天，晚上那几张开拍前先探一下，失效就趁没到点重登。
+                _sleep_until(open_at + timedelta(seconds=offset - 20))
+                if not library.verify_session():
+                    logger.warning("会话失效，重新登录后再拍 %+ds", offset)
+                    library = _fresh_session(pid, db)
             _sleep_until(open_at + timedelta(seconds=offset))
             # 每个采样点自己一个线程：上一张还没拍完也不能拖住下一张的开拍时刻。
             t = threading.Thread(
@@ -295,6 +340,10 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
                         help="开闸时刻 HH:MM[:SS]（默认 07:00:00，已过则取明天）或 now+90s")
     parser.add_argument("--offsets", default=DEFAULT_OFFSETS,
                         help=f"开闸后多少秒采样，逗号分隔，含负数时写成 --offsets=-10,1（默认 {DEFAULT_OFFSETS}）")
+    parser.add_argument("--every", type=int, default=DEFAULT_EVERY_SECONDS,
+                        help=f"显式采样点之后每隔多少秒再拍一张，0 关闭（默认 {DEFAULT_EVERY_SECONDS}）")
+    parser.add_argument("--until", default=None,
+                        help=f"最后一张不晚于 HH:MM（默认 {CLOSE_HHMM}，周五 {FRIDAY_CLOSE_HHMM}）")
     parser.add_argument("--date", default=None,
                         help="观测哪一天的占用 YYYY-MM-DD，默认开闸日的次日")
     parser.add_argument("--pid", default=None, help="观测账号，默认 SEAT_SNAPSHOT_PID")
@@ -317,7 +366,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         target = datetime.strptime(args.date, "%Y-%m-%d").date()
     else:
         target = open_at.date() + timedelta(days=1)
-    offsets = [int(x) for x in args.offsets.split(",") if x.strip()]
+    if args.until:
+        hour, minute = (int(x) for x in args.until.split(":"))
+        until = open_at.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    else:
+        until = default_until(open_at)
+    offsets = expand_offsets(
+        [int(x) for x in args.offsets.split(",") if x.strip()], args.every, open_at, until)
     lead = min(args.login_lead, max(0, int((open_at - datetime.now()).total_seconds()) - 5))
     run(open_at, offsets, target, pid=args.pid, login_lead=lead,
         dry_run=args.dry_run, out_path=args.out)
