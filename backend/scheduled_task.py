@@ -1772,7 +1772,7 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
 
         # 检查这条预约的实时状态，决定要不要保护。
         # 只有 1027（待签到）才继续往下取消重约；其余一律保守跳过：
-        # 1093/3141 说明人已经进馆了；1169/1217/3265 之类是已违约/已取消/已结束，
+        # 1093/3141 说明人已经进馆了；1169/3281 是已违约、1217/3265 是已结束，
         # 拿这种陈旧 uuid 去 delete_seat 只会换回「预约在当前状态下不能删除」。
         # uuid 在实时列表里找不到同理——那条预约已经不存在了，不能替它做决定。
         try:
@@ -1917,8 +1917,8 @@ def register_late_protection_jobs(scheduler) -> None:
                 for seat_dict in seat_list:
                     if seat_dict['target_time'][:10] != today_str:
                         continue
-                    # owned_seat 是图书馆整份预约列表的镜像，已违约(1169)/已取消(1217)/
-                    # 已结束(3265) 的陈旧条目都留在里面，同一座位同一天能有好几条。
+                    # owned_seat 是图书馆整份预约列表的镜像，已违约(1169)/已结束(1217、
+                    # 3265) 的陈旧条目都留在里面，同一座位同一天能有好几条。
                     # 只有「待签到」才谈得上迟到，其余全是僵尸——照旧注册的话，它们会
                     # 在同一时刻起一堆任务，各自拿着陈旧 uuid 去取消，然后齐刷刷失败。
                     status = _as_status_code(seat_dict.get('resvStatus'))

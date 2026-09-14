@@ -333,17 +333,18 @@ function renderAllAccountViews(){
 }
 
 async function loadAccountDetail(pid){
-  try{
-    const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(pid)}`);
-    if(ok && data && data.pid){
-      state.currentCfg = data;
-    }else{
-      state.currentCfg = null;
-    }
-  }catch(e){
+  // 今日/明日预约要现场登录图书馆，是首屏最慢的一步。配置详情、午休配置和它
+  // 互不依赖，三个请求一起发，不再一个等一个（分机部署时每个请求都要过一趟跨境隧道）。
+  prefetchReservations(pid);
+  const [detail] = await Promise.all([
+    api(`/api/my/accounts/${encodeURIComponent(pid)}`).catch(() => ({ ok:false, data:{} })),
+    loadNapConfig(),
+  ]);
+  if(detail.ok && detail.data && detail.data.pid){
+    state.currentCfg = detail.data;
+  }else{
     state.currentCfg = null;
   }
-  await loadNapConfig();
   renderConfig();
   renderHome();
   loadReservations();
@@ -997,17 +998,35 @@ function localDateStr(offsetDays){
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
+// 提前发出去的预约查询。未验证的账号后端直接 400，不会真去登录图书馆。
+let _resvPrefetch = null;
+function prefetchReservations(pid){
+  _resvPrefetch = {
+    pid,
+    promise: api(`/api/my/accounts/${encodeURIComponent(pid)}/reservations`)
+      .catch(() => ({ ok:false, data:{} })),
+  };
+}
+
 async function loadReservations(){
   if(!state.currentPid || !state.currentCfg || !state.currentCfg.verified){
     state.todayResv = null;
     state.tomorrowResv = null;
+    _resvPrefetch = null;
     renderHome();
     return;
   }
   renderTodayCard({ loading: true });
   renderTomorrowCard({ loading: true });
   try{
-    const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/reservations`);
+    let req;
+    if(_resvPrefetch && _resvPrefetch.pid === state.currentPid){
+      req = _resvPrefetch.promise;
+      _resvPrefetch = null;
+    }else{
+      req = api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/reservations`);
+    }
+    const { ok, data } = await req;
     if(ok && Array.isArray(data.reservations)){
       const todayStr = localDateStr(0);
       const tmrStr = localDateStr(1);
@@ -1160,7 +1179,7 @@ function renderTodayCard(opt){
   const seatHtml = `${zone ? `<span class="zone">${escHtml(zone)}</span>` : ''}${escHtml(num)}`;
   const timeHtml = `${bhm} — ${ehm}${hours ? ` · ${hours}小时` : ''}`;
 
-  if (resv.resvStatus === 3265) {
+  if (resv.resvStatus === 3265 || resv.resvStatus === 1217) {
     card.style.display = '';
     empty.style.display = 'none';
     card.innerHTML = `
@@ -1281,7 +1300,7 @@ function renderTomorrowCard(opt){
 }
 
 function fmtResvStatus(s){
-  return { 1027:'已预约', 1093:'使用中', 1169:'已违约', 3141:'暂离', 3265:'已结束', 3281:'已违约' }[s] || `状态(${s})`;
+  return { 1027:'已预约', 1093:'使用中', 1169:'已违约', 1217:'已结束', 3141:'暂离', 3265:'已结束', 3281:'已违约' }[s] || `状态(${s})`;
 }
 
 function renderTomorrowStrip(){
