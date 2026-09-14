@@ -57,6 +57,7 @@ from utils.seat_snapshot import (
     SNAPSHOT_COLLECTION,
     _areas,
     _build_room_doc,
+    ROOM_INTERVAL_SECONDS,
     _fetch_room,
     _login,
     _require_pid,
@@ -78,6 +79,11 @@ FRIDAY_CLOSE_HHMM = "20:00"
 
 # 长会话：超过这个偏移的采样点开拍前先校验会话，失效就重登再拍。
 VERIFY_AFTER_OFFSET_SECONDS = 600
+
+# 12 路并发只在开闸后那一刻钟用——那时秒级分辨率才有意义。之后每半小时一张
+# 没人跟我们抢时间，就按 seat_snapshot 那样一个区域一个区域慢慢拉，别让观测
+# 账号一整天每半小时都对网关打一梭子 12 发并发，那是最像机器的特征。
+CONCURRENT_UNTIL_OFFSET_SECONDS = 900
 
 # requests 默认每主机只留 10 条连接，12 个区域并发会有两路被丢掉重新握手。
 POOL_SIZE = 32
@@ -124,8 +130,9 @@ def _sample(
     pid: str,
     results: List[Dict[str, Any]],
     lock: threading.Lock,
+    concurrent: bool = True,
 ) -> None:
-    """拍一张：所有区域并发拉，逐区域落库，汇总进 results。"""
+    """拍一张：所有区域并发（或串行）拉，逐区域落库，汇总进 results。"""
     tag = f"{TAG_PREFIX}{offset:+d}s"
     day_str = day.strftime("%Y%m%d")
     captured_at = datetime.now()
@@ -149,8 +156,15 @@ def _sample(
         doc["fetched_at"] = datetime.now()
         return {"area": area, "doc": doc, "elapsed": time.time() - t0}
 
-    with ThreadPoolExecutor(max_workers=len(areas)) as pool:
-        rooms = list(pool.map(one, areas))
+    if concurrent:
+        with ThreadPoolExecutor(max_workers=len(areas)) as pool:
+            rooms = list(pool.map(one, areas))
+    else:
+        rooms = []
+        for index, area in enumerate(areas):
+            rooms.append(one(area))
+            if index + 1 < len(areas) and ROOM_INTERVAL_SECONDS > 0:
+                time.sleep(ROOM_INTERVAL_SECONDS)
 
     booked = 0
     seats = 0
@@ -288,7 +302,8 @@ def run(
             # 每个采样点自己一个线程：上一张还没拍完也不能拖住下一张的开拍时刻。
             t = threading.Thread(
                 target=_sample,
-                args=(library, areas, target_date, offset, open_at, collection, pid, results, lock),
+                args=(library, areas, target_date, offset, open_at, collection, pid, results, lock,
+                      offset <= CONCURRENT_UNTIL_OFFSET_SECONDS),
                 name=f"probe+{offset}s", daemon=True,
             )
             t.start()
