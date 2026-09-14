@@ -52,6 +52,18 @@ http://xn--1jq43jfrduzxh22d.xn--fiqs8s, https://xn--1jq43jfrduzxh22d.xn--fiqs8s 
         log_skip
         # 上游由 API_UPSTREAM 决定：单机是同 compose 的 flask-api，
         # 分机部署时是隧道对面那台的 API（见 SPLIT_DEPLOY.md）。
-        reverse_proxy {$API_UPSTREAM:flask-api:5004}
+        reverse_proxy {$API_UPSTREAM:flask-api:5004} {
+            # 分机部署时上游在 WireGuard 隧道对面，跨境 UDP 有丢包。已建立的连接靠 TCP
+            # 重传扛得住，但新建连接的 SYN 连丢两次就超过默认 3s 的 dial 超时，直接 502
+            # （09-14 切换当晚实测约 5%）。所以：拨号给足时间、拨不通就重试、连接尽量复用。
+            # 单机部署时上游是本机容器，这些设置只是没用上，无副作用。
+            transport http {
+                dial_timeout 10s
+                keepalive 5m
+                keepalive_idle_conns 16
+            }
+            lb_try_duration 15s
+            lb_try_interval 500ms
+        }
     }
 }
