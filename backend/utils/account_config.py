@@ -157,6 +157,47 @@ CREDENTIAL_INVALID_RESULT = (
 CREDENTIAL_REVERIFIED_RESULT = "✅ 新密码验证成功，自动预约已恢复，下个抢座窗口正常执行。"
 
 
+# ---- result 文本的状态判定 ----
+# 面板和后台都拿 result 那段文字判断「这个人今天到底怎么样」，以前两边各写各的：
+# 后台是「不含"成功"就算异常」，面板是「不含"成功"且不含"已跳过"就标红」。
+# 结果两种正常状态被当成了故障：
+#   周二休息，已跳过预约                        → 用户自己设的休息，压根没打算约
+#   ⏳ 第1段 17:30-22:00: 已用 3F-A176 占位…    → 超出图书馆 31 小时窗口，占着位等换约，
+#                                                真正那一段还没到能约的时候
+# 只有真正下单出错才算异常。判定收在这里一处，两边都用它，别再各写一遍。
+RESULT_SUCCESS = "success"     # ✅ 约上了
+RESULT_PENDING = "pending"     # ⏳ 占位/排队中，等补约任务接手，还没有结论
+RESULT_SKIPPED = "skipped"     # 休息日、学校闭馆——按配置就是不约
+RESULT_FAILED = "failed"       # ❌ 真的没约上，这才是异常
+RESULT_NONE = "none"           # 还没跑过
+
+FAILURE_MARKS = ("❌", "🔑")
+SUCCESS_MARKS = ("✅", "预约成功")
+SKIPPED_MARKS = ("已跳过",)
+PENDING_MARKS = ("⏳",)
+
+
+def classify_result(text: Any) -> str:
+    """把 result 那段文字归成一个状态。
+
+    先看有没有 ❌：多段预约里「第1段成功、第2段失败」这种，失败那半才是要盯的，
+    不能因为另一行写着"成功"就当没事。剩下的按 成功 → 已跳过 → 排队中 排。
+    认不出来的文字一律算失败——宁可多报一个，也别把真出事的那条藏起来。
+    """
+    content = str(text or "").strip()
+    if not content:
+        return RESULT_NONE
+    if any(mark in content for mark in FAILURE_MARKS):
+        return RESULT_FAILED
+    if any(mark in content for mark in SUCCESS_MARKS):
+        return RESULT_SUCCESS
+    if any(mark in content for mark in SKIPPED_MARKS):
+        return RESULT_SKIPPED
+    if any(mark in content for mark in PENDING_MARKS):
+        return RESULT_PENDING
+    return RESULT_FAILED
+
+
 def account_config_for_client(document: Dict[str, Any]) -> Dict[str, Any]:
     """Return an independent account document with all credentials removed.
 

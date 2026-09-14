@@ -82,6 +82,8 @@
   .uc-footer{padding:10px 20px;border-top:1px solid var(--border)}
   .uc-result{font-size:11px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .uc-result.success{color:var(--green)}.uc-result.fail{color:var(--red)}
+  .uc-result.wait,.td-result.wait{color:var(--yellow)}
+  .uc-result.skip,.td-result.skip{color:var(--text2)}
   /* Modal */
   .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:999;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
   .modal-overlay.show{display:flex}
@@ -175,6 +177,7 @@
   .grp-stats{display:flex;gap:10px;margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--text3);flex-shrink:0}
   .grp-stats .ok{color:var(--green)}
   .grp-stats .bad{color:var(--red)}
+  .grp-stats .wait{color:var(--yellow)}
   .grp-sub{border:1px solid var(--border);border-radius:6px;margin:10px 12px}
   .grp-sub>.grp-head{padding:8px 12px;background:transparent}
   .grp-sub .grp-name{font-size:12px;font-weight:500;color:var(--text2)}
@@ -646,13 +649,16 @@ function renderAll(){
 function body(list){return viewMode==='card'?`<div class="user-grid" style="padding:12px">${list.map(card).join('')}</div>`:tableHtml(list)}
 function section(cls,key,name,rows,inner){
   const on=rows.filter(u=>u.is_reserved==='True').length;
-  const ok=rows.filter(u=>(u.result||'').includes('成功')).length;
-  const bad=rows.filter(u=>u.result&&!u.result.includes('成功')).length;
+  // 状态由后端 classify_result 判定：休息跳过、13:58 占位待换约都不是异常，
+  // 只有真正下单出错（❌）才算。别在这里拿 result 文本自己判。
+  const ok=rows.filter(u=>u.result_state==='success').length;
+  const wait=rows.filter(u=>u.result_state==='pending').length;
+  const bad=rows.filter(u=>u.result_state==='failed').length;
   return `<div class="grp ${cls} ${collapsed.has(key)?'collapsed':''}">
     <div class="grp-head" onclick="toggleGroup('${key}',this)">
       <span class="grp-caret">▼</span>
       <span class="grp-name"><span class="grp-code">${esc(name)}</span></span>
-      <span class="grp-stats"><span>${rows.length} 人</span><span>预约中 ${on}</span><span class="ok">成功 ${ok}</span>${bad?`<span class="bad">异常 ${bad}</span>`:''}</span>
+      <span class="grp-stats"><span>${rows.length} 人</span><span>预约中 ${on}</span><span class="ok">成功 ${ok}</span>${wait?`<span class="wait">待换约 ${wait}</span>`:''}${bad?`<span class="bad">异常 ${bad}</span>`:''}</span>
     </div>
     <div class="grp-body">${inner}</div>
   </div>`;
@@ -723,7 +729,10 @@ function fmtProtect(u){
   if(m===0)return'0分钟（触发即取消）';
   return m+'分钟';
 }
-function resultClass(u){const r=u.result||'';return r.includes('成功')?'success':(r?'fail':'')}
+// 和后端 classify_result 一一对应。以前是「不含"成功"就标红」，
+// 结果休息日和 13:58 占位待换约这两种正常状态被涂成了故障。
+const RESULT_CLASS={success:'success',failed:'fail',pending:'wait',skipped:'skip'};
+function resultClass(u){return RESULT_CLASS[u.result_state]||''}
 
 function card(u){
   const pid=u.pid||'?',av=pid.slice(-2),isOn=u.is_reserved==='True',lpOn=u.late_protection==='True';

@@ -1530,12 +1530,17 @@ function renderNotices(anns, results){
 
   (results || []).forEach(r => {
     if(!r.result) return;
-    const ok = r.success;
-    // 休息日/闭馆是按配置跳过的，既不是成功也不是失败，单独一档中性样式。
-    const skipped = !ok && r.skipped;
-    const border = ok ? 'var(--ok)' : (skipped ? 'var(--warn)' : 'var(--danger)');
-    const pill = ok ? 'ok' : (skipped ? 'warn' : 'accent');
-    const label = ok ? '预约成功' : (skipped ? '已跳过' : '预约失败');
+    // 状态由后端 classify_result 统一判定，四档各走各的样式：
+    // 休息日/闭馆是按配置跳过的；⏳ 占位是超出图书馆 31 小时窗口、占着座等换约，
+    // 真正那一段还没到能约的时候——这两种都不是失败，不该标红吓人。
+    const state = r.state || (r.success ? 'success' : (r.skipped ? 'skipped' : 'failed'));
+    const style = {
+      success: ['var(--ok)', 'ok', '预约成功'],
+      skipped: ['var(--warn)', 'warn', '已跳过'],
+      pending: ['var(--warn)', 'warn', '占位待换约'],
+      failed: ['var(--danger)', 'accent', '预约失败'],
+    }[state] || ['var(--danger)', 'accent', '预约失败'];
+    const [border, pill, label] = style;
     items.push(`
       <div class="box tight" style="border-left:5px solid ${border}">
         <div class="row-flex" style="gap:6px">

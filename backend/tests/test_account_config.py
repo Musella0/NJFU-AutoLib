@@ -3,6 +3,9 @@ from datetime import datetime, timedelta
 
 from utils.account_config import (
     account_config_for_client,
+    classify_result,
+    CREDENTIAL_INVALID_RESULT,
+    CREDENTIAL_REVERIFIED_RESULT,
     default_account_config,
     default_time_config,
     merge_account_documents,
@@ -134,6 +137,65 @@ class AccountConfigTests(unittest.TestCase):
         self.assertNotIn("vpn_password", public)
         self.assertNotIn("lib_password", public)
         self.assertIn("vpn_password", stored)
+
+
+class ResultStateTests(unittest.TestCase):
+    """面板和后台都拿这个状态判断「今天到底怎么样」，正常状态不能被涂成故障。"""
+
+    def test_a_rest_day_is_not_a_failure(self):
+        """用户自己把周二设成休息，压根没打算约——后台以前把它数进「异常」。"""
+        self.assertEqual(classify_result("周二休息，已跳过预约"), "skipped")
+
+    def test_a_closed_library_is_not_a_failure(self):
+        self.assertEqual(
+            classify_result("学校闭馆，已跳过预约：图书馆闭馆通知；暂停 09-20 至 09-22"),
+            "skipped")
+
+    def test_a_1358_hold_waiting_to_be_swapped_is_not_a_failure(self):
+        """超出图书馆 31 小时窗口的段：先占 13:58，等换约任务接手，还没有结论。"""
+        self.assertEqual(
+            classify_result("⏳ 第1段 17:30-22:00: 已用 3F-A176 占位（13:58 起），"
+                            "09-14 10:32 自动换回本段时间"),
+            "pending")
+        self.assertEqual(
+            classify_result("⏳ 第2段 18:30-22:00: 图书馆最多提前 31 小时预约，"
+                            "已排到 09-14 11:32 自动补约"),
+            "pending")
+
+    def test_the_real_segment_failing_is_the_anomaly(self):
+        """换约真的没约上，那一段才算异常——这是唯一该报红的情况。"""
+        self.assertEqual(
+            classify_result("❌ 09-15 17:30-22:00: 所有座位预约失败，详细原因:\n"
+                            "3F-A176(100456431): …设备在该时间段内已被预约"),
+            "failed")
+
+    def test_a_hold_next_to_a_booked_segment_stays_green(self):
+        """第1段约上了、第2段占位待换约：整体不该算异常。"""
+        self.assertEqual(
+            classify_result("✅ 09-15 · 08:30-12:00 · 2F-A348 · 预约成功\n"
+                            "⏳ 第2段 18:30-22:00: 已用 2F-A348 占位（13:58 起），"
+                            "09-14 11:32 自动换回本段时间"),
+            "success")
+
+    def test_one_failed_segment_is_not_hidden_by_another_that_worked(self):
+        """多段里失败那半才是要盯的，不能因为另一行写着"成功"就当没事。"""
+        self.assertEqual(
+            classify_result("✅ 09-15 · 08:30-12:00 · 2F-A348 · 预约成功\n"
+                            "❌ 第2段 18:30-22:00: 所有座位预约失败"),
+            "failed")
+
+    def test_an_expired_password_still_needs_attention(self):
+        self.assertEqual(classify_result(CREDENTIAL_INVALID_RESULT), "failed")
+        self.assertEqual(classify_result(CREDENTIAL_REVERIFIED_RESULT), "success")
+
+    def test_nothing_run_yet_is_its_own_state(self):
+        self.assertEqual(classify_result(""), "none")
+        self.assertEqual(classify_result(None), "none")
+        self.assertEqual(classify_result("   "), "none")
+
+    def test_text_we_do_not_recognise_errs_towards_showing_it(self):
+        """宁可多报一个，也别把真出事的那条藏起来。"""
+        self.assertEqual(classify_result("没有可用的座位进行预约"), "failed")
 
 
 if __name__ == "__main__":

@@ -19,9 +19,14 @@ from utils.account_config import (
     NOTIFY_MODES,
     RESERVATION_MODES,
     account_config_for_client,
+    classify_result,
     CREDENTIAL_INVALID_RESULT,
     CREDENTIAL_REVERIFIED_RESULT,
     default_account_config,
+    RESULT_FAILED,
+    RESULT_PENDING,
+    RESULT_SKIPPED,
+    RESULT_SUCCESS,
     validate_time_config,
 )
 from utils.admin_credentials import (
@@ -1222,6 +1227,8 @@ def get_all_users():
                 u["updated_at"] = u["updated_at"].strftime("%Y-%m-%d %H:%M:%S")
             # 学院/班级由学号推导，不落库：学号改了分类要跟着改，存一份副本只会对不上。
             u.update(parse_student_id(u.get("pid")))
+            # 后台那排「成功 N / 异常 N」照着它数，别再在模板里拿 result 文本自己判。
+            u["result_state"] = classify_result(u.get("result"))
             result.append(u)
         return jsonify(result), 200
     except Exception as e:
@@ -2132,14 +2139,17 @@ def my_reservation_results():
         if isinstance(upd, datetime):
             upd = upd.strftime("%Y-%m-%d %H:%M:%S")
         result_text = r.get("result", "")
-        success = ("成功" in result_text)
-        # 休息日和闭馆都是「按配置没约」，不是失败，前端不该标红。
-        skipped = (not success) and ("已跳过" in result_text)
+        state = classify_result(result_text)
         out.append({
             "pid": r.get("pid", ""),
             "result": result_text,
-            "success": success,
-            "skipped": skipped,
+            "state": state,
+            "success": state == RESULT_SUCCESS,
+            # 休息日和闭馆都是「按配置没约」，占位待换约是「还没到能约的时候」，
+            # 两种都不是失败，前端不该标红。
+            "skipped": state == RESULT_SKIPPED,
+            "pending": state == RESULT_PENDING,
+            "failed": state == RESULT_FAILED,
             "updated_at": upd or "",
         })
     out.sort(key=lambda x: x.get("updated_at") or "", reverse=True)
