@@ -1,0 +1,35 @@
+# ============================================================================
+# edge（新加坡）—— 只跑 Caddy 的公网门卫
+#
+# 后端（mongo / flask-api / scheduler）全部在宿迁那台，经 WireGuard 隧道访问。
+# 用法：
+#     API_UPSTREAM=10.8.0.2:5004 docker compose -p autolib -f docker-compose.edge.yml up -d
+#
+# -p autolib 必须带上：现网 project 就叫这个名字，省掉它会另起一套网络和卷，
+# 新签的证书也进不了原来的 caddy_data，等于白白重签一次。
+# ============================================================================
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: autolib-caddy
+    restart: unless-stopped
+    environment:
+      # 不给默认值：忘了设就直接启动失败，好过悄悄回落到本机不存在的
+      # flask-api 容器，然后让用户对着 502 猜半天。
+      - API_UPSTREAM=${API_UPSTREAM:?edge 模式必须指定后端地址，例如 API_UPSTREAM=10.8.0.2:5004}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # APK 下载目录：只暴露这一个目录，仓库其他文件不可达
+      - ./downloads:/srv/downloads:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  # 与 docker-compose.yml 同名。配合 -p autolib 复用现网那两个卷，
+  # 已签发的证书和 OCSP 缓存原地保留。
+  caddy_data:
+  caddy_config:

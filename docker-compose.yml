@@ -56,8 +56,10 @@ services:
       - CONTACT_QQ=${CONTACT_QQ:-}
       - CONTACT_GITHUB=${CONTACT_GITHUB:-}
     ports:
-      # 仅供本机调试；公网流量统一经过 Caddy 的 HTTPS 入口。
-      - "127.0.0.1:${API_PORT:-5004}:5004"
+      # 单机部署只绑本机，公网流量统一经过 Caddy 的 HTTPS 入口。
+      # 前后端分机部署（见 SPLIT_DEPLOY.md）时把 API_BIND 设成 WireGuard 隧道地址，
+      # 让另一台机器上的 Caddy 能穿隧道过来；仍然不要绑 0.0.0.0。
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-5004}:5004"
     volumes:
       - api_logs:/app/logs
       # 管理员账号、邮箱和密码哈希经 AES-GCM 加密后保存到宿主机。
@@ -172,6 +174,10 @@ services:
     depends_on:
       flask-api:
         condition: service_started
+    environment:
+      # 业务接口的上游。单机就是同一 compose 里的 flask-api；
+      # 分机部署时新加坡那台改用 docker-compose.edge.yml，这里不用动。
+      - API_UPSTREAM=${API_UPSTREAM:-flask-api:5004}
     ports:
       - "80:80"
       - "443:443"

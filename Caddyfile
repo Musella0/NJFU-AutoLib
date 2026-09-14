@@ -19,7 +19,10 @@ http://xn--1jq43jfrduzxh22d.xn--fiqs8s, https://xn--1jq43jfrduzxh22d.xn--fiqs8s 
     # 起因：会话 Cookie 带 Secure 标记（SESSION_COOKIE_SECURE=true），Safari 在明文
     # 页面上会直接把它丢掉，用户看到的现象是「验证成功但没登上，提示启用 Cookie」。
     # 用 308 而不是 301：301 会让客户端把 POST 降级成 GET，Android 端的预约请求会丢 body。
+    # 跳转发生在 handle 之前，下面 handle 里的 log_skip 管不到它——不在这里也跳过的话，
+    # 满网扫 WordPress / .git 的爬虫全走明文，download.log 里九成都是它们的 308。
     @plaintext header X-Forwarded-Proto http
+    log_skip @plaintext
     redir @plaintext https://{host}{uri} 308
 
     # 只记录 APK 下载（其他请求在下面 log_skip 掉），用于统计下载次数
@@ -47,6 +50,8 @@ http://xn--1jq43jfrduzxh22d.xn--fiqs8s, https://xn--1jq43jfrduzxh22d.xn--fiqs8s 
     handle {
         # 业务接口不写访问日志，避免日志文件被刷爆
         log_skip
-        reverse_proxy flask-api:5004
+        # 上游由 API_UPSTREAM 决定：单机是同 compose 的 flask-api，
+        # 分机部署时是隧道对面那台的 API（见 SPLIT_DEPLOY.md）。
+        reverse_proxy {$API_UPSTREAM:flask-api:5004}
     }
 }
