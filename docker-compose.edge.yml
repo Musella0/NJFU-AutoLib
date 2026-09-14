@@ -25,6 +25,8 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       # APK 下载目录：只暴露这一个目录，仓库其他文件不可达
       - ./downloads:/srv/downloads:ro
+      # 静态资源本机直出（见 Caddyfile 的 handle_path /static/*）
+      - ./backend/static:/srv/static:ro
       - caddy_data:/data
       - caddy_config:/config
 

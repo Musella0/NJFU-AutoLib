@@ -47,6 +47,16 @@ http://xn--1jq43jfrduzxh22d.xn--fiqs8s, https://xn--1jq43jfrduzxh22d.xn--fiqs8s 
         file_server
     }
 
+    # 静态资源在本机直接出，不穿隧道：分机部署时每个跨境请求都可能撞上丢包卡几秒，
+    # 一次页面加载十几个请求里，这几个最大（app.js 144KB、楼层图）也最没必要跨境。
+    # 文件在 git 里，edge 和 backend 各自 git pull 就一致；?v= 是前端的缓存戳，file_server 不看它。
+    # 单机部署时这个目录是同一份源码，行为不变。
+    handle_path /static/* {
+        root * /srv/static
+        header Cache-Control "public, max-age=3600"
+        file_server
+    }
+
     handle {
         # 业务接口不写访问日志，避免日志文件被刷爆
         log_skip
