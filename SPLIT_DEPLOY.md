@@ -137,6 +137,17 @@ systemctl daemon-reload
 git clone https://github.com/Musella0/NJFU-AutoLib autolib && cd autolib
 ```
 
+> **宿迁到 GitHub 时好时坏**：09-14 clone 12 秒完成，十分钟后 pull 卡 3 分钟拉不下来。
+> 日常部署不能赌这个。已把 backend 的 `main` 上游指到 `edge/main`（新加坡的工作副本，
+> 走隧道 SSH），`git pull` 不再碰 GitHub。`origin` 仍是 GitHub，只是不默认用它。
+> 前提是 edge 先 `git pull` 到最新——所以部署顺序是：本地 push → edge pull → backend pull。
+>
+> ```bash
+> # 在 backend 上，一次性
+> git remote add edge ssh://edge/home/ubuntu/autolib     # ~/.ssh/config 里 Host edge → 10.8.0.1
+> git branch --set-upstream-to=edge/main main
+> ```
+
 `.env` 和 `data/` 不在版本库里，从 edge 取。**注意 `data/` 是 root 权限**，
 直接 `scp -r` 会 Permission denied：
 
@@ -146,8 +157,18 @@ cd ~/autolib && sudo tar czf /tmp/autolib-data.tgz data && sudo chown ubuntu /tm
 # 在 backend 上
 scp edge:~/autolib/.env ./ && scp edge:/tmp/autolib-data.tgz /tmp/ && tar xzf /tmp/autolib-data.tgz
 echo 'API_BIND=10.8.0.2' >> .env
-docker compose build
+docker volume create autolib-docker_mongo_data      # compose 里声明的是 external 卷
 ```
+
+境内 `docker compose build` 走官方 apt / pip 源极慢（`apt-get install gcc` 三分钟没动）。
+`.env` 里填镜像站，Dockerfile 会用（默认留空即官方源，境外不受影响）：
+
+```
+APT_MIRROR=mirrors.aliyun.com
+PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+```
+
+实测阿里云两项都最快，四分钟构建完；京东云自家镜像站反而不通。然后 `docker compose build`。
 
 **彩排一次导库**，别留到切换当晚第一次跑：完整走一遍下面第五节的 dump → scp →
 restore，验证流程、量出耗时。当晚就变成重跑一个已知流程。
@@ -174,12 +195,13 @@ restore，验证流程、量出耗时。当晚就变成重跑一个已知流程�
 cd ~/autolib
 docker compose stop scheduler flask-api
 MU=$(sed -n 's/^MONGO_USER=//p' .env); MP=$(sed -n 's/^MONGO_PASS=//p' .env)
-docker exec autolib-mongo mongodump --username "$MU" --password "$MP" \
-  --authenticationDatabase admin --gzip --archive=/tmp/autolib.archive
+docker exec autolib-mongo mongodump --uri="mongodb://$MU:$MP@localhost:27017/?authSource=admin" \
+  --gzip --archive=/tmp/autolib.archive
 docker cp autolib-mongo:/tmp/autolib.archive ./backups/autolib-$(date +%Y%m%d-%H%M%S).archive
 scp ./backups/autolib-*.archive backend:~/autolib/backups/
 # 记下条数，导入后对
-docker exec autolib-mongo mongosh --quiet -u "$MU" -p "$MP" --authenticationDatabase admin AutoLib   --eval 'for (const c of ["users","user_config_info","devices","reserve_attempts","seat_snapshots","pending_segments"]) print(c, db[c].countDocuments())'
+docker exec autolib-mongo mongosh --quiet -u "$MU" -p "$MP" --authenticationDatabase admin AutoLib \
+  --eval 'for (const c of ["users","user_config_info","devices","reserve_attempts","seat_snapshots","pending_segments"]) print(c, db[c].countDocuments())'
 ```
 
 **2. backend 起库、导入、起全套**
@@ -189,10 +211,16 @@ cd ~/autolib
 docker compose up -d mongo && sleep 15
 MU=$(sed -n 's/^MONGO_USER=//p' .env); MP=$(sed -n 's/^MONGO_PASS=//p' .env)
 docker cp backups/autolib-*.archive autolib-mongo:/tmp/autolib.archive
-docker exec autolib-mongo mongorestore --username "$MU" --password "$MP" \
-  --authenticationDatabase admin --gzip --archive=/tmp/autolib.archive --drop
+# 必须用 --uri：mongorestore 100.18 用分开的 -u/-p/--authenticationDatabase 时，
+# 文档能进去、索引阶段却报 Unauthorized，8 个集合的索引一个都建不上（09-14 彩排踩到）。
+docker exec autolib-mongo mongorestore --uri="mongodb://$MU:$MP@localhost:27017/?authSource=admin" \
+  --gzip --archive=/tmp/autolib.archive --drop
 # 核对条数，要和 edge 那边记下的一致（只看数量，不看内容）
-docker exec autolib-mongo mongosh --quiet -u "$MU" -p "$MP" --authenticationDatabase admin AutoLib   --eval 'for (const c of ["users","user_config_info","devices","reserve_attempts","seat_snapshots","pending_segments"]) print(c, db[c].countDocuments())'
+docker exec autolib-mongo mongosh --quiet -u "$MU" -p "$MP" --authenticationDatabase admin AutoLib \
+  --eval 'for (const c of ["users","user_config_info","devices","reserve_attempts","seat_snapshots","pending_segments"]) print(c, db[c].countDocuments())'
+# 索引也要核对，应为 12 个（不含 _id）。就算漏了，flask-api / scheduler 启动时也会补建，但别赌
+docker exec autolib-mongo mongosh --quiet -u "$MU" -p "$MP" --authenticationDatabase admin AutoLib \
+  --eval 'print(db.getCollectionNames().reduce((n,c)=>n+db[c].getIndexes().length-1,0))'
 docker compose up -d mongo flask-api scheduler seed
 docker logs autolib-scheduler --tail 20      # 要看到「定时预约调度器启动，每天 07:00 执行预约」
 ```
@@ -246,7 +274,7 @@ docker compose up -d
 
 | 事情 | 怎么做 |
 |---|---|
-| 改代码 | 本地改 → commit/push → `ssh backend 'cd autolib && git pull && docker compose up -d --build flask-api scheduler'` |
+| 改代码 | 本地 commit/push → `ssh edge 'cd autolib && git pull'` → `ssh backend 'cd autolib && git pull && docker compose up -d --build flask-api scheduler'`（backend 从 edge 拉，不经 GitHub） |
 | 看日志 / 查库 / 备份 | `ssh backend` |
 | 改 Caddyfile / 发 APK | edge：`API_UPSTREAM=10.8.0.2:5004 docker compose -p autolib -f docker-compose.edge.yml up -d` |
 | 同步 `.env` / `data/` | 不在 git 里，改动少，手动 scp |
