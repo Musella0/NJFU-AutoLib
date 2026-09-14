@@ -75,6 +75,15 @@ def _is_auth_failure(message: str) -> bool:
     return AUTH_FAILURE_MARK in (message or "")
 
 
+def _is_self_conflict(message: str) -> bool:
+    """撞上自己已有的预约：「学工号为：xxx的用户在当前时段有预约」。
+
+    这句话是**账号维度**的判定，图书馆压根没去看座位空不空——所以同一段里再打
+    备选座位，只会一字不差地再收到同一句话。和 attempt_log.classify 认的是同一串。
+    """
+    return "的用户在当前时段有预约" in (message or "")
+
+
 def _is_transient_login_error(message: str) -> bool:
     """判断图书馆登录失败是否适合在短时间内自动重试。"""
     normalized = message.lower().replace(" ", "")
@@ -979,7 +988,10 @@ class LibrarySystem(BaseSystem):
             # 尝试预约每个座位
             failed_seats = []
             relogged = False
-            for seat_id in seat_list:
+            self_conflict = False
+            target_time = (f"{resv_begin_time[:10]} "
+                           f"{resv_begin_time[11:]}-{resv_end_time[11:]}")
+            for index, seat_id in enumerate(seat_list):
                 seat_name = self.get_seat_name_by_id(seat_id)
                 log_with_user('info', self.username, '预约', f"尝试预约座位: {seat_name}({seat_id})")
 
@@ -1019,10 +1031,26 @@ class LibrarySystem(BaseSystem):
                     failed_seats.append(f"{seat_name}({seat_id}): {res_message}")
                     log_with_user('warning', self.username, '预约',
                                  f"座位 {seat_name}({seat_id}) 预约失败: {res_message}")
+                    if _is_self_conflict(res_message):
+                        # 账号在这一段已经有预约了（多半是用户自己在图书馆那边约的）。
+                        # 这是账号级判定，剩下的备选座位一张张打过去只会收到同一句话，
+                        # 白烧请求，还白烧掉 7:00 开闸后最值钱的那几百毫秒。
+                        self_conflict = True
+                        skipped = len(seat_list) - index - 1
+                        if skipped:
+                            log_with_user('warning', self.username, '预约',
+                                          f"该账号在 {target_time} 已有预约，"
+                                          f"跳过其余 {skipped} 张备选座位")
+                        break
 
-            # 所有座位都预约失败
+            # 一张都没约上
             if failed_seats:
-                error_msg = f"所有座位预约失败，详细原因:\n" + "\n".join(failed_seats)
+                if self_conflict:
+                    error_msg = (f"该账号在 {target_time} 时段已有预约，无需也无法再约"
+                                 f"（若不是本系统约的，多半是你自己在图书馆系统里约过）。"
+                                 f"详细原因:\n" + "\n".join(failed_seats))
+                else:
+                    error_msg = f"所有座位预约失败，详细原因:\n" + "\n".join(failed_seats)
                 log_with_user('error', self.username, '预约', error_msg)
                 return error_msg, self.user_info
             else:

@@ -131,6 +131,36 @@ class ConcurrentReservationTests(unittest.TestCase):
 
         self.assertEqual(order, [a["pid"] for a in accounts])
 
+    def test_accounts_that_keep_hitting_their_own_booking_go_last(self):
+        """老是撞到自己已有预约的账号，不该占着开闸后最前面那几百毫秒。
+
+        它在图书馆那边已经有同段的预约了，打哪张座位都会被同一句话顶回来；
+        排在前面等于拿真能抢到的人的窗口去烧一轮必然失败的请求。
+        """
+        accounts = self._accounts(4)
+        order = []
+
+        def fake_run(item):
+            order.append(item.plan.pid)
+
+        with patch.object(scheduled_task.attempt_log, "chronic_self_conflict_pids",
+                          return_value={accounts[0]["pid"]}):
+            self._run(accounts, fake_run, concurrency=1)
+
+        pids = [a["pid"] for a in accounts]
+        self.assertEqual(order, pids[1:] + pids[:1], "该降级的排到队尾，其余保持优先级顺序")
+
+    def test_demoted_accounts_are_still_attempted(self):
+        """降级不是跳过：万一今天他没手动约，照样该给他抢。"""
+        accounts = self._accounts(2)
+        order = []
+
+        with patch.object(scheduled_task.attempt_log, "chronic_self_conflict_pids",
+                          return_value={a["pid"] for a in accounts}):
+            self._run(accounts, lambda item: order.append(item.plan.pid), concurrency=1)
+
+        self.assertEqual(sorted(order), sorted(a["pid"] for a in accounts))
+
     def test_second_segments_wait_behind_everyones_first_segment(self):
         """大家偏好从早坐到晚：第 1 段才是真正被抢的，第 2 段统一排到队尾。"""
         accounts = self._accounts(3)

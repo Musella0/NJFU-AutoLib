@@ -29,8 +29,8 @@
 
 import logging
 import os
-from datetime import datetime
-from typing import Any, Dict, Optional
+from datetime import date, datetime, timedelta
+from typing import Any, Dict, Optional, Set
 
 from pymongo import ASCENDING, MongoClient
 
@@ -48,6 +48,12 @@ OPEN_MINUTE = int(os.getenv("SCHEDULE_MINUTE", "0"))
 # 距开闸这么久以内算「抢座那一波」，之外的是迟到保护/补约/手动那些非高峰尝试。
 # 两类数据都有用，但绝不能混在一起算竞争度。
 RUSH_WINDOW_MS = int(os.getenv("ATTEMPT_RUSH_WINDOW_MS", str(10 * 60 * 1000)))
+
+# 「老是撞到自己已有预约」的判定窗口：往回看几天、其中要有几天是这样。
+# 看 2 天而不是 1 天，是因为偶尔自己手动约一次不该被永久降级；而一旦停手，
+# 窗口滑过去之后自己就恢复原来的位置，不需要任何人去改配置。
+SELF_CONFLICT_LOOKBACK_DAYS = int(os.getenv("SELF_CONFLICT_LOOKBACK_DAYS", "7"))
+SELF_CONFLICT_MIN_DAYS = int(os.getenv("SELF_CONFLICT_MIN_DAYS", "2"))
 
 _client: Optional[MongoClient] = None
 _indexes_ready = False
@@ -79,6 +85,12 @@ def classify(message: str) -> str:
       taken         「设备在该时间段内已被预约」→ 那一刻座位已经没了。**唯一的竞争信号**
       self_conflict 「学工号为：xxx的用户在当前时段有预约」→ 撞的是自己已有的单子，
                     这种情况下无论座位空不空都会失败，**必须从竞争统计里剔掉**
+      busy          「当前设备正在被预约，请稍后重试」→ 同一瞬间有别人也在下这张座位。
+                    座位到底归谁还没定，不能当 taken；但它是最强的「有人盯着」证据，
+                    建模时单独算一档，别丢进 other
+      account_lock  「您有预约操作正在进行，请稍后操作」→ 账号级的锁，跟座位无关
+                    （实测 2026-09-11：该用户自己也在 7:00 手动约，两边撞了），
+                    和 self_conflict 一样剔掉
       out_of_window 超出提前预约窗口 → 我们自己发早了
       network       网络/状态码异常 → 没问到座位
     """
@@ -91,6 +103,11 @@ def classify(message: str) -> str:
     # 已经有预约时，图书馆先报这个，根本不会去看座位空不空。
     if "的用户在当前时段有预约" in text:
         return "self_conflict"
+    # 下面两句是 2026-09-11 07:00:00.47~0.74 落库时冒出来的，之前一直归在 other。
+    if "当前设备正在被预约" in text:
+        return "busy"
+    if "您有预约操作正在进行" in text:
+        return "account_lock"
     if "不在提前预约时间范围内" in text:
         return "out_of_window"
     if "网络请求异常" in text or "状态码" in text:
@@ -180,3 +197,53 @@ def record(
         _collection().insert_one(doc)
     except Exception as exc:  # noqa: BLE001 - 绝不让记账炸到调用方
         logger.warning("预约尝试记录写入失败（已忽略）: %s", exc)
+
+
+def chronic_self_conflict_pids(
+    today: Optional[date] = None,
+    lookback_days: Optional[int] = None,
+    min_days: Optional[int] = None,
+) -> Set[str]:
+    """挑出「最近老是撞到自己已有预约」的账号。
+
+    为什么要挑出来
+    --------------
+    图书馆回「学工号为：xxx的用户在当前时段有预约」时，它根本没去看座位空不空——
+    这个账号这一段无论打哪张座位都会失败。实测有账号连着四天都是这样（自己在
+    图书馆那边手动约了同一段），每天 7:00 都要在开闸后最值钱的那几百毫秒里
+    白打一轮，排在它后面能真抢到的人就得多等这一轮。
+
+    怎么判定
+    --------
+    只看 7:00 那一波（phase=rush），按「哪一天的座位」分组：这一天里出现过
+    self_conflict、而且一次都没成功过，才算一天。这样的天数够 `min_days` 就算。
+    用 target_date 而不是 fired_at 做窗口，一来 rush 一天只有一批、正好一天一格，
+    二来能吃上 (target_date, pid) 那条索引，7:00 开枪前多查这一次只是毫秒级。
+
+    不做什么
+    --------
+    不写任何东西，尤其不碰 user_config_info：用户设的 priority 是用户的，这里
+    只影响这一次排队的先后。查不到、查失败都返回空集合——这只是个排序优化，
+    绝不能让它把抢座搞挂。
+    """
+    lookback = SELF_CONFLICT_LOOKBACK_DAYS if lookback_days is None else lookback_days
+    threshold = SELF_CONFLICT_MIN_DAYS if min_days is None else min_days
+    if lookback <= 0 or threshold <= 0:
+        return set()
+    cutoff = (today or date.today()) - timedelta(days=lookback)
+    pipeline = [
+        {"$match": {"target_date": {"$gte": cutoff.strftime("%Y-%m-%d")},
+                    "phase": "rush"}},
+        {"$group": {"_id": {"pid": "$pid", "target_date": "$target_date"},
+                    "outcomes": {"$addToSet": "$outcome"}}},
+        # 那一天撞了自己、而且一次都没约成——只失败一半不算，那说明备选里还有活路。
+        {"$match": {"$and": [{"outcomes": "self_conflict"},
+                             {"outcomes": {"$ne": "success"}}]}},
+        {"$group": {"_id": "$_id.pid", "days": {"$sum": 1}}},
+        {"$match": {"days": {"$gte": threshold}}},
+    ]
+    try:
+        return {str(row["_id"]) for row in _collection().aggregate(pipeline)}
+    except Exception as exc:  # noqa: BLE001 - 排序优化失败不能影响抢座
+        logger.warning("查询自撞账号失败（已忽略）: %s", exc)
+        return set()

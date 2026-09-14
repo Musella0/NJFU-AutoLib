@@ -49,6 +49,7 @@ from utils.notify import notify_user
 from utils.crypto import decrypt as _dec
 from utils import prelogin
 from utils import config
+from utils import attempt_log
 from utils.reservation_blackout import find_any_reservation_conflict, find_reservation_conflict
 from utils.account_config import CREDENTIAL_INVALID_RESULT
 
@@ -1240,7 +1241,8 @@ def _build_queue(plans: List[_UserPlan]) -> List[_WorkItem]:
     7:00 真正被抢的是各人的第 1 段——大家偏好从早坐到晚，一张座位只要被约走了
     上午，下午那截基本没人再来抢。所以第 2 段没必要跟别人的第 1 段抢窗口，
     统一放到队尾，把开闸后最初那几秒全部让给「从早上开始」的那些段。
-    同一轮内仍按账号优先级排。
+    同一轮内按 plans 给的顺序排——也就是账号优先级，再减去
+    _demote_chronic_self_conflicts 挪到队尾的那几个。
     """
     rounds = max((len(plan.items) for plan in plans), default=0)
     queue: List[_WorkItem] = []
@@ -1249,6 +1251,29 @@ def _build_queue(plans: List[_UserPlan]) -> List[_WorkItem]:
             if position < len(plan.items):
                 queue.append(plan.items[position])
     return queue
+
+
+def _demote_chronic_self_conflicts(plans: List[_UserPlan]) -> List[_UserPlan]:
+    """把「老是撞到自己已有预约」的账号挪到队尾。
+
+    这种账号在图书馆那边已经有同段的预约了（实测都是用户自己手动约的），7:00
+    无论打哪张座位都会被同一句话顶回来。让它排在前面，等于拿真能抢到的人的窗口
+    去烧一轮必然失败的请求。
+
+    挪到队尾而不是跳过：万一今天他没手动约，照样该给他抢；只是不该排在别人前头。
+    判定只读 reserve_attempts 那张我们自己的表，不写任何用户配置——priority 是
+    用户设的，这里只改这一次的先后。查库失败就按原顺序来。
+    """
+    demoted = attempt_log.chronic_self_conflict_pids()
+    if not demoted:
+        return plans
+    front = [plan for plan in plans if plan.pid not in demoted]
+    back = [plan for plan in plans if plan.pid in demoted]
+    if back:
+        log_with_user(logger, 'info', '系统', '预约队列',
+                      f"以下账号近期连续撞到自己已有的预约，本轮排到队尾："
+                      f"{', '.join(plan.pid for plan in back)}")
+    return front + back
 
 
 def _drain_queue(queue: List[_WorkItem], workers: int) -> None:
@@ -1408,6 +1433,7 @@ def process_reservations() -> None:
             plan = _plan_reservation_safely(item, now)
             if plan is not None:
                 plans.append(plan)
+        plans = _demote_chronic_self_conflicts(plans)
         queue = _build_queue(plans)
         if not queue:
             log_with_user(logger, 'info', '系统', '预约处理', "所有账号今天都不用抢座")

@@ -1,8 +1,11 @@
-"""reserve_seat 逐座循环里的两个补丁。
+"""reserve_seat 逐座循环里的三个补丁。
 
 2026-09-11 早上一个账号三张备选座位全烧掉：第一张撞上「当前设备正在被预约」，
 0.1 秒后发第二张，图书馆的账号级锁还没放开，第二、三张都被「您有预约操作正在进行」
 顶回去了。另外 7:00 为了省一个来回不再校验预登录会话，会话真死了得能现场重登。
+
+第三个是 2026-09-14 看出来的：撞上自己已有的预约时那是账号级判定，图书馆压根
+没看座位，再打备选座位纯属白烧——第一张就该收手。
 """
 
 import sys
@@ -49,6 +52,8 @@ from utils.library_system import LibrarySystem  # noqa: E402
 
 BUSY = "座位 2F-B070(100455871) 期望预约时间x 预约失败: 您有预约操作正在进行，请稍后操作"
 TAKEN = "座位 2F-B070(100455871) 期望预约时间x 预约失败: 设备在该时间段内已被预约"
+SELF = ("座位 2F-B070(100455871) 期望预约时间x 预约失败: "
+        "学工号为：2310104222的用户在当前时段有预约")
 OK = "✅ 09-12 · 08:00-22:00 · 2F-B070 · 预约成功"
 AUTH = f"座位 2F-B070(100455871) 请求失败: {library_system.AUTH_FAILURE_MARK}（返回登录页）"
 
@@ -101,6 +106,30 @@ class ReserveSeatLoopTests(unittest.TestCase):
         sleep.assert_not_called()
         tried = [call.args[1] for call in library._reserve_single_seat.call_args_list]
         self.assertEqual(tried, ["100455871", "100455873"])
+
+    def test_own_booking_stops_the_whole_seat_list(self):
+        """账号这一段已经有预约了，剩下的备选座位打过去只会收到同一句话。
+
+        实测有账号连着四天这样（自己在图书馆那边手动约了同一段），每天 7:00
+        白烧三发，还占掉开闸后最值钱的那几百毫秒。
+        """
+        library = self.make_library([SELF, OK])
+
+        message, _ = self._reserve(library, seats=("100455871", "100455873", "100455875"))
+
+        self.assertEqual(library._reserve_single_seat.call_count, 1, "撞到自己就该收手")
+        self.assertNotIn("预约成功", message)
+        self.assertIn("已有预约", message)
+        self.assertNotIn("所有座位预约失败", message, "这不是「都被抢光了」，别这么报")
+
+    def test_seat_taken_still_walks_the_whole_list(self):
+        """别把短路做过头：座位被别人抢走时，备选座位照样要一张张试。"""
+        library = self.make_library([TAKEN, TAKEN, OK])
+
+        message, _ = self._reserve(library, seats=("100455871", "100455873", "100455875"))
+
+        self.assertIn("预约成功", message)
+        self.assertEqual(library._reserve_single_seat.call_count, 3)
 
     def test_dead_session_relogins_once_and_retries_the_same_seat(self):
         library = self.make_library([AUTH, OK])

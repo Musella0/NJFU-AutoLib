@@ -5,7 +5,7 @@
 """
 
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 from unittest.mock import Mock, patch
 
 from utils import attempt_log
@@ -24,6 +24,19 @@ class ClassifyTests(unittest.TestCase):
                "预约失败: 学工号为：2000102115的用户在当前时段有预约")
         self.assertEqual(classify(msg), "self_conflict")
         self.assertNotIn("self_conflict", attempt_log.CONTENTION_OUTCOMES)
+
+    def test_busy_is_a_signal_but_not_a_verdict(self):
+        """有人同一瞬间在下这张座位——座位归谁未定，不能算 taken，但也不能丢进 other。"""
+        msg = ("座位 2F-B072(100455873) 期望预约时间2026-09-12 08:00:00-22:00:00 "
+               "预约失败: 当前设备正在被预约，请稍后重试")
+        self.assertEqual(classify(msg), "busy")
+        self.assertNotIn("busy", attempt_log.CONTENTION_OUTCOMES)
+
+    def test_account_lock_is_not_about_the_seat(self):
+        msg = ("座位 2F-B070(100455871) 期望预约时间2026-09-12 08:00:00-22:00:00 "
+               "预约失败: 您有预约操作正在进行，请稍后操作")
+        self.assertEqual(classify(msg), "account_lock")
+        self.assertNotIn("account_lock", attempt_log.CONTENTION_OUTCOMES)
 
     def test_only_success_and_taken_are_contention_signals(self):
         self.assertEqual(set(attempt_log.CONTENTION_OUTCOMES), {"success", "taken"})
@@ -101,6 +114,55 @@ class NeverBreaksBookingTests(unittest.TestCase):
             attempt_log.record("p", "2F-B070", "1", "2026-09-10 08:00:00",
                                "2026-09-10 22:00:00", datetime.now(), "预约成功")
         col.insert_one.assert_called_once()
+
+
+class ChronicSelfConflictTests(unittest.TestCase):
+    """挑出「每天都在撞自己已有预约」的账号，给 7:00 的队列排序用。"""
+
+    def _pids(self, rows, **kwargs):
+        col = Mock()
+        col.aggregate.return_value = iter(rows)
+        with patch.object(attempt_log, "_collection", return_value=col):
+            result = attempt_log.chronic_self_conflict_pids(
+                today=date(2026, 9, 14), **kwargs)
+        return result, col.aggregate.call_args.args[0]
+
+    def test_returns_the_pids_the_pipeline_found(self):
+        pids, _ = self._pids([{"_id": "2310104222", "days": 4}])
+        self.assertEqual(pids, {"2310104222"})
+
+    def test_only_looks_at_the_seven_oclock_wave(self):
+        """补约、迟到保护换约那些非高峰尝试不该参与判定——它们本来就慢。"""
+        _, pipeline = self._pids([])
+        self.assertEqual(pipeline[0]["$match"]["phase"], "rush")
+
+    def test_window_is_counted_back_from_today(self):
+        _, pipeline = self._pids([], lookback_days=7)
+        self.assertEqual(pipeline[0]["$match"]["target_date"], {"$gte": "2026-09-07"})
+
+    def test_a_day_with_any_success_does_not_count(self):
+        """那天还是抢到了，就说明备选里有活路，不该因为撞了一发就被降级。"""
+        _, pipeline = self._pids([])
+        day_filter = pipeline[2]["$match"]["$and"]
+        self.assertIn({"outcomes": "self_conflict"}, day_filter)
+        self.assertIn({"outcomes": {"$ne": "success"}}, day_filter)
+
+    def test_threshold_is_the_number_of_such_days(self):
+        _, pipeline = self._pids([], min_days=2)
+        self.assertEqual(pipeline[-1]["$match"], {"days": {"$gte": 2}})
+
+    def test_turning_it_off_skips_the_query_entirely(self):
+        col = Mock()
+        with patch.object(attempt_log, "_collection", return_value=col):
+            self.assertEqual(
+                attempt_log.chronic_self_conflict_pids(lookback_days=0), set())
+        col.aggregate.assert_not_called()
+
+    def test_a_dead_database_just_means_no_demotion(self):
+        """这只是个排序优化，查不动就按原顺序排，绝不能把 7:00 搞挂。"""
+        with patch.object(attempt_log, "_collection",
+                          side_effect=RuntimeError("mongo 挂了")):
+            self.assertEqual(attempt_log.chronic_self_conflict_pids(), set())
 
 
 if __name__ == "__main__":
