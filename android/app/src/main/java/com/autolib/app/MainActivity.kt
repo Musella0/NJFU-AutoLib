@@ -803,6 +803,111 @@ class MainActivity : AppCompatActivity() {
             }.show()
     }
 
+    /**
+     * 「图书馆信用分」：只在点「查询」时去图书馆查一次，结果展开在按钮下面，
+     * 再点一次收起。没有任何定时任务会碰 creditPunishRec / creditRec 这两个接口。
+     */
+    private fun creditCard(): MaterialCardView {
+        val subtitle = text("当前分数和扣分记录", 12).apply { setTextColor(color(R.color.text_muted)) }
+        val box = vertical(0).apply { isVisible = false }
+        var loaded = false
+        lateinit var button: MaterialButton
+        button = action("查询", compact = true) {
+            if (loaded && box.isVisible) {
+                box.isVisible = false
+                button.text = "查询"
+                return@action
+            }
+            if (loaded) {
+                box.isVisible = true
+                button.text = "收起"
+                return@action
+            }
+            button.isEnabled = false
+            button.text = "查询中…"
+            val pid = currentPid
+            api.get("/api/my/accounts/${api.encoded(pid)}/credit") { response ->
+                if (pid != currentPid || isFinishing) return@get
+                button.isEnabled = true
+                val data = response.jsonObject
+                if (!response.ok || data == null) {
+                    button.text = "重试"
+                    toast(response.message("查询失败"))
+                    return@get
+                }
+                loaded = true
+                button.text = "收起"
+                box.isVisible = true
+                renderCredit(box, subtitle, data)
+            }
+        }
+        val body = vertical(0)
+        body.addView(horizontal().apply {
+            addView(vertical(0).apply {
+                addView(text("座位信用分", 16, true))
+                addView(subtitle)
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(button)
+        })
+        body.addView(box)
+        return cardBlock("图书馆信用分", body)
+    }
+
+    private fun renderCredit(box: LinearLayout, subtitle: TextView, data: JSONObject) {
+        box.removeAllViews()
+        val score = if (data.isNull("score")) "—" else data.opt("score").toString()
+        val total = if (data.isNull("total")) "" else " / ${data.opt("total")}"
+        val queriedAt = data.optString("queried_at")
+        subtitle.text = "$score$total 分 · $queriedAt 查询"
+        box.addView(vertical(0).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, dp(6), 0, dp(10))
+            addView(horizontal().apply {
+                gravity = Gravity.CENTER
+                addView(text(score, 36, true).apply {
+                    setTextColor(color(R.color.primary))
+                    typeface = Typeface.create("sans-serif-rounded", Typeface.BOLD)
+                })
+                if (total.isNotBlank()) addView(text(total, 16).apply { setTextColor(color(R.color.text_muted)) })
+            })
+            addView(text("座位信用分 · $queriedAt 查询", 12).apply { setTextColor(color(R.color.text_muted)) })
+        })
+        val records = data.optJSONArray("records") ?: JSONArray()
+        if (records.length() == 0) {
+            box.addView(text("没有扣分记录", 14).apply {
+                setTextColor(color(R.color.text_muted)); gravity = Gravity.CENTER
+            })
+        } else {
+            val count = data.optInt("count", records.length())
+            box.addView(text(buildString {
+                append("扣分记录")
+                if (count > 0) {
+                    append("（共 $count 条")
+                    if (count > records.length()) append("，只显示最近 ${records.length()} 条")
+                    append("）")
+                }
+            }, 12, true).apply { setTextColor(color(R.color.text_muted)); setPadding(0, 0, 0, dp(4)) })
+            for (i in 0 until records.length()) {
+                val r = records.optJSONObject(i) ?: continue
+                // status 文字照图书馆网页：1「已记录」、2「已取消，已违约」
+                val meta = listOf(r.optString("created_at"), r.optString("status_name"), r.optString("memo"))
+                    .filter { it.isNotBlank() }.joinToString(" · ")
+                box.addView(horizontal().apply {
+                    setPadding(0, dp(6), 0, dp(6))
+                    addView(vertical(0).apply {
+                        addView(text(r.optString("kind_name").ifBlank { "扣分" } +
+                            r.optString("dev_name").takeIf { it.isNotBlank() }?.let { "  $it" }.orEmpty(), 14, true))
+                        addView(text(meta, 12).apply { setTextColor(color(R.color.text_muted)) })
+                    }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                    addView(text("-" + (if (r.isNull("score")) "?" else r.opt("score").toString()), 14, true)
+                        .apply { setTextColor(color(R.color.danger)) })
+                })
+            }
+        }
+        box.addView(text("「预约不来」是预约后没到馆签到；「预约结束后未操作离开」是走的时候没在系统里结束。", 12)
+            .apply { setTextColor(color(R.color.text_muted)); setPadding(0, dp(8), 0, 0) })
+    }
+
     private fun showNapDialog(reservation: JSONObject) {
         val currentSeat = reservation.optJSONObject("devInfo")?.optString("devName").orEmpty()
         val end = reservation.optString("resvEndTime").substringAfter(' ', "").take(5)
@@ -1261,6 +1366,7 @@ class MainActivity : AppCompatActivity() {
             .apply { setTextColor(color(R.color.text_muted)) })
         libraryBody.addView(action("＋ 添加学号", accent = true) { showAddAccountDialog() })
         host.addView(cardBlock("图书馆学号", libraryBody))
+        if (currentPid.isNotBlank()) host.addView(creditCard())
 
         host.addView(section("提醒"))
         val notifySwitch = SwitchMaterial(this).apply {
