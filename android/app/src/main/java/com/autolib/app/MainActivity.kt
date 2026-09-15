@@ -260,19 +260,35 @@ class MainActivity : AppCompatActivity() {
         binding.navigation.selectedItemId = currentPage
     }
 
+    /**
+     * 首屏：auth/me、座位表、学号列表三个互不依赖，一起发。分机部署后每个请求
+     * 都要过一趟跨境隧道，串行等于把往返时间乘上请求数。
+     */
     private fun loadInitialData() {
         setBusy(true)
+        val pending = java.util.concurrent.atomic.AtomicInteger(3)
+        val done = { if (pending.decrementAndGet() == 0) loadAccounts() }
         api.get("/api/auth/me") { me ->
             auth = me.jsonObject ?: JSONObject()
-            api.get("/api/seats") { seatResponse ->
-                seats = seatResponse.jsonObject?.optJSONObject("seats") ?: JSONObject()
-                loadAccounts()
-            }
+            done()
+        }
+        api.get("/api/seats") { seatResponse ->
+            seats = seatResponse.jsonObject?.optJSONObject("seats") ?: JSONObject()
+            done()
+        }
+        api.get("/api/my/accounts") { response ->
+            accountsResponse = response
+            done()
         }
     }
 
+    /** loadInitialData 里提前发出的学号列表回应；loadAccounts 只在首屏用一次它。 */
+    private var accountsResponse: ApiResponse? = null
+
     private fun loadAccounts() {
-        api.get("/api/my/accounts") { response ->
+        val prefetched = accountsResponse
+        accountsResponse = null
+        val handle = { response: ApiResponse ->
             accounts = response.jsonArray ?: JSONArray()
             val saved = getPreferences(MODE_PRIVATE).getString("current_pid", "")
             currentPid = when {
@@ -291,18 +307,56 @@ class MainActivity : AppCompatActivity() {
                 loadAccountDetail(currentPid)
             }
         }
+        if (prefetched != null) handle(prefetched) else api.get("/api/my/accounts", handle)
     }
 
+    /**
+     * 账号详情和午休配置并行拉；预约查询不等它们，拿到学号那一刻就发出去
+     * （见 [prefetchReservations]），renderHome 到时直接接住结果。
+     */
     private fun loadAccountDetail(pid: String, after: (() -> Unit)? = null) {
+        if (currentPage == PAGE_HOME && accountSummary(pid)?.optBoolean("verified") == true &&
+            !(reservationsPid == pid && System.currentTimeMillis() - reservationsLoadedAt < RESERVATION_TTL_MS)
+        ) prefetchReservations(pid)
+        val pending = java.util.concurrent.atomic.AtomicInteger(2)
+        val done = {
+            if (pending.decrementAndGet() == 0) {
+                setBusy(false)
+                updateHeader()
+                // 不传 refresh：预约要么已经在飞、要么还在复用窗口内，renderHome 自己会判断
+                if (after != null) after() else renderCurrentPage()
+            }
+        }
         api.get("/api/my/accounts/${api.encoded(pid)}") { response ->
             currentConfig = response.jsonObject?.takeIf { it.optString("pid").isNotBlank() }
             getPreferences(MODE_PRIVATE).edit().putString("current_pid", pid).apply()
-            api.get("/api/my/accounts/${api.encoded(pid)}/nap_config") { napResponse ->
-                napConfig = napResponse.jsonObject?.takeIf { napResponse.ok } ?: defaultNapConfig()
-                setBusy(false)
-                updateHeader()
-                if (after != null) after() else renderCurrentPage(refresh = currentPage == PAGE_HOME)
-            }
+            done()
+        }
+        api.get("/api/my/accounts/${api.encoded(pid)}/nap_config") { napResponse ->
+            napConfig = napResponse.jsonObject?.takeIf { napResponse.ok } ?: defaultNapConfig()
+            done()
+        }
+    }
+
+    // ---- 预约查询：一个学号同一时刻只飞一发，谁先到谁等谁 ----
+
+    /** 递增序号，旧的一发回来时对不上就丢掉（切换学号 / 手动刷新都会发新的）。 */
+    private var reservationsSeq = 0
+    private var reservationsInFlightPid: String? = null
+    /** renderHome 登记的接收方；回应到达时它还没登记就先存进 [prefetchedReservations]。 */
+    private var reservationsWaiter: ((ApiResponse) -> Unit)? = null
+    private var prefetchedReservations: Pair<String, ApiResponse>? = null
+
+    private fun prefetchReservations(pid: String) {
+        val seq = ++reservationsSeq
+        reservationsInFlightPid = pid
+        prefetchedReservations = null
+        api.get("/api/my/accounts/${api.encoded(pid)}/reservations") { response ->
+            if (seq != reservationsSeq) return@get
+            reservationsInFlightPid = null
+            val waiter = reservationsWaiter
+            reservationsWaiter = null
+            if (waiter != null) waiter(response) else prefetchedReservations = pid to response
         }
     }
 
@@ -391,7 +445,7 @@ class MainActivity : AppCompatActivity() {
         showReservationLoading(todayCard, "正在查询今日预约…")
         showReservationLoading(tomorrowCard, "正在查询明日预约…")
         if (refresh) setBusy(true)
-        api.get("/api/my/accounts/${api.encoded(currentPid)}/reservations") { response ->
+        val apply = { response: ApiResponse ->
             setBusy(false)
             if (!response.ok) {
                 replaceCard(todayCard, text(response.message("预约查询失败"), 14))
@@ -412,6 +466,17 @@ class MainActivity : AppCompatActivity() {
                 )
             }
             consumeWidgetAction()
+        }
+        val prefetched = prefetchedReservations
+        when {
+            !refresh && prefetched != null && prefetched.first == currentPid -> {
+                prefetchedReservations = null
+                apply(prefetched.second)
+            }
+            else -> {
+                reservationsWaiter = apply
+                if (refresh || reservationsInFlightPid != currentPid) prefetchReservations(currentPid)
+            }
         }
         loadNotices(notices)
     }
