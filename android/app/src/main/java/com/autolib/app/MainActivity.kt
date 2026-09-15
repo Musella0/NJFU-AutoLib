@@ -1628,6 +1628,8 @@ class MainActivity : AppCompatActivity() {
     private fun renderSettings() {
         val host = pageHost()
         host.addView(section("账号"))
+        // 一张卡说清楚：我是谁、绑了哪些学号（切换 / 删除）、密码怎么改。
+        // 以前拆成「AutoLib 身份」和「图书馆学号」两张，学号和「添加学号」各出现两遍。
         val accountBody = vertical(0)
         accountBody.addView(text(if (loggedIn()) displayName() else "游客", 20, true))
         accountBody.addView(text(when {
@@ -1635,6 +1637,23 @@ class MainActivity : AppCompatActivity() {
             auth.optString("nickname").isNotBlank() -> "已登录 · @${auth.optString("uid")} · ${accounts.length()} 个学号"
             else -> "已登录 · ${accounts.length()} 个学号"
         }, 14))
+        for (i in 0 until accounts.length()) {
+            val item = accounts.optJSONObject(i) ?: continue
+            val pid = item.optString("pid")
+            val row = horizontal()
+            row.addView(vertical(0).apply {
+                // 只有一个学号时上面的大字已经是它了，不再重复写一遍
+                if (accounts.length() > 1) addView(text(if (pid == currentPid) "✓ $pid" else pid, 15, pid == currentPid))
+                addView(text(buildString {
+                    append(if (item.optString("mode") == "week_time") "按星期" else "统一时段")
+                    append(" · ").append(if (item.optString("is_reserved") == "True") "运行中" else "已暂停")
+                    append(" · ").append(if (item.optBoolean("verified")) "已验证" else "未验证")
+                }, 12).apply { setTextColor(color(R.color.text_muted)) })
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            if (pid != currentPid) row.addView(action("切换", compact = true) { switchAccount(pid) })
+            row.addView(action("删除", compact = true, danger = true) { confirmDeleteAccount(pid) })
+            accountBody.addView(row)
+        }
         val authRow = horizontal()
         if (loggedIn()) authRow.addView(action("编辑资料", 1f) { showProfileDialog() })
         authRow.addView(action("＋ 添加学号", 1f, accent = !loggedIn()) { showAddAccountDialog() })
@@ -1653,29 +1672,7 @@ class MainActivity : AppCompatActivity() {
                 addView(action("重新校验", compact = true, accent = invalidAt.isNotBlank()) { showResetPasswordDialog() })
             })
         }
-        host.addView(cardBlock("AutoLib 身份", accountBody))
-
-        val libraryBody = vertical(0)
-        for (i in 0 until accounts.length()) {
-            val item = accounts.optJSONObject(i) ?: continue
-            val pid = item.optString("pid")
-            val row = horizontal()
-            row.addView(vertical(0).apply {
-                addView(text(if (pid == currentPid) "✓ $pid" else pid, 16, pid == currentPid))
-                addView(text(buildString {
-                    append(if (item.optString("mode") == "week_time") "按星期" else "统一时段")
-                    append(" · ").append(if (item.optString("is_reserved") == "True") "运行中" else "已暂停")
-                    append(" · ").append(if (item.optBoolean("verified")) "已验证" else "未验证")
-                }, 12).apply { setTextColor(color(R.color.text_muted)) })
-            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            if (pid != currentPid) row.addView(action("切换", compact = true) { switchAccount(pid) })
-            row.addView(action("删除", compact = true, danger = true) { confirmDeleteAccount(pid) })
-            libraryBody.addView(row)
-        }
-        if (accounts.length() == 0) libraryBody.addView(text("还没有绑定学号。", 13)
-            .apply { setTextColor(color(R.color.text_muted)) })
-        libraryBody.addView(action("＋ 添加学号", accent = true) { showAddAccountDialog() })
-        host.addView(cardBlock("图书馆学号", libraryBody))
+        host.addView(cardBlock("学号", accountBody))
         if (currentPid.isNotBlank()) host.addView(creditCard())
 
         host.addView(section("学习记录"))
