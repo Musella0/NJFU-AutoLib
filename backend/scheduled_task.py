@@ -194,18 +194,13 @@ LIBRARY_OPEN_TIME = os.getenv("LIBRARY_OPEN_TIME", "07:30")
 SEGMENT_HOLD_ENABLED = os.getenv("SEGMENT_HOLD_ENABLED", "1").strip().lower() not in (
     "0", "false", "no", "off"
 )
-# 换约失败后一直重试，直到占位预约开始前这么多分钟；之后才放弃并报警。
+# 换约的最后期限：占位预约开始前这么多分钟。正常情况下 5 次重试几分钟就试完了，
+# 这条只是兜底——容器重启/调度积压把重试拖到占位快开始时，不能再动手上那张预约。
 SEGMENT_SWAP_DEADLINE_MINUTES = int(os.getenv("SEGMENT_SWAP_DEADLINE_MINUTES", "30"))
-# 换约的重试节奏：前几次每分钟一次（吃掉窗口边界那一两分钟的抖动），
-# 之后放慢到每隔这么多分钟一次。占位段要试二十多个小时，每分钟登一次会把网关打穿
-# （2026-09-11 一个账号两个半小时登了 148 次）。
-SEGMENT_SWAP_FAST_ATTEMPTS = int(os.getenv("SEGMENT_SWAP_FAST_ATTEMPTS", "5"))
-SEGMENT_SWAP_SLOW_INTERVAL_MINUTES = int(os.getenv("SEGMENT_SWAP_SLOW_INTERVAL_MINUTES", "10"))
-# 纯排队（没占上位）的段补约失败后最多再试这么多次，每分钟一次。
-# 原先一次失败就判死，窗口边界、网络抖动、登录失败这种一次性问题会白白烧掉一个时段。
-# 但也不能无限试：每次重试都要重走一遍 webvpn + CAS，二十几个账号一起转扛不住。
-SEGMENT_RETRY_MAX_ATTEMPTS = int(os.getenv("SEGMENT_RETRY_MAX_ATTEMPTS", "10"))
-
+# 补约/换约失败后每分钟重试一次，连续失败这么多次才判失败并通知用户；之前一声不响。
+# 原先第一次失败就发邮件，VPN 网关抽风一秒（2026-09-14 10:33 的 502）也把人吵醒，
+# 下一分钟其实就成了。也不能无限试：每次重试都要重走一遍 webvpn + CAS。
+SEGMENT_RETRY_MAX_ATTEMPTS = int(os.getenv("SEGMENT_RETRY_MAX_ATTEMPTS", "5"))
 
 def bookable_at(resv_begin_time: str) -> datetime:
     """图书馆规则本身：该时段最早可以下单的时刻（开始时间 − 31 小时）。"""
@@ -856,55 +851,44 @@ def _retry_or_finish_segment(
     now: datetime,
 ) -> None:
     """
-    补约/换约没成时的收尾：先重试，别一次失败就把这个时段判死。
+    补约/换约没成时的收尾：每分钟重试，连续失败 SEGMENT_RETRY_MAX_ATTEMPTS 次才判失败。
 
-    两种段「重试到什么时候」不一样：
-      * 占位过的段——**绝不能**判失败了事，那等于默认接受了那张开始时间比配置更早的
-        占位预约，到点签不上到就是迟到。一直重试到占位快开始为止（还有二十多个小时），
-        真放弃时必须吵醒用户，因为那时他手上这张预约的时间是错的。
-      * 纯排队的段——手上什么都没有，重试只为吃掉窗口边界/网络/登录那几种一次性抖动，
-        试满 SEGMENT_RETRY_MAX_ATTEMPTS 次就照旧判失败，不然重登会把网关拖垮。
+    判失败之前不通知——窗口边界/网络/登录那几种一次性抖动下一分钟就自己好了，
+    为这个发邮件只会让人虚惊一场。真判失败时必须通知（always=True）：
+      * 占位过的段——手上那张预约开始时间比配置的早，到点签不上到就是迟到，得让他手动处理。
+        另外占位快开始（SEGMENT_SWAP_DEADLINE_MINUTES）时不管试了几次都不能再动它。
+      * 纯排队的段——这个时段就是没约上。
     """
     pid = doc.get("pid", "?")
     hold = doc.get("hold") or {}
     attempts = int(doc.get("attempts") or 0) + 1
+    give_up = attempts >= SEGMENT_RETRY_MAX_ATTEMPTS
 
-    deadline: Optional[datetime] = None
     if hold:
         hold_begin = hold.get("resv_begin_time") or ""
         deadline = (datetime.strptime(hold_begin, TIME_FMT)
                     - timedelta(minutes=SEGMENT_SWAP_DEADLINE_MINUTES)) if hold_begin else None
-        give_up = deadline is not None and now >= deadline
-        final_line = (f"❌ {seg_label}: 换约失败 {attempts} 次且已到最后期限，"
+        if deadline is not None and now >= deadline:
+            give_up = True
+        final_line = (f"❌ {seg_label}: 换约连续失败 {attempts} 次，"
                       f"手上仍是占位预约（{hold.get('dev_name', '座位')} {hold_begin[11:16]} 起，"
                       f"比配置的早），请手动处理")
-        give_up_title, retry_title = "❌ 占位换约失败", "⚠️ 占位换约未成功"
-        retry_body = f"{line}\n座位还占着，正在每分钟重试"
+        give_up_title = "❌ 占位换约失败"
     else:
-        give_up = attempts >= SEGMENT_RETRY_MAX_ATTEMPTS
-        final_line = f"{line}（已重试 {attempts} 次）"
-        give_up_title, retry_title = "❌ 补约失败", "⚠️ 补约未成功"
-        retry_body = f"{line}\n正在每分钟重试，最多 {SEGMENT_RETRY_MAX_ATTEMPTS} 次"
+        final_line = f"{line}（已连续重试 {attempts} 次）"
+        give_up_title = "❌ 补约失败"
 
     if give_up:
         _finish_pending_segment(doc, "failed", final_line)
         notify_user(cfg, give_up_title, f"学号 {pid}\n{final_line}", always=True)
         return
 
-    changes: Dict[str, Any] = {"attempts": attempts, "message": line, "updated_at": datetime.now()}
-    when = "下一轮"
-    if hold and attempts >= SEGMENT_SWAP_FAST_ATTEMPTS:
-        # 快试几次没成，多半不是抖动，放慢节奏；但不能慢过最后期限。
-        next_at = now + timedelta(minutes=SEGMENT_SWAP_SLOW_INTERVAL_MINUTES)
-        if deadline is not None and next_at > deadline:
-            next_at = deadline
-        changes["open_at"] = next_at
-        when = f"{next_at:%H:%M}"
-    pending_segments.update_one({"_id": doc["_id"]}, {"$set": changes})
+    pending_segments.update_one(
+        {"_id": doc["_id"]},
+        {"$set": {"attempts": attempts, "message": line, "updated_at": datetime.now()}},
+    )
     log_with_user(logger, 'warning', pid, '排队补约',
-                  f"{seg_label} 第 {attempts} 次未成功，保持排队{when}重试: {line}")
-    if attempts == 1:
-        notify_user(cfg, retry_title, f"学号 {pid}\n{retry_body}", always=True)
+                  f"{seg_label} 第 {attempts} 次未成功，保持排队下一轮重试: {line}")
 
 
 def process_due_segments(now: Optional[datetime] = None) -> None:
