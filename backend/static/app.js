@@ -3123,22 +3123,19 @@ function dailyFromRecent(recent){
   return [...byDate.values()];
 }
 
-/** 学期起点：上半年从 1 月 1 日算，下半年从 7 月 1 日算。 */
-function semesterStart(today){
-  return new Date(today.getFullYear(), today.getMonth() < 6 ? 0 : 6, 1);
-}
-
 /**
  * GitHub 贡献图式的热力图：每列一周（周一在最上），从左到右由远及近。
- * 只画当前学期（下半年 7–12 月 / 上半年 1–6 月），不是"最近一年"——
- * 铺满整年大多是空格，按学期看也更贴近实际的作息周期。
+ * 从这个用户有记录的第一天画到今天（后端最多给最近 53 周），
+ * 不按学期、也不铺满整年——前面一大段空格没有信息量。
  */
 function heatmapHtml(daily){
   const byDate = new Map((daily || []).map(x => [x.date, x]));
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  const start = semesterStart(today);
-  const semesterLabel = `${start.getFullYear()}年${start.getMonth() < 6 ? '上' : '下'}半年`;
+  const firstKey = (daily || []).map(x => x.date).filter(Boolean).sort()[0];
+  const start = firstKey ? new Date(firstKey + 'T00:00:00') : new Date(today);
+  if(isNaN(start) || start > today) start.setTime(today.getTime());
+  const rangeLabel = `自 ${start.getFullYear() === today.getFullYear() ? '' : start.getFullYear() + '年'}${start.getMonth() + 1}月${start.getDate()}日起`;
   // 对齐到周一，保证每一列都是完整的一周
   const startIso = start.getDay() === 0 ? 7 : start.getDay();
   start.setDate(start.getDate() - (startIso - 1));
@@ -3181,7 +3178,7 @@ function heatmapHtml(daily){
       <span class="cell"></span><span class="cell l1"></span><span class="cell l2"></span>
       <span class="cell l3"></span><span class="cell l4"></span>
       <span>多</span>
-      <span style="margin-left:auto">${semesterLabel}</span>
+      <span style="margin-left:auto">${rangeLabel}</span>
     </div>`;
 }
 
@@ -3705,7 +3702,9 @@ function demoVisitStats(){
   today.setHours(0, 0, 0, 0);
   const daily = [];
   let totalVisits = 0, totalMinutes = 0;
-  for(let d = semesterStart(today); d <= today; d.setDate(d.getDate() + 1)){
+  // 演示数据从 10 周前开始，看得出「有记录以来」的起点
+  const demoStart = new Date(today); demoStart.setDate(demoStart.getDate() - 70);
+  for(let d = demoStart; d <= today; d.setDate(d.getDate() + 1)){
     const dow = d.getDay();
     const p = (dow === 0 || dow === 6) ? 0.35 : 0.75; // 工作日常来，周末偶尔
     if(Math.random() > p) continue;
