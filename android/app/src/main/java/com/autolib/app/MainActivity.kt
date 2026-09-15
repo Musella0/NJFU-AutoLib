@@ -404,6 +404,15 @@ class MainActivity : AppCompatActivity() {
             pendingWidgetAction = null
             tomorrowEditorOpen = true
         }
+        // 学校连续拒绝密码时后端会标 credential_invalid_at 并停掉自动预约，这里提醒去重新校验
+        if (cfg?.optString("credential_invalid_at").orEmpty().isNotBlank()) {
+            host.addView(noticeCard(
+                "🔑 密码失效 · 自动预约已暂停",
+                "学校统一身份认证从 ${cfg!!.optString("credential_invalid_at")} 起连续拒绝了你的密码，多半是你改过密码。请到「设置 → 账号 → 重新校验」填新密码并验证，通过后自动恢复。",
+                R.color.danger,
+                extra = action("去重新校验 →", compact = true, accent = true) { showResetPasswordDialog() },
+            ))
+        }
         host.addView(sectionRow("今日预约", refreshButton()))
         val todayCard = card().also { styleHeroCard(it, tomorrow = false); host.addView(it) }
         val tomorrowCard = card().also { styleHeroCard(it, tomorrow = true) }
@@ -1433,20 +1442,26 @@ class MainActivity : AppCompatActivity() {
         val lateProtection = SwitchMaterial(this).apply {
             text = "迟到保护 🛡"; isChecked = cfg.optString("late_protection") == "True"
         }
-        // 关闭随时生效；首次开启先弹说明，确认后才真正打开（与网页端一致，只提示一次）。
-        lateProtection.setOnCheckedChangeListener { view, checked ->
-            if (!checked || getPreferences(MODE_PRIVATE).getBoolean(PREF_LP_ACK, false)) {
-                scheduleConfigAutosave()
-                return@setOnCheckedChangeListener
+        // 推过一次之后怎么办：shift 不再干预（默认），cancel 再探一次、没到就取消。
+        // 迟到保护关着时没必要露出这个选项。
+        val lpMode = spinner(LP_MODE_LABELS).apply {
+            setSelection(if (cfg.optString("late_protection_mode") == "cancel") 1 else 0)
+        }
+        val lpModeRow = labeled("推迟 1 小时后仍未到馆", lpMode).apply {
+            isVisible = lateProtection.isChecked
+            setPadding(0, dp(4), 0, dp(6))
+        }
+        lpMode.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            // Spinner 挂上监听时会先回调一次初始选中项，那次不该触发自动保存
+            private var armed = false
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (armed) scheduleConfigAutosave() else armed = true
             }
-            AlertDialog.Builder(this).setTitle("🛡 关于迟到保护").setMessage(LATE_PROTECTION_INFO)
-                .setNegativeButton("取消") { _, _ -> view.isChecked = false }
-                .setPositiveButton("我已知晓，永久关闭提示") { _, _ ->
-                    getPreferences(MODE_PRIVATE).edit().putBoolean(PREF_LP_ACK, true).apply()
-                    scheduleConfigAutosave()
-                }
-                .setCancelable(false)
-                .show()
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
+        lateProtection.setOnCheckedChangeListener { _, checked ->
+            lpModeRow.isVisible = checked
+            lateProtectionToggled(lateProtection, checked)
         }
         val autoNap = SwitchMaterial(this).apply {
             text = "自动午休 😴"; isChecked = napConfig.optBoolean("auto_daily")
@@ -1456,13 +1471,10 @@ class MainActivity : AppCompatActivity() {
             addView(text("每日定时自动执行。关闭后暂停所有自动预约。", 12).apply { setTextColor(color(R.color.text_muted)) })
             addView(lateProtection)
             addView(text("未到馆时自动推迟预约最多 1 小时，是否在馆由服务器自动识别。", 12).apply { setTextColor(color(R.color.text_muted)) })
+            addView(lpModeRow)
             addView(autoNap)
             addView(text("每日到「午休开始」时刻自动续约下午时段。", 12).apply { setTextColor(color(R.color.text_muted)) })
         }))
-
-        // ---- 凭据 ----
-        val vpn = input("统一身份认证密码（网上办事大厅）", password = true).apply { setText(cfg.optString("vpn_password")) }
-        host.addView(cardBlock("统一身份认证", vertical(0).apply { addView(vpn) }))
 
         collectConfigBody = {
             val weekMode = modeGroup.checkedRadioButtonId == weekRadio.id
@@ -1484,24 +1496,30 @@ class MainActivity : AppCompatActivity() {
                 .put("seat_list", JSONArray(chosenSeats))
                 .put("is_reserved", if (autoReserve.isChecked) "True" else "False")
                 .put("late_protection", if (lateProtection.isChecked) "True" else "False")
+                .put("late_protection_mode", if (lpMode.selectedItemPosition == 1) "cancel" else "shift")
         }
         collectNapAuto = { autoNap.isChecked }
 
-        val saveRow = horizontal()
-        saveRow.addView(action("保存配置", 1f, accent = true) { saveConfiguration(vpn.text.toString()) })
-        saveRow.addView(action("验证并保存", 1f) {
-            if (vpn.text.isBlank()) return@action toast("请填写统一身份认证密码")
-            setBusy(true)
-            api.post("/api/my/accounts/${api.encoded(currentPid)}/verify", JSONObject()
-                .put("vpn_password", vpn.text.toString())) { response ->
-                if (response.jsonObject?.optBoolean("verified") == true) {
-                    saveConfiguration(vpn.text.toString(), verified = true)
-                } else { setBusy(false); toast(response.message("验证失败")) }
-            }
-        })
-        host.addView(saveRow)
+        // 密码不在这里改：改过密码去「设置 → 账号 → 重新校验」，普通配置保存永远不接触凭据
+        host.addView(horizontal().apply { addView(action("保存配置", 1f, accent = true) { saveConfiguration() }) })
         host.addView(action("⚡ 立即预约", accent = true) { showReserveDialog() })
         binding.content.post { configEditable = true }
+    }
+
+    /** 迟到保护：关闭随时生效；首次开启先弹说明，确认后才真正打开（与网页端一致，只提示一次）。 */
+    private fun lateProtectionToggled(view: SwitchMaterial, checked: Boolean) {
+        if (!checked || getPreferences(MODE_PRIVATE).getBoolean(PREF_LP_ACK, false)) {
+            scheduleConfigAutosave()
+            return
+        }
+        AlertDialog.Builder(this).setTitle("🛡 关于迟到保护").setMessage(LATE_PROTECTION_INFO)
+            .setNegativeButton("取消") { _, _ -> view.isChecked = false }
+            .setPositiveButton("我已知晓，永久关闭提示") { _, _ ->
+                getPreferences(MODE_PRIVATE).edit().putBoolean(PREF_LP_ACK, true).apply()
+                scheduleConfigAutosave()
+            }
+            .setCancelable(false)
+            .show()
     }
 
     private fun scheduleConfigAutosave() {
@@ -1523,10 +1541,8 @@ class MainActivity : AppCompatActivity() {
      * 保存配置。静默保存（自动保存）不提交密码，避免用户还没输完就把
      * vpn_password 覆盖成半截字符串并触发后端把 verified 重置为 false。
      */
-    private fun saveConfiguration(vpnPassword: String? = null, verified: Boolean = false, silent: Boolean = false) {
+    private fun saveConfiguration(silent: Boolean = false) {
         val body = collectConfigBody?.invoke() ?: run { if (!silent) setBusy(false); return }
-        if (!silent && vpnPassword != null) body.put("vpn_password", vpnPassword)
-        if (verified) body.put("verified", true)
         if (!silent) setBusy(true)
         api.post("/api/my/accounts/${api.encoded(currentPid)}", body) { response ->
             if (!response.ok) {
@@ -1537,7 +1553,7 @@ class MainActivity : AppCompatActivity() {
             accountSummary(currentPid)?.let { summary -> body.keys().forEach { key -> summary.put(key, body.get(key)) } }
             fun saved() {
                 setBusy(false)
-                toast(if (verified) "验证并保存成功" else "配置已保存")
+                toast("配置已保存")
                 binding.navigation.selectedItemId = PAGE_HOME
                 loadInitialData()
             }
@@ -1623,6 +1639,20 @@ class MainActivity : AppCompatActivity() {
         if (loggedIn()) authRow.addView(action("编辑资料", 1f) { showProfileDialog() })
         authRow.addView(action("＋ 添加学号", 1f, accent = !loggedIn()) { showAddAccountDialog() })
         accountBody.addView(authRow)
+        if (currentPid.isNotBlank()) {
+            val invalidAt = currentConfig?.optString("credential_invalid_at").orEmpty()
+            accountBody.addView(horizontal().apply {
+                addView(vertical(0).apply {
+                    addView(text("统一身份认证", 15, true))
+                    addView(text(
+                        if (invalidAt.isNotBlank()) "🔑 密码从 $invalidAt 起被学校拒绝，自动预约已暂停"
+                        else "在学校改过密码后，请在这里重新校验",
+                        12,
+                    ).apply { setTextColor(color(if (invalidAt.isNotBlank()) R.color.danger else R.color.text_muted)) })
+                }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                addView(action("重新校验", compact = true, accent = invalidAt.isNotBlank()) { showResetPasswordDialog() })
+            })
+        }
         host.addView(cardBlock("AutoLib 身份", accountBody))
 
         val libraryBody = vertical(0)
@@ -2111,6 +2141,45 @@ class MainActivity : AppCompatActivity() {
                 if (response.ok) loadInitialData()
             }
         }.show()
+    }
+
+    /**
+     * 重置统一身份认证密码：只走 /verify，通过时后端自己把 verified 置回 true、
+     * 清掉 credential_invalid_at，所有配置原样保留。已保存的密码不会回显。
+     */
+    private fun showResetPasswordDialog() {
+        val pid = currentPid
+        if (pid.isBlank()) return toast("请先添加学号")
+        val body = vertical()
+        body.addView(text("在学校改过密码后填新密码，验证通过即更新，所有配置原样保留。已保存的密码不会回显。", 13)
+            .apply { setTextColor(color(R.color.text_secondary)) })
+        body.addView(input("学号").apply { setText(pid); isEnabled = false })
+        val vpn = input("新的统一身份认证密码（网上办事大厅）", password = true)
+        body.addView(vpn)
+        val dialog = AlertDialog.Builder(this).setTitle("重置统一身份认证密码").setView(body)
+            .setNegativeButton("取消", null)
+            .setPositiveButton("验证并保存", null).create()
+        dialog.setOnShowListener {
+            val positive = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+            positive.setOnClickListener {
+                if (vpn.text.isBlank()) return@setOnClickListener toast("请填写统一身份认证密码")
+                positive.isEnabled = false
+                setBusy(true)
+                api.post("/api/my/accounts/${api.encoded(pid)}/verify", JSONObject()
+                    .put("vpn_password", vpn.text.toString())) { verify ->
+                    setBusy(false)
+                    if (verify.jsonObject?.optBoolean("verified") != true) {
+                        positive.isEnabled = true
+                        toast(verify.message("验证失败"))
+                        return@post
+                    }
+                    dialog.dismiss()
+                    toast("密码已更新并验证通过")
+                    loadInitialData()
+                }
+            }
+        }
+        dialog.show()
     }
 
     /** 设置页里「渠道名 + 当前值 + 编辑」的一行。 */
@@ -3213,6 +3282,8 @@ class MainActivity : AppCompatActivity() {
         private const val NOTIFY_MODE_SIMPLE = "simple"
         private const val NOTIFY_MODE_FULL = "full"
         private val NOTIFY_MODE_LABELS = listOf("仅异常 — 失败时才来信", "全部 — 每天成功也发")
+        /** late_protection_mode：下标 0 = shift（默认），1 = cancel，与后端取值一致。 */
+        private val LP_MODE_LABELS = listOf("不再干预，交给图书馆按规则处理（默认）", "开始前 5 分钟再探一次，仍未到馆就取消预约")
         private const val THEME_SYSTEM = "system"
         private const val THEME_LIGHT = "light"
         private const val THEME_DARK = "dark"
@@ -3223,7 +3294,7 @@ class MainActivity : AppCompatActivity() {
             "开启后，系统会在你预约开始前检查是否到馆。\n\n" +
                 "· 最多保护 1 小时：未按时到馆则自动把预约推迟 1 小时为你保留座位\n" +
                 "· 到馆自动识别：刷卡进馆后服务器会自动识别，已在馆的人不会被推迟\n" +
-                "· 1 小时后仍未到：系统将自动释放预约，杜绝恶意占座"
+                "· 1 小时后仍未到：默认不再干预，由图书馆按规则处理（可能记违约）；也可以在开关下面改成「再探一次，仍未到馆就取消预约」"
         private const val STUDY_TIME_INFO =
             "默认的学习时长按预约时段算，中午出去吃饭、提前离开都算在里面。开启后改用图书馆记录的实际在座时间。\n\n" +
                 "· 会查询什么：每晚 22:10（也可以随时手动点「立即同步」），用你的账号向图书馆查询当天每条预约的操作记录：具体的签到、暂离、返回、结束时刻。\n\n" +
