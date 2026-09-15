@@ -1,9 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    只暴露缓存目录下的 updates/ 一个子目录，装的是刚下好的升级包。
+    只暴露缓存目录下的两个子目录：updates/ 装刚下好的升级包，exports/ 装导出的表格。
     不用 external-path：APK 放在应用私有缓存里，别的应用读不到，
     系统安装器靠 FLAG_GRANT_READ_URI_PERMISSION 临时授权来读。
 -->
 <paths>
     <cache-path name="updates" path="updates/" />
+    <!-- 在馆明细导出的 CSV，Android 9 及以下没有 MediaStore.Downloads，走分享面板 -->
+    <cache-path name="exports" path="exports/" />
 </paths>

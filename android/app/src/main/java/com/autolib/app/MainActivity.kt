@@ -3,6 +3,7 @@ package com.autolib.app
 import android.annotation.SuppressLint
 import android.appwidget.AppWidgetManager
 import android.content.ComponentName
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -14,8 +15,11 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.MediaStore
 import android.text.InputType
+import android.text.SpannableStringBuilder
 import android.text.method.LinkMovementMethod
+import android.text.style.StyleSpan
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -34,6 +38,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.core.view.isVisible
 import com.autolib.app.databinding.ActivityMainBinding
 import com.google.android.material.button.MaterialButton
@@ -41,6 +46,7 @@ import com.google.android.material.card.MaterialCardView
 import com.google.android.material.switchmaterial.SwitchMaterial
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -511,7 +517,7 @@ class MainActivity : AppCompatActivity() {
         ))
         if (!tomorrow && code in ACTIVE_STATUSES) {
             val row = horizontal()
-            row.addView(action("😴 午休", 1f, accent = true) { showNapDialog(reservation) })
+            row.addView(action("😴 午休", 1f) { showNapDialog(reservation) })
             // 已经入座的话释放座位是"离馆"；还没到馆才是撤销这次预约
             row.addView(action(if (seated) "离馆" else "取消", 1f, danger = true) {
                 confirmCancel(reservation, leaving = seated)
@@ -851,6 +857,190 @@ class MainActivity : AppCompatActivity() {
         })
         body.addView(box)
         return cardBlock("图书馆信用分", body)
+    }
+
+    // ---- 真实在馆时长：一个独立的同意动作，不走配置页的自动保存 ----
+
+    /**
+     * 「真实在馆时长」开关 + 立即同步。开：先弹说明，点「同意并开启」才写；
+     * 关：三选一（已采集的明细删 / 留 / 模糊保留），删之前可以先导出。
+     * 服务端没确认之前开关先拨回去，免得界面和真实状态对不上。
+     */
+    private fun studyTimeCard(): MaterialCardView {
+        val enabled = currentConfig?.optBoolean("study_time_consent") == true
+        val syncLabel = text("每晚 22:10 自动同步；没结束的预约会等结束后再算", 12)
+            .apply { setTextColor(color(R.color.text_muted)) }
+        val syncRow = horizontal().apply {
+            isVisible = enabled
+            addView(vertical(0).apply {
+                addView(text("立即同步", 15, true))
+                addView(syncLabel)
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(action("同步", compact = true) { syncStudyTimeNow(syncLabel) })
+        }
+        val toggle = SwitchMaterial(this).apply { text = "启用"; isChecked = enabled }
+        var reverting = false
+        fun revert(to: Boolean) { reverting = true; toggle.isChecked = to; reverting = false }
+        toggle.setOnCheckedChangeListener { _, checked ->
+            if (reverting) return@setOnCheckedChangeListener
+            if (currentConfig == null) {
+                revert(false); toast("请先添加学号"); return@setOnCheckedChangeListener
+            }
+            if (checked) {
+                showStudyTimeInfo(asking = true, onCancel = { revert(false) }) {
+                    setStudyTimeConsent(true, null) { ok -> if (ok) syncRow.isVisible = true else revert(false) }
+                }
+            } else {
+                showStudyTimeOffDialog(onCancel = { revert(true) }) { keep ->
+                    setStudyTimeConsent(false, keep) { ok -> if (ok) syncRow.isVisible = false else revert(true) }
+                }
+            }
+        }
+        val body = vertical(0)
+        body.addView(toggle)
+        body.addView(horizontal().apply {
+            addView(text("按签到 / 暂离 / 返回记录统计实际在座时间。", 12)
+                .apply { setTextColor(color(R.color.text_muted)) },
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(text("说明", 12, true).apply {
+                setTextColor(color(R.color.primary)); setPadding(dp(8), dp(4), 0, dp(4))
+                setOnClickListener { showStudyTimeInfo(asking = false) }
+            })
+        })
+        body.addView(syncRow)
+        return cardBlock("真实在馆时长", body)
+    }
+
+    /** 说明弹窗；[asking] 时是开启前的同意确认，按钮变成「暂不开启 / 同意并开启」。 */
+    private fun showStudyTimeInfo(asking: Boolean, onCancel: (() -> Unit)? = null, onAgree: (() -> Unit)? = null) {
+        val builder = AlertDialog.Builder(this)
+            .setTitle("真实在馆时长")
+            .setMessage(STUDY_TIME_INFO)
+        if (asking) {
+            builder.setNegativeButton("暂不开启") { _, _ -> onCancel?.invoke() }
+                .setPositiveButton("同意并开启") { _, _ -> onAgree?.invoke() }
+                .setOnCancelListener { onCancel?.invoke() }
+        } else {
+            builder.setPositiveButton("我知道了", null)
+        }
+        builder.show()
+    }
+
+    /** 关闭时三选一：keep 原样保留 / blur 模糊保留 / delete 删除；删除再确认一次。 */
+    private fun showStudyTimeOffDialog(onCancel: () -> Unit, onConfirm: (String) -> Unit) {
+        val body = vertical()
+        body.addView(text("关闭后不再采集新的记录。已经采集到的明细怎么处理？", 13)
+            .apply { setTextColor(color(R.color.text_secondary)) })
+        val group = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
+        val options = listOf(
+            "keep" to ("保留" to "已有的精确记录原样留着，学习记录继续按它们统计。"),
+            "blur" to ("模糊保留" to "只留每次从签到到结束的时长，起止时间按半小时取整；中间的暂离、返回明细删掉。"),
+            "delete" to ("删除" to "永久删除全部采集明细，无法恢复；学习记录退回按预约时段统计。删之前可以先导出一份。"),
+        )
+        options.forEachIndexed { index, (_, labels) ->
+            group.addView(RadioButton(this).apply {
+                id = index + 1
+                text = SpannableStringBuilder().apply {
+                    append(labels.first, StyleSpan(Typeface.BOLD), 0)
+                    append("\n").append(labels.second)
+                }
+                textSize = 13f
+                setTextColor(color(R.color.text_primary))
+                setPadding(dp(6), dp(8), 0, dp(8))
+            })
+        }
+        group.check(1)
+        body.addView(group)
+        body.addView(action("⬇ 导出明细（CSV，Excel 可打开）") { exportStudyTime() })
+        AlertDialog.Builder(this)
+            .setTitle("关闭真实在馆时长")
+            .setView(body)
+            .setNegativeButton("取消") { _, _ -> onCancel() }
+            .setOnCancelListener { onCancel() }
+            .setPositiveButton("确认关闭") { _, _ ->
+                val keep = options[(group.checkedRadioButtonId - 1).coerceIn(0, options.size - 1)].first
+                if (keep != "delete") return@setPositiveButton onConfirm(keep)
+                AlertDialog.Builder(this)
+                    .setTitle("确定永久删除？")
+                    .setMessage("已采集的在馆明细删除后无法恢复。")
+                    .setNegativeButton("再想想") { _, _ -> onCancel() }
+                    .setOnCancelListener { onCancel() }
+                    .setPositiveButton("删除") { _, _ -> onConfirm(keep) }
+                    .show()
+            }
+            .show()
+    }
+
+    private fun setStudyTimeConsent(enabled: Boolean, keep: String?, done: (Boolean) -> Unit) {
+        val pid = currentPid
+        val body = JSONObject().put("enabled", enabled)
+        if (!enabled) body.put("keep", keep ?: "keep")
+        setBusy(true)
+        api.post("/api/my/accounts/${api.encoded(pid)}/study_time_consent", body) { response ->
+            setBusy(false)
+            if (!response.ok) {
+                toast(response.message("保存失败")); done(false); return@post
+            }
+            if (pid == currentPid) currentConfig?.put("study_time_consent", enabled)
+            toast(response.message(if (enabled) "已开启" else "已关闭"))
+            done(true)
+        }
+    }
+
+    /** 手动同步只补还没折算的记录，服务端每条只写一次，点多少次都不会把时长累加。 */
+    private fun syncStudyTimeNow(label: TextView) {
+        if (currentPid.isBlank()) return toast("请先添加学号")
+        label.text = "正在查询…"
+        api.post("/api/my/accounts/${api.encoded(currentPid)}/study_time_sync") { response ->
+            val message = response.message(if (response.ok) "已同步" else "同步失败")
+            label.text = message
+            toast(message)
+        }
+    }
+
+    /**
+     * 导出在馆明细：Android 10 起直接落到系统「下载」目录；更早的系统没有
+     * MediaStore.Downloads，写进私有缓存后拉起分享面板，由用户自己选存哪。
+     */
+    private fun exportStudyTime() {
+        setBusy(true)
+        Thread {
+            val response = api.getBlocking("/api/my/study_time/export", readTimeoutMs = 60_000)
+            val name = "autolib-study-time-${SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())}.csv"
+            val result = runCatching {
+                if (!response.ok) error(response.message("导出失败"))
+                // 服务端已带 BOM，读成字符串后 U+FEFF 还在，原样写回去 Excel 才不会乱码
+                val bytes = response.body.toByteArray(Charsets.UTF_8)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val values = ContentValues().apply {
+                        put(MediaStore.Downloads.DISPLAY_NAME, name)
+                        put(MediaStore.Downloads.MIME_TYPE, "text/csv")
+                        put(MediaStore.Downloads.IS_PENDING, 1)
+                    }
+                    val resolver = contentResolver
+                    val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                        ?: error("无法写入下载目录")
+                    resolver.openOutputStream(uri)!!.use { it.write(bytes) }
+                    values.clear(); values.put(MediaStore.Downloads.IS_PENDING, 0)
+                    resolver.update(uri, values, null, null)
+                    "已保存到「下载」：$name"
+                } else {
+                    val dir = File(cacheDir, "exports").apply { mkdirs() }
+                    val file = File(dir, name).apply { writeBytes(bytes) }
+                    val uri = FileProvider.getUriForFile(this, "${BuildConfig.APPLICATION_ID}.fileprovider", file)
+                    startActivity(Intent.createChooser(
+                        Intent(Intent.ACTION_SEND).setType("text/csv")
+                            .putExtra(Intent.EXTRA_STREAM, uri)
+                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+                        "导出在馆明细"))
+                    "已生成 CSV，选一个应用保存或发送"
+                }
+            }
+            runOnUiThread {
+                setBusy(false)
+                toast(result.getOrElse { it.message ?: "导出失败" })
+            }
+        }.start()
     }
 
     private fun renderCredit(box: LinearLayout, subtitle: TextView, data: JSONObject) {
@@ -1368,6 +1558,9 @@ class MainActivity : AppCompatActivity() {
         host.addView(cardBlock("图书馆学号", libraryBody))
         if (currentPid.isNotBlank()) host.addView(creditCard())
 
+        host.addView(section("学习记录"))
+        host.addView(studyTimeCard())
+
         host.addView(section("提醒"))
         val notifySwitch = SwitchMaterial(this).apply {
             text = "抢座结果通知"
@@ -1480,6 +1673,11 @@ class MainActivity : AppCompatActivity() {
                 val daily = data.optJSONArray("daily")?.takeIf { it.length() > 0 }
                     ?: dailyFromRecent(recent)
                 content.addView(heatmapBlock(daily, data.optInt("heatmap_days", 371)))
+                if (data.optBoolean("real_time")) {
+                    content.addView(text("按真实在馆时长统计，每晚 22:10 更新；还没结束的预约暂按预约时段计", 12).apply {
+                        setTextColor(color(R.color.text_muted)); gravity = Gravity.CENTER
+                    })
+                }
             }
             replaceCard(stats, content)
         }
@@ -2709,6 +2907,11 @@ class MainActivity : AppCompatActivity() {
                 "· 最多保护 1 小时：未按时到馆则自动把预约推迟 1 小时为你保留座位\n" +
                 "· 到馆自动识别：刷卡进馆后服务器会自动识别，已在馆的人不会被推迟\n" +
                 "· 1 小时后仍未到：系统将自动释放预约，杜绝恶意占座"
+        private const val STUDY_TIME_INFO =
+            "默认的学习时长按预约时段算，中午出去吃饭、提前离开都算在里面。开启后改用图书馆记录的实际在座时间。\n\n" +
+                "· 会查询什么：每晚 22:10（也可以随时手动点「立即同步」），用你的账号向图书馆查询当天每条预约的操作记录：具体的签到、暂离、返回、结束时刻。\n\n" +
+                "· 保存在哪、谁能看：这些时刻会保存在本站服务器上，只有你自己能看到。管理员仅在排查故障等技术原因时可能接触到，不会用于其他用途。\n\n" +
+                "· 随时可以关：关闭时由你选：已采集的明细删除、原样保留、或只留半小时粒度的起止时长；删除前可以先导出成表格。"
         private const val NAP_INFO =
             "专为午休设计的快捷功能，出门吃饭前点一下，回来时座位还在。\n\n" +
                 "· 自动续约下午：系统立即取消当前预约，并以相同座位重新预约下午时段（默认 14:00 起）\n" +
