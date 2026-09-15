@@ -194,13 +194,14 @@ LIBRARY_OPEN_TIME = os.getenv("LIBRARY_OPEN_TIME", "07:30")
 SEGMENT_HOLD_ENABLED = os.getenv("SEGMENT_HOLD_ENABLED", "1").strip().lower() not in (
     "0", "false", "no", "off"
 )
-# 换约的最后期限：占位预约开始前这么多分钟。正常情况下 5 次重试几分钟就试完了，
-# 这条只是兜底——容器重启/调度积压把重试拖到占位快开始时，不能再动手上那张预约。
+# 换约的最后期限：占位预约开始前这么多分钟。到点还没换成就停手并告警——再动就来不及了，
+# 手上那张占位预约至少还能保住座位。
 SEGMENT_SWAP_DEADLINE_MINUTES = int(os.getenv("SEGMENT_SWAP_DEADLINE_MINUTES", "30"))
-# 补约/换约失败后每分钟重试一次，连续失败这么多次才判失败并通知用户；之前一声不响。
-# 原先第一次失败就发邮件，VPN 网关抽风一秒（2026-09-14 10:33 的 502）也把人吵醒，
-# 下一分钟其实就成了。也不能无限试：每次重试都要重走一遍 webvpn + CAS。
-SEGMENT_RETRY_MAX_ATTEMPTS = int(os.getenv("SEGMENT_RETRY_MAX_ATTEMPTS", "5"))
+# 补约/换约失败后每分钟重试，一直试到自然终点（占位段：最后期限；纯排队段：时段开始）。
+# 连续失败这么多次时给用户发一条「暂未成功，正在每分钟重试」，之前和之后都不再吵他。
+# 原先第一次失败就发邮件，VPN 网关抽风一秒（2026-09-14 10:33 的 502）也把人吵醒，下一分钟其实就成了。
+# 每分钟重试并不重登：会话在轮次之间 prelogin.store/take 复用，一次重试就是一两个请求。
+SEGMENT_RETRY_NOTIFY_AFTER = int(os.getenv("SEGMENT_RETRY_NOTIFY_AFTER", "5"))
 
 def bookable_at(resv_begin_time: str) -> datetime:
     """图书馆规则本身：该时段最早可以下单的时刻（开始时间 − 31 小时）。"""
@@ -706,6 +707,26 @@ def _find_reservation(
     return None
 
 
+def _find_overlapping_reservation(
+    reservations: List[Dict[str, Any]], resv_begin_time: str, resv_end_time: str,
+    ignore_uuid: str = "",
+) -> Optional[Dict[str, Any]]:
+    """
+    在有效预约里找和目标时段**有重叠**的那一条（起止不必相等），占位那张除外。
+
+    用户在图书馆 App 里自己改过约（取消占位、手动约了个别的时间）之后，我们再发目标时段
+    只会被「用户在当前时段有预约」顶回来，每分钟试到期限也不会变，还会最后发一条
+    错误的「手上仍是占位预约请手动处理」。看到这种重叠就该认账：人已经自己处理了。
+    """
+    for item in reservations:
+        if ignore_uuid and item.get("uuid") == ignore_uuid:
+            continue
+        begin, end = item.get("resvBeginTime") or "", item.get("resvEndTime") or ""
+        if begin and end and begin < resv_end_time and end > resv_begin_time:
+            return item
+    return None
+
+
 def _place_hold(
     library: LibrarySystem,
     pid: str,
@@ -824,6 +845,14 @@ def _swap_hold_to_segment(
                       f"{seg_label} 已取消占位 {hold.get('dev_name')} "
                       f"{hold.get('resv_begin_time')}，立刻改约精确时段")
     else:
+        manual = _find_overlapping_reservation(reservations, resv_begin_time, resv_end_time, hold_uuid)
+        if manual:
+            dev_name = (manual.get("devInfo") or {}).get("devName") or "座位"
+            line = (f"✅ {seg_label} · 你已手动改约为 {manual.get('resvBeginTime', '')[11:16]}-"
+                    f"{manual.get('resvEndTime', '')[11:16]} · {dev_name}，不再换约")
+            log_with_user(logger, 'info', pid, '占位换约',
+                          f"{seg_label} 占位已不在，且用户自己约了重叠时段，按已处理收尾: {line}")
+            return True, line
         log_with_user(logger, 'info', pid, '占位换约',
                       f"{seg_label} 占位预约已不在（可能被手动取消），直接按普通补约下单")
 
@@ -851,37 +880,33 @@ def _retry_or_finish_segment(
     now: datetime,
 ) -> None:
     """
-    补约/换约没成时的收尾：每分钟重试，连续失败 SEGMENT_RETRY_MAX_ATTEMPTS 次才判失败。
+    补约/换约没成时的收尾：留在队列里每分钟重试，不因为失败次数多就判死。
 
-    判失败之前不通知——窗口边界/网络/登录那几种一次性抖动下一分钟就自己好了，
-    为这个发邮件只会让人虚惊一场。真判失败时必须通知（always=True）：
-      * 占位过的段——手上那张预约开始时间比配置的早，到点签不上到就是迟到，得让他手动处理。
-        另外占位快开始（SEGMENT_SWAP_DEADLINE_MINUTES）时不管试了几次都不能再动它。
-      * 纯排队的段——这个时段就是没约上。
+    只有两种情况会停：占位段到了最后期限（再动手上那张预约就来不及了，必须吵醒用户，
+    因为他手上的开始时间比配置的早），纯排队段过了时段开始（process_due_segments 里收口）。
+    通知只在连续失败第 SEGMENT_RETRY_NOTIFY_AFTER 次发一条「暂未成功，正在重试」——
+    窗口边界/网络/登录那几种一次性抖动下一分钟就自己好了，为它发邮件只会让人虚惊一场。
     """
     pid = doc.get("pid", "?")
     hold = doc.get("hold") or {}
     attempts = int(doc.get("attempts") or 0) + 1
-    give_up = attempts >= SEGMENT_RETRY_MAX_ATTEMPTS
 
     if hold:
         hold_begin = hold.get("resv_begin_time") or ""
         deadline = (datetime.strptime(hold_begin, TIME_FMT)
                     - timedelta(minutes=SEGMENT_SWAP_DEADLINE_MINUTES)) if hold_begin else None
         if deadline is not None and now >= deadline:
-            give_up = True
-        final_line = (f"❌ {seg_label}: 换约连续失败 {attempts} 次，"
-                      f"手上仍是占位预约（{hold.get('dev_name', '座位')} {hold_begin[11:16]} 起，"
-                      f"比配置的早），请手动处理")
-        give_up_title = "❌ 占位换约失败"
+            final_line = (f"❌ {seg_label}: 换约失败 {attempts} 次且已到最后期限，"
+                          f"手上仍是占位预约（{hold.get('dev_name', '座位')} {hold_begin[11:16]} 起，"
+                          f"比配置的早），请手动处理")
+            _finish_pending_segment(doc, "failed", final_line)
+            notify_user(cfg, "❌ 占位换约失败", f"学号 {pid}\n{final_line}", always=True)
+            return
+        retry_title = "⚠️ 座位换约暂未成功"
+        retry_body = f"{line}\n座位还占着，正在每分钟重试，换成了再告诉你"
     else:
-        final_line = f"{line}（已连续重试 {attempts} 次）"
-        give_up_title = "❌ 补约失败"
-
-    if give_up:
-        _finish_pending_segment(doc, "failed", final_line)
-        notify_user(cfg, give_up_title, f"学号 {pid}\n{final_line}", always=True)
-        return
+        retry_title = "⚠️ 补约暂未成功"
+        retry_body = f"{line}\n正在每分钟重试，直到时段开始"
 
     pending_segments.update_one(
         {"_id": doc["_id"]},
@@ -889,6 +914,8 @@ def _retry_or_finish_segment(
     )
     log_with_user(logger, 'warning', pid, '排队补约',
                   f"{seg_label} 第 {attempts} 次未成功，保持排队下一轮重试: {line}")
+    if attempts == SEGMENT_RETRY_NOTIFY_AFTER:
+        notify_user(cfg, retry_title, f"学号 {pid}\n{retry_body}", always=True)
 
 
 def process_due_segments(now: Optional[datetime] = None) -> None:
@@ -918,7 +945,13 @@ def process_due_segments(now: Optional[datetime] = None) -> None:
         cfg: Optional[Dict[str, Any]] = None
         try:
             if datetime.strptime(resv_begin_time, TIME_FMT) <= now:
-                _finish_pending_segment(doc, "expired", f"⚠️ {seg_label}: 已过开始时间，放弃补约")
+                attempts = int(doc.get("attempts") or 0)
+                final_line = f"❌ {seg_label}: 已过开始时间，补约失败（重试了 {attempts} 次）"
+                _finish_pending_segment(doc, "expired", final_line)
+                if attempts >= SEGMENT_RETRY_NOTIFY_AFTER:
+                    # 收到过「正在重试」的人得知道最后没成，不然以为还在试
+                    cfg = user_config_info.find_one({"pid": pid}) or {}
+                    notify_user(cfg, "❌ 补约失败", f"学号 {pid}\n{final_line}", always=True)
                 continue
 
             cfg = user_config_info.find_one({"pid": pid, "is_reserved": "True", "verified": True})
@@ -950,6 +983,17 @@ def process_due_segments(now: Optional[datetime] = None) -> None:
                 ok, line = _reserve_one_segment(
                     library, pid, seat_ids, resv_begin_time, resv_end_time, seg_label
                 )
+                if not ok:
+                    # 失败了才多查这一次：被自己手动约的重叠时段顶回来的话，试到时段开始也不会变
+                    manual = _find_overlapping_reservation(
+                        _live_reservations(library) or [], resv_begin_time, resv_end_time)
+                    if manual:
+                        dev_name = (manual.get("devInfo") or {}).get("devName") or "座位"
+                        ok, line = True, (
+                            f"✅ {seg_label} · 你已手动约了 {manual.get('resvBeginTime', '')[11:16]}-"
+                            f"{manual.get('resvEndTime', '')[11:16]} · {dev_name}，不再补约")
+                        log_with_user(logger, 'info', pid, '排队补约',
+                                      f"{seg_label} 用户自己约了重叠时段，按已处理收尾")
                 if ok:
                     try:
                         # get_reservation_info 会重建 owned_seat，迟到保护是照着它扫的，
@@ -960,7 +1004,8 @@ def process_due_segments(now: Optional[datetime] = None) -> None:
 
             if ok:
                 _finish_pending_segment(doc, "done", line)
-                notify_user(cfg, "✅ 补约成功", f"学号 {pid}\n{line}")
+                title = "ℹ️ 已按你手动的预约处理" if "手动" in line else "✅ 补约成功"
+                notify_user(cfg, title, f"学号 {pid}\n{line}")
             else:
                 # 一次失败不收尾：占位过的段收尾等于接受更早的时间，
                 # 纯排队的段收尾等于让一次抖动白吃掉一个时段。

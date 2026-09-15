@@ -357,9 +357,21 @@ class ProcessDueSegmentsTests(unittest.TestCase):
         self.assertNotIn("status", written, "第一次失败不能收尾，要留在队列里重试")
         self.assertEqual(written["attempts"], 1)
 
+    def test_plain_rebooking_rejected_by_own_manual_booking_is_settled(self):
+        self.library.reserve_seat.return_value = ("❌ 用户在当前时段有预约", None)
+        self.library.get_reservation_info.return_value = ([{
+            "uuid": "manual-uuid", "resvBeginTime": "2026-09-08 18:00:00",
+            "resvEndTime": "2026-09-08 22:00:00", "devInfo": {"devName": "2F-B013"},
+        }], "查询成功")
+
+        _, notify = self._run()
+
+        self.assertEqual(self.pending.updates[0]["update"]["$set"]["status"], "done")
+        self.assertIn("手动", notify.call_args.args[1])
+
     def test_transient_failures_do_not_notify_the_user(self):
         """VPN 网关抽风一秒下一分钟就好了，为它发邮件只会让人虚惊一场。"""
-        self.doc["attempts"] = scheduled_task.SEGMENT_RETRY_MAX_ATTEMPTS - 2
+        self.doc["attempts"] = scheduled_task.SEGMENT_RETRY_NOTIFY_AFTER - 2
         self.library.reserve_seat.return_value = ("❌ 网络请求异常", None)
 
         _, notify = self._run()
@@ -367,16 +379,38 @@ class ProcessDueSegmentsTests(unittest.TestCase):
         notify.assert_not_called()
         self.assertNotIn("status", self.pending.updates[0]["update"]["$set"])
 
-    def test_retries_are_capped_so_the_gateway_is_not_hammered(self):
-        """连续失败满上限才判失败，也只在这时通知一次。"""
-        self.doc["attempts"] = scheduled_task.SEGMENT_RETRY_MAX_ATTEMPTS - 1
+    def test_nth_consecutive_failure_notifies_once_but_keeps_retrying(self):
+        self.doc["attempts"] = scheduled_task.SEGMENT_RETRY_NOTIFY_AFTER - 1
         self.library.reserve_seat.return_value = ("❌ 所有座位预约失败", None)
 
         _, notify = self._run()
 
-        self.assertEqual(self.pending.updates[0]["update"]["$set"]["status"], "failed")
+        written = self.pending.updates[0]["update"]["$set"]
+        self.assertNotIn("status", written, "通知归通知，这段还得留在队列里试")
+        self.assertEqual(written["attempts"], scheduled_task.SEGMENT_RETRY_NOTIFY_AFTER)
         notify.assert_called_once()
+        self.assertIn("暂未成功", notify.call_args.args[1])
         self.assertTrue(notify.call_args.kwargs.get("always"))
+
+    def test_failures_after_the_notice_stay_quiet(self):
+        self.doc["attempts"] = scheduled_task.SEGMENT_RETRY_NOTIFY_AFTER + 40
+        self.library.reserve_seat.return_value = ("❌ 所有座位预约失败", None)
+
+        _, notify = self._run()
+
+        notify.assert_not_called()
+        self.assertNotIn("status", self.pending.updates[0]["update"]["$set"])
+
+    def test_expiry_after_a_notice_tells_the_user_it_never_made_it(self):
+        """收到过「正在重试」的人得知道最后没成，不然以为还在试。"""
+        self.now = datetime(2026, 9, 9, 9, 0, 1)
+        self.doc["attempts"] = scheduled_task.SEGMENT_RETRY_NOTIFY_AFTER + 3
+
+        _, notify = self._run()
+
+        self.assertEqual(self.pending.updates[0]["update"]["$set"]["status"], "expired")
+        notify.assert_called_once()
+        self.assertIn("补约失败", notify.call_args.args[1])
 
 
 class HoldSwapTests(unittest.TestCase):
@@ -488,8 +522,8 @@ class HoldSwapTests(unittest.TestCase):
 
         self.assertNotEqual(self._last_status(), "done")
 
-    def test_swap_gives_up_at_the_deadline_whatever_the_attempt_count(self):
-        """占位快开始时不管试了几次都不能再动它；放弃时必须吵醒用户，因为手上的时间是错的。"""
+    def test_swap_only_gives_up_at_the_deadline(self):
+        """一直重试到占位快开始为止；真放弃时必须吵醒用户，因为手上的时间是错的。"""
         self.now = datetime(2026, 9, 8, 13, 40)
         self.library.delete_seat.return_value = (False, "删除座位失败")
 
@@ -510,16 +544,40 @@ class HoldSwapTests(unittest.TestCase):
         self.assertNotIn("status", changes)
         notify.assert_not_called()
 
-    def test_swap_fails_after_consecutive_failures_and_notifies_once(self):
-        self.doc["attempts"] = scheduled_task.SEGMENT_RETRY_MAX_ATTEMPTS - 1
+    def test_nth_consecutive_swap_failure_notifies_but_never_gives_up(self):
+        self.doc["attempts"] = scheduled_task.SEGMENT_RETRY_NOTIFY_AFTER - 1
         self.library.delete_seat.return_value = (False, "删除座位失败")
 
         notify = self._run()
 
-        self.assertEqual(self._last_status(), "failed")
+        self.assertNotEqual(self._last_status(), "failed", "换约失败几次都不能判死，手上的时间是错的")
         notify.assert_called_once()
+        self.assertIn("换约暂未成功", notify.call_args.args[1])
+        self.assertIn("每分钟重试", notify.call_args.args[2])
         self.assertTrue(notify.call_args.kwargs.get("always"))
-        self.assertIn("占位", notify.call_args.args[2])
+
+    def test_swap_failures_after_the_notice_stay_quiet(self):
+        self.doc["attempts"] = scheduled_task.SEGMENT_RETRY_NOTIFY_AFTER + 200
+        self.library.delete_seat.return_value = (False, "删除座位失败")
+
+        notify = self._run()
+
+        notify.assert_not_called()
+        self.assertNotEqual(self._last_status(), "failed")
+
+    def test_manual_overlapping_booking_after_hold_is_gone_ends_the_swap(self):
+        """用户自己取消占位、手动约了别的时间：再发目标时段只会被顶回来，认账收尾。"""
+        manual = {"uuid": "manual-uuid", "resvBeginTime": "2026-09-08 14:00:00",
+                  "resvEndTime": "2026-09-08 22:00:00", "devInfo": {"devName": "3F-A172"}}
+        self.library.get_reservation_info.side_effect = [([manual], "查询成功")]
+
+        notify = self._run()
+
+        self.library.reserve_seat.assert_not_called()
+        self.library.delete_seat.assert_not_called()
+        self.assertEqual(self._last_status(), "done")
+        self.assertIn("手动", notify.call_args.args[1])
+        self.assertIn("14:00-22:00", notify.call_args.args[2])
 
     def test_hold_already_gone_falls_back_to_plain_rebooking(self):
         self.library.get_reservation_info.side_effect = [
