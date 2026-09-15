@@ -162,17 +162,17 @@
             android:id="@+id/w_action"
             android:layout_width="0dp"
             android:layout_height="34dp"
-            android:layout_weight="1.5"
-            android:background="@drawable/bg_widget_btn_accent"
+            android:layout_weight="1"
+            android:background="@drawable/bg_widget_btn_outline"
             android:gravity="center"
             android:maxLines="1"
-            android:text="取消预约"
-            android:textColor="@color/on_primary"
+            android:text="😴 午休"
+            android:textColor="@color/text_primary"
             android:textSize="12sp"
             android:textStyle="bold" />
 
         <TextView
-            android:id="@+id/w_action_nap"
+            android:id="@+id/w_action_cancel"
             android:layout_width="0dp"
             android:layout_height="34dp"
             android:layout_marginStart="8dp"
@@ -180,7 +180,7 @@
             android:background="@drawable/bg_widget_btn_outline"
             android:gravity="center"
             android:maxLines="1"
-            android:text="午休"
+            android:text="取消"
             android:textColor="@color/text_primary"
             android:textSize="12sp"
             android:textStyle="bold" />

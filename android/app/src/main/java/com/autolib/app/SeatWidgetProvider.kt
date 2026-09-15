@@ -26,12 +26,12 @@ import java.util.Locale
 /**
  * 桌面小组件，三个规格共用 [ReservationCache] 一个数据源：
  *
- * - SMALL  2×2 专注今天：座位、进度、「取消预约」
+ * - SMALL  2×2 专注今天：座位、进度、「午休 / 取消」
  * - MEDIUM 4×2 今天 + 明日两栏
  * - LARGE  4×4 完整一天 + 明日 + 本周节奏
  *
  * 小组件由桌面进程渲染，只能用 RemoteViews 白名单里的控件，「本周节奏」这类
- * 图表画进 Bitmap 塞给 ImageView。「取消预约」不进 App，弹一个透明的
+ * 图表画进 Bitmap 塞给 ImageView。「取消」不进 App，弹一个透明的
  * [WidgetCancelActivity] 二次确认后直接发请求；午休 / 调整明日要选时间，
  * 深链进 App 打开对应对话框。
  */
@@ -90,7 +90,7 @@ object SeatWidgets {
                 views.setTextViewText(R.id.w_time, "打开 App 同步")
                 views.setViewVisibility(R.id.w_progress, View.GONE)
                 views.setTextViewText(R.id.w_status, "")
-                action(context, views, R.id.w_action, "打开 App", accent = true, intent = openApp(context, "open", 20))
+                soloAction(context, views, "打开 App", openApp(context, "open", 20))
             }
             !s.hasSeat -> {
                 badge(context, views, R.id.w_badge, null)
@@ -98,7 +98,7 @@ object SeatWidgets {
                 views.setTextViewText(R.id.w_time, if (s.summary.isNotBlank()) s.summary else "今天还没有座位")
                 views.setViewVisibility(R.id.w_progress, View.GONE)
                 views.setTextViewText(R.id.w_status, "")
-                action(context, views, R.id.w_action, "⚡ 立即预约", accent = true, intent = openApp(context, "reserve", 24))
+                soloAction(context, views, "⚡ 立即预约", openApp(context, "reserve", 24))
             }
             else -> {
                 badge(context, views, R.id.w_badge, statusBadge(s))
@@ -108,7 +108,7 @@ object SeatWidgets {
                 views.setViewVisibility(R.id.w_progress, View.VISIBLE)
                 views.setProgressBar(R.id.w_progress, 100, progressPercent(s), false)
                 views.setTextViewText(R.id.w_status, statusLine(context, s, compact = true))
-                bindPrimaryAction(context, views, R.id.w_action, s)
+                bindPrimaryAction(context, views, s)
             }
         }
         return views
@@ -128,7 +128,7 @@ object SeatWidgets {
                 badge(context, views, R.id.w_badge, null)
                 views.setViewVisibility(R.id.w_progress, View.GONE)
                 views.setTextViewText(R.id.w_status, "")
-                action(context, views, R.id.w_action, "打开 App", accent = true, intent = openApp(context, "open", 20))
+                soloAction(context, views, "打开 App", openApp(context, "open", 20))
             }
             !s.hasSeat -> {
                 views.setTextViewText(R.id.w_seat, "暂无预约")
@@ -136,7 +136,7 @@ object SeatWidgets {
                 badge(context, views, R.id.w_badge, null)
                 views.setViewVisibility(R.id.w_progress, View.GONE)
                 views.setTextViewText(R.id.w_status, "")
-                action(context, views, R.id.w_action, "⚡ 立即预约", accent = true, intent = openApp(context, "reserve", 24))
+                soloAction(context, views, "⚡ 立即预约", openApp(context, "reserve", 24))
             }
             else -> {
                 views.setTextViewText(R.id.w_seat, s.seat)
@@ -145,7 +145,7 @@ object SeatWidgets {
                 views.setViewVisibility(R.id.w_progress, View.VISIBLE)
                 views.setProgressBar(R.id.w_progress, 100, progressPercent(s), false)
                 views.setTextViewText(R.id.w_status, statusLine(context, s))
-                bindPrimaryAction(context, views, R.id.w_action, s)
+                bindPrimaryAction(context, views, s)
             }
         }
 
@@ -193,10 +193,8 @@ object SeatWidgets {
                     views.setTextViewText(R.id.w_remaining, "")
                 }
             }
-            bindPrimaryAction(context, views, R.id.w_action, s)
-            views.setViewVisibility(R.id.w_action_nap, View.VISIBLE)
+            bindPrimaryAction(context, views, s)
             views.setViewVisibility(R.id.w_action_tomorrow, View.VISIBLE)
-            views.setOnClickPendingIntent(R.id.w_action_nap, openApp(context, "nap", 21))
             views.setOnClickPendingIntent(R.id.w_action_tomorrow, openApp(context, "tomorrow", 23))
         } else {
             badge(context, views, R.id.w_badge, null)
@@ -210,10 +208,9 @@ object SeatWidgets {
             views.setViewVisibility(R.id.w_progress, View.GONE)
             views.setTextViewText(R.id.w_elapsed, "")
             views.setTextViewText(R.id.w_remaining, "")
-            views.setViewVisibility(R.id.w_action_nap, View.GONE)
             views.setViewVisibility(R.id.w_action_tomorrow, View.GONE)
-            if (fresh) action(context, views, R.id.w_action, "⚡ 立即预约", accent = true, intent = openApp(context, "reserve", 24))
-            else action(context, views, R.id.w_action, "打开 App", accent = true, intent = openApp(context, "open", 20))
+            if (fresh) soloAction(context, views, "⚡ 立即预约", openApp(context, "reserve", 24))
+            else soloAction(context, views, "打开 App", openApp(context, "open", 20))
         }
 
         fillTomorrow(context, views, s,
@@ -281,25 +278,33 @@ object SeatWidgets {
     }
 
     /**
-     * 今日主按钮：活跃预约时是「取消预约」（已入座则叫「离馆」，同一个接口），
-     * 点了弹 [WidgetCancelActivity] 二次确认，不会一碰就取消。
+     * 今日动作行。活跃预约时是两个小按钮：「午休」深链进 App，「取消」（已入座则叫
+     * 「离馆」，同一个接口）弹 [WidgetCancelActivity] 二次确认，不会一碰就取消。
+     * 已结束 / 已违约只剩一个「再预约」，右边那个藏起来让它撑满。
      */
-    private fun bindPrimaryAction(context: Context, views: RemoteViews, id: Int, s: ReservationCache.Snapshot) {
+    private fun bindPrimaryAction(context: Context, views: RemoteViews, s: ReservationCache.Snapshot) {
         val code = s.statusCode
         when {
-            code in FINISHED_CODES ->
-                action(context, views, id, "我还能学！", accent = true, intent = openApp(context, "reserve", 24))
-            code in BREACHED_CODES ->
-                action(context, views, id, "⚡ 再次预约", accent = true, intent = openApp(context, "reserve", 24))
-            else ->
-                action(context, views, id, if (s.seated) "离馆" else "取消预约", accent = false,
+            code in FINISHED_CODES -> soloAction(context, views, "我还能学！", openApp(context, "reserve", 24))
+            code in BREACHED_CODES -> soloAction(context, views, "⚡ 再次预约", openApp(context, "reserve", 24))
+            else -> {
+                action(context, views, R.id.w_action, "😴 午休", accent = false, intent = openApp(context, "nap", 21))
+                views.setViewVisibility(R.id.w_action_cancel, View.VISIBLE)
+                action(context, views, R.id.w_action_cancel, if (s.seated) "离馆" else "取消", accent = false,
                     intent = PendingIntent.getActivity(
                         context, 30,
                         Intent(context, WidgetCancelActivity::class.java)
                             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
                     ))
+            }
         }
+    }
+
+    /** 动作行只放一个主色按钮（立即预约 / 打开 App / 再预约），取消那个藏起来。 */
+    private fun soloAction(context: Context, views: RemoteViews, label: String, intent: PendingIntent) {
+        action(context, views, R.id.w_action, label, accent = true, intent = intent)
+        views.setViewVisibility(R.id.w_action_cancel, View.GONE)
     }
 
     private fun action(
