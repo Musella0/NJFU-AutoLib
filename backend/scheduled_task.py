@@ -145,6 +145,12 @@ pending_segments = db.pending_segments  # 超出提前预约窗口、等着补�
 
 IN_LIBRARY_STATUSES = {1093, 3141}  # 1093=使用中，3141=暂离，都表示已刷卡入馆
 PENDING_CHECKIN_STATUS = 1027       # 待签到——只有这个状态的预约才谈得上「迟到」
+
+# 迟到保护提前多久触发。原来是 7 分钟，纯靠猜；现在有了在馆探针（能直接问出人到没到），
+# 只需要留够「取消 + 重新预约 + 重试」的时间，所以收到 5 分钟，离预约开始更近、
+# 给用户多留了 2 分钟赶路。别往 1.2 分钟以内挪——预约在 begin−1.2min 生效，
+# 生效之后还能不能取消没测过。
+LATE_PROTECT_LEAD_MINUTES = int(os.getenv("LATE_PROTECT_LEAD_MINUTES", "5"))
 _arrival_checks_backfilled = False
 
 # 并发抢座：7:00 时所有账号并行执行，避免串行排队让靠后的用户错过黄金窗口。
@@ -1793,7 +1799,7 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
     执行迟到保护动作
 
     迟到保护流程：
-    0. 检查"我已到馆"标志 / 用户是否已在馆（已签到则跳过）
+    0. 检查"我已到馆"标志 / 预约状态 / 在馆探针（人已在馆则跳过，不动他的预约）
     1. 取消原预约
     2. 根据 protection_max_minutes 决定行为：
        - 0 / 黑名单：仅取消，不重新预约
@@ -1887,6 +1893,31 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
             log_with_user(logger, 'warning', pid, '迟到保护',
                 f"检查签到状态失败，继续执行迟到保护: {str(e)}")
 
+        # 最后一道否决闸：直接问图书馆「这人此刻在不在馆里」。
+        # 上面那道看 resvStatus 的闸门在这个时间点是结构性空转——预约要到 begin−1.2min
+        # 才生效，在那之前所有人恒为 1027 待签到，看不出谁已经刷闸机进来了。
+        # 在馆探针不依赖预约，任意时刻都能问，于是人已经在馆的就别动他的预约：
+        # 反正生效那一秒系统会自动替他签到，推后一小时纯属误伤。
+        # 探不出来（None）按原样继续保护——失败方向要偏向「宁可多推一次」，
+        # 误判成在馆才是真的坑人（放过去 → 人没来 → 违约扣分）。
+        try:
+            in_library = library.is_in_library()
+        except Exception as e:
+            in_library = None
+            log_with_user(logger, 'warning', pid, '迟到保护',
+                f"在馆探测异常，继续执行迟到保护: {str(e)}")
+        if in_library is True:
+            log_with_user(logger, 'info', pid, '迟到保护',
+                "在馆探针：用户此刻已在馆内，跳过迟到保护")
+            _record_visit_log(pid, seat_dict['uuid'], seat_dict['target_time'], dev_name)
+            return
+        if in_library is None:
+            log_with_user(logger, 'warning', pid, '迟到保护',
+                "在馆探针没给出结论，按未到馆继续执行迟到保护")
+        else:
+            log_with_user(logger, 'info', pid, '迟到保护',
+                "在馆探针：用户不在馆内，继续执行迟到保护")
+
         # 取消原预约
         try:
             success, message = library.delete_seat(seat_dict["uuid"])
@@ -1968,7 +1999,8 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
 
 def register_late_protection_jobs(scheduler) -> None:
     """
-    把今天还没到点的迟到保护任务注册到传入的调度器上（在预约开始前 7 分钟触发）。
+    把今天还没到点的迟到保护任务注册到传入的调度器上
+    （提前量由 LATE_PROTECT_LEAD_MINUTES 决定，默认预约开始前 5 分钟）。
 
     这个函数是**幂等**的：job_id 固定 + replace_existing，重复调用只会覆盖同一批任务。
     调度器由调用方（scheduler_runner）持有并常驻，所以本函数不启动、不关闭、不阻塞。
@@ -2017,7 +2049,7 @@ def register_late_protection_jobs(scheduler) -> None:
 
                     begin_str = seat_dict['target_time'][:19]
                     begin_time = datetime.strptime(begin_str, "%Y-%m-%d %H:%M:%S")
-                    exec_time = begin_time - timedelta(minutes=7)
+                    exec_time = begin_time - timedelta(minutes=LATE_PROTECT_LEAD_MINUTES)
 
                     # 只注册未来的任务
                     if exec_time > now:

@@ -24,7 +24,7 @@ import html
 import os
 import re
 from typing import Dict, List, Optional, Tuple, Any, Union
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, unquote
 
 import requests
 from pymongo import MongoClient, ASCENDING, DESCENDING
@@ -1326,6 +1326,86 @@ class LibrarySystem(BaseSystem):
 
         except Exception as e:
             return None, f"查询扣分记录时发生异常: {str(e)}", 0
+
+    # 在馆探针的判据。phoneSeatReserve/duration 不带参数请求时，服务端先校验「人是否在馆」，
+    # 不在馆直接回 NOT_IN_LIBRARY_MESSAGES；在馆则越过这道校验、撞上后面的设备占用校验，
+    # 回 IN_LIBRARY_MESSAGES。两种情况都是 code=1，只能靠文案区分。
+    IN_LIBRARY_MESSAGES = {"设备在该时间段内已被预约"}
+    NOT_IN_LIBRARY_MESSAGES = {"用户需要在馆状态才能操作"}
+
+    def _ic_token(self) -> Optional[str]:
+        """
+        从 ic-cookie 里抠出 token。
+
+        扫码那套接口（phoneSeatReserve/*）只认请求头里的 token，光带 cookie 会认证失败。
+        """
+        try:
+            for cookie in self.session.cookies:
+                if cookie.name != 'ic-cookie' or not cookie.value:
+                    continue
+                for part in cookie.value.split(';'):
+                    key, _, value = part.strip().partition('=')
+                    if key == 'token' and value:
+                        return unquote(value)
+            # cookie 被服务端刷掉时兜底用登录时拿到的
+            if self.user_info and self.user_info.get('token'):
+                return str(self.user_info['token'])
+        except Exception as e:
+            log_with_user('warning', self.username, '在馆探针', f"解析 ic-cookie 失败：{str(e)}")
+        return None
+
+    def is_in_library(self) -> Optional[bool]:
+        """
+        探测用户此刻人是否在馆内。只读，不动任何预约。
+
+        独立于预约状态——当天没有任何预约的人照样能测出在馆，所以可以在预约生效之前
+        （那时 resvStatus 恒为 1027 待签到，看不出人到没到）就问出结果。
+
+        判据是服务端的中文文案，很脆，因此走白名单：只有命中已知的「在馆」文案才算在馆。
+        文案变了 / 网络错 / 认证失败一律返回 None，让调用方按「没测出来」处理——
+        最坏退回改造前的行为，不会把该保护的人误判成已到馆而放过去。
+
+        Returns:
+            Optional[bool]: True=在馆，False=不在馆，None=判不出来
+        """
+        try:
+            self.ensure_login()
+            if not self.user_info:
+                log_with_user('warning', self.username, '在馆探针', "图书馆登录失败，无法探测在馆状态")
+                return None
+
+            token = self._ic_token()
+            if not token:
+                log_with_user('warning', self.username, '在馆探针', "取不到 ic-cookie 里的 token")
+                return None
+
+            url = f"{self.base_url}ic-web/phoneSeatReserve/duration{self.vpn_suffix}"
+            response = self.session.get(
+                url,
+                headers={"token": token, "lan": "1"},
+                timeout=30
+            )
+            if response.status_code != 200:
+                log_with_user('warning', self.username, '在馆探针',
+                              f"探测请求失败：状态码 {response.status_code}")
+                return None
+
+            result = response.json()
+            message = str(result.get('message') or '').strip()
+            if message in self.IN_LIBRARY_MESSAGES:
+                return True
+            if message in self.NOT_IN_LIBRARY_MESSAGES:
+                return False
+
+            # 文案对不上就告警，别猜
+            log_with_user('warning', self.username, '在馆探针',
+                          f"返回文案不认识，判不出在馆状态（code={result.get('code')}，"
+                          f"message={message}）")
+            return None
+
+        except Exception as e:
+            log_with_user('warning', self.username, '在馆探针', f"探测异常：{str(e)}")
+            return None
 
     def insert_or_update_mongo(
         self,
