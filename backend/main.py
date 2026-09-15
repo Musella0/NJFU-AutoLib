@@ -732,13 +732,31 @@ def save_my_account(pid):
 @app.route("/api/my/accounts/<pid>", methods=["DELETE"])
 @own_account_required
 def delete_my_account(pid):
-    """Delete a library account from current web user"""
+    """删除账号：配置和这个学号名下的所有记录一起真删，删完当场登出。
+
+    以前只删 user_config_info，在馆流水、抢座尝试、到馆核验这些还留在库里；
+    客户端说的是「删除所有配置和所有记录，无法撤回」，就得做到。
+    """
     client, db = get_db()
-    result = db.user_config_info.delete_one(_account_filter(pid))
-    client.close()
-    if result.deleted_count:
-        return jsonify({"message": f"学号 {pid} 已删除"}), 200
-    return jsonify({"error": "未找到该配置"}), 404
+    try:
+        removed = db.user_config_info.delete_one(_account_filter(pid)).deleted_count
+        purged = {
+            "visit_logs": db.visit_logs.delete_many({"pid": pid}).deleted_count,
+            "arrival_checks": db.arrival_checks.delete_many({"pid": pid}).deleted_count,
+            "pending_segments": db.pending_segments.delete_many({"pid": pid}).deleted_count,
+            "reserve_attempts": db.reserve_attempts.delete_many({"pid": pid}).deleted_count,
+            "reaction_users": db.reaction_users.delete_many({"uid": pid}).deleted_count,
+            # 离线登录用的密码哈希缓存和长期令牌，留着等于账号还能登
+            "web_users": db.web_users.delete_many({"uid": pid}).deleted_count,
+            "auth_tokens": db.auth_tokens.delete_many({"uid": pid}).deleted_count,
+        }
+    finally:
+        client.close()
+    if not removed:
+        return jsonify({"error": "未找到该配置"}), 404
+    logger.warning("账号 %s 已删除，连带清理 %s", pid, purged)
+    session.clear()
+    return jsonify({"message": f"学号 {pid} 及全部记录已删除", "logged_out": True, "purged": purged}), 200
 
 
 @app.route("/api/my/accounts/<pid>/reservations", methods=["GET"])

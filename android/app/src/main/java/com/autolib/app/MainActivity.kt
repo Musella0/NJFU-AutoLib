@@ -1637,21 +1637,13 @@ class MainActivity : AppCompatActivity() {
             auth.optString("nickname").isNotBlank() -> "已登录 · @${auth.optString("uid")} · ${accounts.length()} 个学号"
             else -> "已登录 · ${accounts.length()} 个学号"
         }, 14))
-        for (i in 0 until accounts.length()) {
-            val item = accounts.optJSONObject(i) ?: continue
-            val pid = item.optString("pid")
+        // 只有一个学号时上面的大字已经是它了；多个才列出来给「切换」。删除在页底「其他」里
+        if (accounts.length() > 1) for (i in 0 until accounts.length()) {
+            val pid = accounts.optJSONObject(i)?.optString("pid") ?: continue
             val row = horizontal()
-            row.addView(vertical(0).apply {
-                // 只有一个学号时上面的大字已经是它了，不再重复写一遍
-                if (accounts.length() > 1) addView(text(if (pid == currentPid) "✓ $pid" else pid, 15, pid == currentPid))
-                addView(text(buildString {
-                    append(if (item.optString("mode") == "week_time") "按星期" else "统一时段")
-                    append(" · ").append(if (item.optString("is_reserved") == "True") "运行中" else "已暂停")
-                    append(" · ").append(if (item.optBoolean("verified")) "已验证" else "未验证")
-                }, 12).apply { setTextColor(color(R.color.text_muted)) })
-            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            row.addView(text(if (pid == currentPid) "✓ $pid" else pid, 15, pid == currentPid),
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             if (pid != currentPid) row.addView(action("切换", compact = true) { switchAccount(pid) })
-            row.addView(action("删除", compact = true, danger = true) { confirmDeleteAccount(pid) })
             accountBody.addView(row)
         }
         val authRow = horizontal()
@@ -1766,7 +1758,10 @@ class MainActivity : AppCompatActivity() {
 
         if (loggedIn()) {
             host.addView(section("其他"))
-            host.addView(action("退出登录", danger = true) { logout() })
+            host.addView(horizontal().apply {
+                addView(action("退出登录", 1f) { logout() })
+                if (currentPid.isNotBlank()) addView(action("删除账号", 1f, danger = true) { confirmDeleteAccount(currentPid) })
+            })
         }
     }
 
@@ -1950,8 +1945,21 @@ class MainActivity : AppCompatActivity() {
         val points = (0 until fill.length()).mapNotNull { fill.optJSONObject(it) }
         val rushFill = points.filter { it.optInt("offset") <= 900 }
         val dayFill = points.filter { it.optInt("offset") >= 1800 }
-        fun fillChart(list: List<JSONObject>, title: String, xEvery: Int, suffix: String) {
+        fun fillChart(list: List<JSONObject>, title: String, xEvery: Int, suffix: String, smooth: Boolean) {
             if (list.isEmpty()) return
+            val raw = list.map { if (total > 0) it.optInt("booked") * 100f / total else 0f }
+            // 区域没拍全的那一次数值偏低，画出来是一个个坑。图上把这种点换成左右最近
+            // 两个拍全的点的平均（只有一侧就照抄那一侧），提示框里的数字仍是原始值。
+            val complete = list.map { it.optInt("rooms", 12) >= 12 }
+            val values = if (!smooth) raw else raw.mapIndexed { i, v ->
+                if (complete[i]) return@mapIndexed v
+                val l = (i - 1 downTo 0).firstOrNull { complete[it] }?.let { raw[it] }
+                val r = (i + 1 until raw.size).firstOrNull { complete[it] }?.let { raw[it] }
+                when {
+                    l != null && r != null -> (l + r) / 2
+                    else -> l ?: r ?: v
+                }
+            }
             box.addView(text(title, 11).apply { setTextColor(color(R.color.text_secondary)); setPadding(0, dp(10), 0, dp(2)) })
             box.addView(LineChartView(this).apply {
                 heightDp = 120; this.xEvery = xEvery
@@ -1959,14 +1967,16 @@ class MainActivity : AppCompatActivity() {
                     val f = list[i]
                     occFillLabel(f.optInt("offset")) + (if (suffix.isNotBlank()) suffix else f.optString("at").takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty())
                 }
-                tooltipExtra = { i -> "${list[i].optInt("booked")} 张${if (list[i].optInt("rooms", 12) < 12) "（区域没拍全）" else ""}" }
+                tooltipExtra = { i ->
+                    "${list[i].optInt("booked")} 张" +
+                        if (list[i].optInt("rooms", 12) < 12) (if (smooth) "（区域没拍全，图上取两侧平均）" else "（区域没拍全）") else ""
+                }
                 bind(list.map { occFillLabel(it.optInt("offset")) },
-                    listOf(LineChartView.Series("已约", R.color.tomorrow,
-                        list.map { if (total > 0) it.optInt("booked") * 100f / total else 0f }, area = true)))
+                    listOf(LineChartView.Series("已约", R.color.tomorrow, values, area = true)))
             })
         }
-        fillChart(rushFill, "开闸那一刻钟：第几秒被抢走多少", 1, "")
-        fillChart(dayFill, "前一天从早到晚每半小时查一次，这块板子是几点被填满的", 4, " 查到")
+        fillChart(rushFill, "开闸那一刻钟：第几秒被抢走多少", 1, "", smooth = false)
+        fillChart(dayFill, "前一天从早到晚每半小时查一次，这块板子是几点被填满的", 4, " 查到", smooth = true)
 
         // 各区域 07:05 已约占比，按占比从高到低
         val rooms = (0 until (day.optJSONArray("rooms")?.length() ?: 0))
@@ -2695,21 +2705,54 @@ class MainActivity : AppCompatActivity() {
         dialog.show()
     }
 
+    /**
+     * 删除账号：先说清楚后果、给一次导出学习记录的机会，再二次确认。
+     * 服务端连配置带全部记录真删，删完会话也没了，本地缓存跟着清掉。
+     */
     private fun confirmDeleteAccount(pid: String) {
-        AlertDialog.Builder(this).setTitle("删除学号 $pid？").setMessage("将删除该学号的预约配置，此操作无法撤销。")
-            .setNegativeButton("取消", null).setPositiveButton("删除") { _, _ ->
-                api.delete("/api/my/accounts/${api.encoded(pid)}") { response ->
-                    toast(response.message("已删除"))
-                    if (response.ok) {
-                        if (currentPid == pid) {
-                            currentPid = ""
-                            currentConfig = null
-                            getPreferences(MODE_PRIVATE).edit().remove("current_pid").apply()
-                        }
-                        loadAccounts()
-                    }
-                }
-            }.show()
+        val first = AlertDialog.Builder(this).setTitle("删除账号 $pid？")
+            .setMessage("将删除这个学号的所有配置和所有记录（预约规则、学习记录、在馆明细、抢座记录），无法撤回。\n\n删之前可以先把学习记录下载到本机。")
+            .setNeutralButton("下载学习记录", null)
+            .setNegativeButton("取消", null)
+            .setPositiveButton("继续删除", null)
+            .create()
+        first.setOnShowListener {
+            // 中间那个按钮点了不能把对话框关掉，导出完还要回来决定删不删
+            first.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener { exportStudyTime() }
+            first.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                first.dismiss()
+                AlertDialog.Builder(this).setTitle("确认删除？")
+                    .setMessage("学号 $pid 的全部配置和记录将被永久删除，无法恢复。")
+                    .setNegativeButton("取消", null)
+                    .setPositiveButton("确认删除") { _, _ -> deleteAccount(pid) }
+                    .show()
+            }
+        }
+        first.show()
+    }
+
+    private fun deleteAccount(pid: String) {
+        setBusy(true)
+        api.delete("/api/my/accounts/${api.encoded(pid)}") { response ->
+            setBusy(false)
+            toast(response.message("已删除"))
+            if (!response.ok) return@delete
+            if (currentPid == pid) {
+                currentPid = ""
+                currentConfig = null
+                getPreferences(MODE_PRIVATE).edit().remove("current_pid").apply()
+            }
+            // 服务端已把会话清掉，本地的预约缓存、小组件数据也没有主人了
+            if (response.jsonObject?.optBoolean("logged_out") == true) {
+                ReservationCache.clear(this)
+                auth = JSONObject()
+                accounts = JSONArray()
+                updateHeader()
+                loadInitialData()
+                return@delete
+            }
+            loadAccounts()
+        }
     }
     // endregion
 
