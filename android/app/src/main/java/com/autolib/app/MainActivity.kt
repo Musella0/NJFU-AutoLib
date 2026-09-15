@@ -594,10 +594,10 @@ class MainActivity : AppCompatActivity() {
                 } else null,
         ))
         if (!tomorrow && code in ACTIVE_STATUSES) {
-            val row = horizontal()
-            row.addView(action("😴 午休", 1f) { showNapDialog(reservation) })
+            val row = horizontal().apply { gravity = Gravity.END or Gravity.CENTER_VERTICAL }
+            row.addView(action("😴 午休", compact = true) { showNapDialog(reservation) })
             // 已经入座的话释放座位是"离馆"；还没到馆才是撤销这次预约
-            row.addView(action(if (seated) "离馆" else "取消", 1f, danger = true) {
+            row.addView(action(if (seated) "离馆" else "取消", compact = true, danger = true) {
                 confirmCancel(reservation, leaving = seated)
             })
             content.addView(row)
@@ -624,13 +624,19 @@ class MainActivity : AppCompatActivity() {
             })
             addView(text(calendar.get(Calendar.DAY_OF_MONTH).toString(), 22, true).apply { gravity = Gravity.CENTER })
         }, LinearLayout.LayoutParams(dp(46), ViewGroup.LayoutParams.WRAP_CONTENT))
+        val resting = running && segments.isEmpty()
         header.addView(vertical(0).apply {
-            addView(text(if (running) "按配置自动预约" else "自动预约已暂停", 16, true))
-            addView(text(
-                if (running) "明早抢 ${seatList.firstOrNull() ?: "—"} · ${segmentLabel(segments)}"
-                else "去配置页开启「自动预约」",
-                13,
-            ).apply { setTextColor(color(R.color.text_secondary)) })
+            addView(text(when {
+                !running -> "自动预约已暂停"
+                // 明天配置为「休息」就不会抢，别再显示「明早抢…」误导人
+                resting -> if (tomorrowReservation != null) "明日不自动抢座" else "明日无预约"
+                else -> "按配置自动预约"
+            }, 16, true))
+            addView(text(when {
+                !running -> "去配置页开启「自动预约」"
+                resting -> if (tomorrowReservation != null) "明天配置为休息，上面是已有的预约" else "明天配置为休息，不会自动抢座"
+                else -> "明早抢 ${seatList.firstOrNull() ?: "—"} · ${segmentLabel(segments)}"
+            }, 13).apply { setTextColor(color(R.color.text_secondary)) })
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         header.addView(caret)
         content.addView(header)
@@ -1225,7 +1231,10 @@ class MainActivity : AppCompatActivity() {
                         dismiss()
                         setBusy(true)
                         api.post("/api/my/accounts/${api.encoded(currentPid)}/nap", JSONObject()
-                            .put("uuid", reservation.optString("uuid")).put("seat", seatValue)
+                            .put("uuid", reservation.optString("uuid"))
+                            // 已入座 / 暂离的预约 delete 会被拒，后端按它决定走「提前结束」
+                            .put("resv_status", reservation.optInt("resvStatus", -1))
+                            .put("seat", seatValue)
                             .put("start_time", backValue).put("end_time", end)) { response ->
                             setBusy(false)
                             val payload = response.jsonObject
@@ -3220,7 +3229,7 @@ class MainActivity : AppCompatActivity() {
         private const val NAP_INFO =
             "专为午休设计的快捷功能，出门吃饭前点一下，回来时座位还在。\n\n" +
                 "· 自动续约下午：系统立即取消当前预约，并以相同座位重新预约下午时段（默认 14:00 起）\n" +
-                "· 每日自动触发：在设置页开启后，每天到触发时刻（默认 12:00）自动执行\n" +
+                "· 每日自动触发：在设置页开启后，每天到触发时刻（默认 12:00）自动执行。上午没约或已结束也会直接把下午约上（座位按午休设置，没设就用抢座座位；结束时间没设就到闭馆）\n" +
                 "· 极小占座风险：取消到重新预约约需 1 秒，极低概率被他人抢占"
         private val ACTIVE_STATUSES = setOf(1027, 1093, 3141)
         private val BREACHED_STATUSES = setOf(1169, 3281)
