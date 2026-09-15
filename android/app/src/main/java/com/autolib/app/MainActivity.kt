@@ -28,6 +28,7 @@ import android.widget.ArrayAdapter
 import android.widget.EditText
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
@@ -1721,6 +1722,7 @@ class MainActivity : AppCompatActivity() {
             addView(action("迟到保护是什么？") { showLateProtectionInfo() })
             addView(action("午休是什么？") { showNapInfo() })
         }))
+        occupancyCard(host)
         contactsCard(host)
 
         if (loggedIn()) {
@@ -1728,6 +1730,229 @@ class MainActivity : AppCompatActivity() {
             host.addView(action("退出登录", danger = true) { logout() })
         }
     }
+
+    // region 图书馆预约情况
+    // 每天 07:10 调度器把早上三张占用快照压成一条（seat_occupancy_daily），
+    // 这里读 /api/library/occupancy 画折线。只有区域级的数字，不带座位号也不带人，游客也能看。
+
+    private var occupancyDays: JSONArray? = null
+    private var occupancyLoadedAt = 0L
+    private var occRange = 90
+    private var occSelected = -1
+
+    private fun occDay(i: Int): JSONObject? = occupancyDays?.optJSONObject(i)
+    private fun occPct(day: JSONObject?, tag: String): Float? {
+        val booked = day?.optJSONObject("booked") ?: return null
+        if (booked.isNull(tag)) return null
+        val total = day.optInt("seats_total")
+        if (total <= 0) return null
+        return booked.optInt(tag) * 100f / total
+    }
+    private fun occDateLabel(day: JSONObject, withWeekday: Boolean): String {
+        val md = day.optString("date").drop(5).replace('-', '/')
+        return if (withWeekday) "$md ${WEEKDAY_CN.getOrNull(day.optInt("weekday")).orEmpty()}" else md
+    }
+    private fun occMinuteLabel(m: Int) = "${m / 60}:${(m % 60).toString().padStart(2, '0')}"
+    /** 探针采样点：开闸后的秒数 → 「7:00前 / +1s / +5m / 8:30」这样的短标签 */
+    private fun occFillLabel(offset: Int) = when {
+        offset < 0 -> "7:00前"
+        offset < 60 -> "+${offset}s"
+        offset < 1800 -> "+${Math.round(offset / 60f)}m"
+        else -> occMinuteLabel(7 * 60 + Math.round(offset / 60f))
+    }
+    private fun occVisible(): List<Int> {
+        val n = occupancyDays?.length() ?: 0
+        val from = if (occRange > 0) maxOf(0, n - occRange) else 0
+        return (from until n).toList()
+    }
+
+    /** 设置页卡片：最近一天的占比 + 30 天迷你折线；还没汇总过就不显示。异步填充，先占位。 */
+    private fun occupancyCard(host: LinearLayout) {
+        val cached = occupancyDays
+        if (cached != null && System.currentTimeMillis() - occupancyLoadedAt < OCCUPANCY_TTL_MS) {
+            if (cached.length() > 0) host.addView(buildOccupancyCard(cached))
+            return
+        }
+        val slot = vertical(0).also { host.addView(it) }
+        api.get("/api/library/occupancy?days=366") { response ->
+            val days = response.jsonObject?.optJSONArray("days") ?: return@get
+            occupancyDays = days
+            occupancyLoadedAt = System.currentTimeMillis()
+            if (occSelected !in 0 until days.length()) occSelected = days.length() - 1
+            // 页面已经重画过的话这个占位早就不在树上了，别往里塞
+            if (days.length() > 0 && slot.isAttachedToWindow) slot.addView(buildOccupancyCard(days))
+        }
+    }
+
+    private fun buildOccupancyCard(days: JSONArray): View {
+        val last = days.optJSONObject(days.length() - 1)!!
+        val pct = occPct(last, "post")
+        val prev = if (days.length() > 1) occPct(days.optJSONObject(days.length() - 2), "post") else null
+        val body = vertical(0)
+        body.addView(horizontal().apply {
+            addView(vertical(0).apply {
+                addView(text(if (pct == null) "--" else String.format("%.1f%%", pct), 30, true).apply {
+                    setTextColor(color(R.color.primary))
+                })
+                addView(text("${occDateLabel(last, true)} 开抢 5 分钟后全馆已约", 12)
+                    .apply { setTextColor(color(R.color.text_muted)) })
+                if (pct != null && prev != null) {
+                    val delta = pct - prev
+                    addView(text("较前一天 ${if (delta >= 0) "+" else ""}${String.format("%.1f", delta)} 个百分点", 12)
+                        .apply { setTextColor(color(R.color.text_muted)) })
+                }
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            // 迷你折线只画 07:05 那条，不带轴
+            val from = maxOf(0, days.length() - 30)
+            addView(LineChartView(this@MainActivity).apply {
+                compact = true
+                bind(
+                    (from until days.length()).map { "" },
+                    listOf(LineChartView.Series("07:05", R.color.primary,
+                        (from until days.length()).map { occPct(days.optJSONObject(it), "post") }, area = true)),
+                )
+            }, LinearLayout.LayoutParams(dp(120), dp(40)))
+        })
+        body.addView(text("点开看逐日折线、一天里从早到晚的曲线和各区域 ›", 12)
+            .apply { setTextColor(color(R.color.text_muted)) })
+        return cardBlock("图书馆预约情况", body).apply {
+            isClickable = true
+            setOnClickListener { showOccupancyDialog() }
+        }
+    }
+
+    /** 详情：范围切换 + 逐日折线（点一天）+ 那天的曲线、探针填充和各区域占比。 */
+    private fun showOccupancyDialog() {
+        val days = occupancyDays ?: return
+        if (days.length() == 0) return
+        val body = vertical()
+        val rangeRow = horizontal()
+        val trend = LineChartView(this).apply { heightDp = 180 }
+        val dayBox = vertical(0)
+        val ranges = listOf(30 to "30 天", 90 to "90 天", 0 to "全部")
+
+        fun render() {
+            rangeRow.removeAllViews()
+            ranges.forEach { (n, label) ->
+                rangeRow.addView(action(label, 1f, accent = n == occRange, compact = true) {
+                    occRange = n
+                    if (occSelected !in occVisible()) occSelected = days.length() - 1
+                    render()
+                })
+            }
+            val visible = occVisible()
+            trend.tooltipTitle = { i -> occDateLabel(days.optJSONObject(visible[i])!!, true) }
+            trend.tooltipExtra = null
+            trend.onSelect = { i -> occSelected = visible[i]; render() }
+            trend.bind(
+                visible.map { occDateLabel(days.optJSONObject(it)!!, false) },
+                listOf(
+                    LineChartView.Series("07:05", R.color.primary, visible.map { occPct(days.optJSONObject(it), "post") }, area = true),
+                    LineChartView.Series("07:01", R.color.tomorrow, visible.map { occPct(days.optJSONObject(it), "rush") }),
+                ),
+                selected = visible.indexOf(occSelected),
+            )
+            renderOccupancyDay(dayBox, days.optJSONObject(occSelected))
+        }
+
+        body.addView(rangeRow)
+        body.addView(horizontal().apply {
+            addView(legendDot(R.color.primary, "07:05 开抢五分钟后"))
+            addView(legendDot(R.color.tomorrow, "07:01 开抢一分钟后"))
+        })
+        body.addView(trend, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        body.addView(text("点一下折线上的某一天，下面看那天的详情", 11).apply {
+            setTextColor(color(R.color.text_muted)); gravity = Gravity.CENTER
+        })
+        body.addView(dayBox)
+        render()
+        AlertDialog.Builder(this)
+            .setTitle("📈 图书馆预约情况")
+            .setView(ScrollView(this).apply { addView(body) })
+            .setPositiveButton("我知道了", null)
+            .show()
+    }
+
+    private fun renderOccupancyDay(box: LinearLayout, day: JSONObject?) {
+        box.removeAllViews()
+        day ?: return
+        val booked = day.optJSONObject("booked") ?: JSONObject()
+        val total = day.optInt("seats_total")
+        val post = booked.optInt("post")
+        val pct = occPct(day, "post")
+        fun countOrNone(tag: String) = if (booked.isNull(tag)) "未拍" else "${booked.optInt(tag)} 张"
+        box.addView(horizontal().apply {
+            addView(text(occDateLabel(day, true), 14, true), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(text("07:05 已约 $post / $total（${if (pct == null) "--" else String.format("%.1f%%", pct)}）", 11)
+                .apply { setTextColor(color(R.color.text_secondary)) })
+        })
+        box.addView(text("7:00 前 ${countOrNone("pre")} · 07:01 已约 ${countOrNone("rush")} · 07:05 已约 $post 张", 11)
+            .apply { setTextColor(color(R.color.text_muted)) })
+
+        // 这天从早到晚每个时段有多少座位被约（按 07:05 那批预约算）
+        val curve = day.optJSONObject("curve") ?: JSONObject()
+        val occupied = curve.optJSONArray("occupied") ?: JSONArray()
+        val slotFrom = curve.optInt("from", 420)
+        val slotStep = curve.optInt("step", 30)
+        val slotLabels = (0 until occupied.length()).map { occMinuteLabel(slotFrom + it * slotStep) }
+        box.addView(text("这天从早到晚每个时段有多少座位被约（按 07:05 那批预约算）", 11)
+            .apply { setTextColor(color(R.color.text_secondary)); setPadding(0, dp(10), 0, dp(2)) })
+        box.addView(LineChartView(this).apply {
+            heightDp = 120; xEvery = 4
+            tooltipTitle = { i -> "${slotLabels[i]} 起半小时" }
+            tooltipExtra = { i -> "${occupied.optInt(i)} 张" }
+            bind(slotLabels, listOf(LineChartView.Series("在约座位", R.color.primary,
+                (0 until occupied.length()).map { if (total > 0) occupied.optInt(it) * 100f / total else 0f }, area = true)))
+        })
+
+        // 探针的填充曲线：横轴是查询时刻，不是使用时段。开闸那一刻钟按秒/分钟，
+        // 点与点之间不等距，和白天每半小时那段分开画，免得前 15 分钟被压成一条竖线。
+        val fill = day.optJSONArray("fill") ?: JSONArray()
+        val points = (0 until fill.length()).mapNotNull { fill.optJSONObject(it) }
+        val rushFill = points.filter { it.optInt("offset") <= 900 }
+        val dayFill = points.filter { it.optInt("offset") >= 1800 }
+        fun fillChart(list: List<JSONObject>, title: String, xEvery: Int, suffix: String) {
+            if (list.isEmpty()) return
+            box.addView(text(title, 11).apply { setTextColor(color(R.color.text_secondary)); setPadding(0, dp(10), 0, dp(2)) })
+            box.addView(LineChartView(this).apply {
+                heightDp = 120; this.xEvery = xEvery
+                tooltipTitle = { i ->
+                    val f = list[i]
+                    occFillLabel(f.optInt("offset")) + (if (suffix.isNotBlank()) suffix else f.optString("at").takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty())
+                }
+                tooltipExtra = { i -> "${list[i].optInt("booked")} 张${if (list[i].optInt("rooms", 12) < 12) "（区域没拍全）" else ""}" }
+                bind(list.map { occFillLabel(it.optInt("offset")) },
+                    listOf(LineChartView.Series("已约", R.color.tomorrow,
+                        list.map { if (total > 0) it.optInt("booked") * 100f / total else 0f }, area = true)))
+            })
+        }
+        fillChart(rushFill, "开闸那一刻钟：第几秒被抢走多少", 1, "")
+        fillChart(dayFill, "前一天从早到晚每半小时查一次，这块板子是几点被填满的", 4, " 查到")
+
+        // 各区域 07:05 已约占比，按占比从高到低
+        val rooms = (0 until (day.optJSONArray("rooms")?.length() ?: 0))
+            .mapNotNull { day.optJSONArray("rooms")?.optJSONObject(it) }
+            .sortedByDescending { it.optInt("booked").toFloat() / maxOf(1, it.optInt("seats")) }
+        box.addView(text("各区域 07:05 已约占比", 11).apply { setTextColor(color(R.color.text_secondary)); setPadding(0, dp(8), 0, dp(2)) })
+        rooms.forEach { r ->
+            val seats = r.optInt("seats")
+            val p = if (seats > 0) r.optInt("booked") * 100f / seats else 0f
+            box.addView(horizontal().apply {
+                setPadding(0, dp(2), 0, dp(2))
+                addView(text(r.optString("name"), 11).apply { setTextColor(color(R.color.text_secondary)) },
+                    LinearLayout.LayoutParams(dp(72), ViewGroup.LayoutParams.WRAP_CONTENT))
+                addView(ProgressBar(this@MainActivity, null, android.R.attr.progressBarStyleHorizontal).apply {
+                    max = 100; progress = Math.round(p)
+                    progressTintList = ColorStateList.valueOf(color(R.color.primary))
+                    progressBackgroundTintList = ColorStateList.valueOf(color(R.color.stroke_muted))
+                }, LinearLayout.LayoutParams(0, dp(8), 1f))
+                addView(text("${r.optInt("booked")}/$seats · ${Math.round(p)}%", 11).apply {
+                    setTextColor(color(R.color.text_muted)); gravity = Gravity.END
+                }, LinearLayout.LayoutParams(dp(84), ViewGroup.LayoutParams.WRAP_CONTENT))
+            })
+        }
+    }
+    // endregion
 
     /** 「学习记录」整块：周/累计统计 + 热力图 + 最近几次。异步填充，先占位。 */
     private fun visitStatsCard(host: LinearLayout) {
@@ -2950,6 +3175,9 @@ class MainActivity : AppCompatActivity() {
         private const val STATE_TOMORROW = "tomorrow_reservation"
         /** 预约结果的复用窗口：切页返回不再重查，超过才自动刷新。 */
         private const val RESERVATION_TTL_MS = 3 * 60 * 1000L
+        /** 预约概况一天只变一次，设置页反复进出不必每次都拉一年的数据。 */
+        private const val OCCUPANCY_TTL_MS = 10 * 60 * 1000L
+        private val WEEKDAY_CN = listOf("", "周一", "周二", "周三", "周四", "周五", "周六", "周日")
         private const val PREF_THEME = "theme"
 
         private fun nightModeOf(theme: String) = when (theme) {
