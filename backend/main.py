@@ -2294,8 +2294,6 @@ def my_visit_stats():
     now = datetime.now()
     week_start = (now - timedelta(days=now.weekday())).replace(
         hour=0, minute=0, second=0, microsecond=0)
-    heatmap_start = (now - timedelta(days=HEATMAP_DAYS - 1)).replace(
-        hour=0, minute=0, second=0, microsecond=0)
     owned = {"pid": uid}
 
     # 累计值必须走聚合：早先的实现只取最近 200 条来求和，
@@ -2304,7 +2302,8 @@ def my_visit_stats():
     this_week_visits, this_week_minutes = _visit_totals(
         db, {**owned, "planned_begin": {"$gte": week_start}})
 
-    # 热力图按天聚合。planned_begin 存的是本地时间的 naive datetime，
+    # 热力图按天聚合，从这个人有记录的第一天起全部给（App 从第一天画到今天）。
+    # 一天一条，几年也就一千来条。planned_begin 存的是本地时间的 naive datetime，
     # $dateToString 不带 timezone 正好原样取出当初写入的那一天。
     daily = [
         {
@@ -2313,10 +2312,7 @@ def my_visit_stats():
             "minutes": row.get("minutes", 0),
         }
         for row in db.visit_logs.aggregate([
-            {"$match": {
-                **owned,
-                "planned_begin": {"$gte": heatmap_start, "$type": "date"},
-            }},
+            {"$match": {**owned, "planned_begin": {"$type": "date"}}},
             {"$group": {
                 "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$planned_begin"}},
                 "visits": {"$sum": 1},

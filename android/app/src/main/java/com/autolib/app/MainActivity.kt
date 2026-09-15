@@ -2074,9 +2074,13 @@ class MainActivity : AppCompatActivity() {
             set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
         }
         val todayKey = format.format(today.time)
-        val firstHalf = today.get(Calendar.MONTH) < Calendar.JULY
-        val cursor = semesterStart(today, firstHalf)
-        val semesterLabel = "${cursor.get(Calendar.YEAR)}年${if (firstHalf) "上" else "下"}半年"
+        // 从有记录的第一天画到今天；一条记录都没有（理论上到不了这里）就退回本学期
+        val firstDate = byDate.keys.filter { it.isNotBlank() }.minOrNull()
+            ?.let { runCatching { format.parse(it) }.getOrNull() }
+        val cursor = if (firstDate != null) {
+            (today.clone() as Calendar).apply { time = firstDate; set(Calendar.DAY_OF_MONTH, 1) }
+        } else semesterStart(today, today.get(Calendar.MONTH) < Calendar.JULY)
+        val rangeLabel = "${cursor.get(Calendar.YEAR)}年${cursor.get(Calendar.MONTH) + 1}月起"
         // 对齐到周一，保证每一列都是完整的一周
         cursor.add(Calendar.DAY_OF_YEAR, -(isoOf(cursor) - 1))
 
@@ -2122,7 +2126,7 @@ class MainActivity : AppCompatActivity() {
         legend.addView(text("多", 11).apply {
             setTextColor(color(R.color.text_muted)); setPadding(dp(5), 0, 0, 0)
         })
-        legend.addView(text(semesterLabel, 11).apply {
+        legend.addView(text(rangeLabel, 11).apply {
             setTextColor(color(R.color.text_muted)); gravity = Gravity.END
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         block.addView(legend)
