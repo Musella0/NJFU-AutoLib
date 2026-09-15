@@ -771,6 +771,11 @@ def cancel_account_reservation(pid):
     uuid = data.get("uuid")
     if not uuid:
         return jsonify({"error": "缺少 uuid"}), 400
+    # 已入座 / 暂离的预约 delete 会被拒，要走「提前结束」；老客户端不传就两个都试
+    try:
+        resv_status = int(data.get("resv_status"))
+    except (TypeError, ValueError):
+        resv_status = None
 
     cfg = _get_decrypted_cfg(pid)
 
@@ -784,7 +789,7 @@ def cancel_account_reservation(pid):
             password=cfg["vpn_password"],
             vpn_password=cfg["vpn_password"]
         )
-        success, message = library.delete_seat(uuid)
+        success, message = library.release_seat(uuid, resv_status)
         return jsonify({"success": success, "message": message}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500

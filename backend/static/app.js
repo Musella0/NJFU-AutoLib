@@ -1052,7 +1052,7 @@ async function doCancel(){
   closeSheet();
   if(!state.todayResv){ toast('没有可取消的预约','info'); return; }
   const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/cancel`, {
-    method:'POST', body:{ uuid: state.todayResv.uuid }
+    method:'POST', body:{ uuid: state.todayResv.uuid, resv_status: state.todayResv.resvStatus }
   });
   toast(data.message || (ok ? '已取消' : '失败'), (ok && data.success) ? 'success' : 'error');
   if(ok && data.success){
@@ -1065,7 +1065,7 @@ async function doCancelTomorrow(){
   closeSheet();
   if(!state.tomorrowResv){ toast('没有可取消的预约','info'); return; }
   const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/cancel`, {
-    method:'POST', body:{ uuid: state.tomorrowResv.uuid }
+    method:'POST', body:{ uuid: state.tomorrowResv.uuid, resv_status: state.tomorrowResv.resvStatus }
   });
   toast(data.message || (ok ? '已取消' : '失败'), (ok && data.success) ? 'success' : 'error');
   if(ok && data.success){

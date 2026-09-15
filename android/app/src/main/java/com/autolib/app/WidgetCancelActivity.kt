@@ -54,7 +54,7 @@ class WidgetCancelActivity : AppCompatActivity() {
                 val api = NativeApi(app)
                 val response = api.postBlocking(
                     "/api/my/accounts/${api.encoded(s.pid)}/cancel",
-                    JSONObject().put("uuid", s.uuid),
+                    JSONObject().put("uuid", s.uuid).put("resv_status", s.statusCode),
                 )
                 if (response.ok && response.jsonObject?.optBoolean("success") == true) {
                     ReservationCache.clearToday(app)

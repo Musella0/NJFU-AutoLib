@@ -885,7 +885,10 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("再想想", null)
             .setPositiveButton(if (leaving) "确认离馆" else "确认取消") { _, _ ->
                 setBusy(true)
-                api.post("/api/my/accounts/${api.encoded(currentPid)}/cancel", JSONObject().put("uuid", reservation.optString("uuid"))) { response ->
+                // 已入座 / 暂离的预约 delete 会被拒，后端按 resv_status 决定走「提前结束」
+                val body = JSONObject().put("uuid", reservation.optString("uuid"))
+                    .put("resv_status", reservation.optInt("resvStatus", -1))
+                api.post("/api/my/accounts/${api.encoded(currentPid)}/cancel", body) { response ->
                     setBusy(false)
                     toast(response.jsonObject?.optString("message").orEmpty().ifBlank { response.message("取消请求已完成") })
                     renderHome(refresh = true)
