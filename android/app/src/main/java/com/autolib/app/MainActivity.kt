@@ -39,6 +39,8 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.isVisible
 import com.autolib.app.databinding.ActivityMainBinding
 import com.google.android.material.button.MaterialButton
@@ -99,6 +101,16 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        // Android 15（targetSdk 35）起强制 edge-to-edge，窗口铺到状态栏 / 导航栏底下。
+        // 把系统栏的高度垫在根布局上，顶栏和底部导航就回到原来的位置；
+        // 这里已经消费掉，BottomNavigationView 不会再自己垫一层。
+        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { view, insets ->
+            val bars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            WindowInsetsCompat.CONSUMED
+        }
         api = NativeApi(this)
         captureWidgetAction(intent)
         restoreState(savedInstanceState)

@@ -14,12 +14,12 @@ val releaseStoreFile = localProps.getProperty("RELEASE_STORE_FILE")
 
 android {
     namespace = "com.autolib.app"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.autolib.app"
         minSdk = 26
-        targetSdk = 34
+        targetSdk = 35
         // versionCode 只增不减：降回去会让已装用户无法覆盖安装，与展示用的 versionName 无关。
         // 升级检查也按它比大小，发版必须 +1，否则客户端认不出新版本。
         versionCode = 8
