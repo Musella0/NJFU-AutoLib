@@ -2105,9 +2105,10 @@ def auto_nap_action(pid: str) -> None:
 
         library = login_library(cfg)
 
-        reservations, _ = library.get_reservation_info()
-        if not reservations:
-            log_with_user(logger, 'info', pid, '自动午休', "今日无预约，跳过")
+        reservations, query_msg = library.get_reservation_info()
+        if reservations is None:
+            # 查询本身失败，不知道有没有预约，不能贸然去约
+            log_with_user(logger, 'error', pid, '自动午休', f"查询预约失败，跳过：{query_msg}")
             return
 
         active_statuses = {1027, 1093, 3141}
@@ -2118,16 +2119,27 @@ def auto_nap_action(pid: str) -> None:
                 target = r
                 break
 
-        if not target:
-            log_with_user(logger, 'info', pid, '自动午休', "今日无可取消的活跃预约，跳过")
+        # 今天的预约本来就从午休回来之后才开始，没什么可释放的，动了反而可能被抢
+        if target and (target.get("resvBeginTime") or "")[11:16] >= nap_start:
+            log_with_user(logger, 'info', pid, '自动午休',
+                          f"今日预约 {target.get('resvBeginTime', '')[11:16]} 才开始，不用动")
             return
 
-        uuid = target.get("uuid") or target.get("resvId", "")
-        current_seat = (target.get("devInfo") or {}).get("devName", "")
-        seat_name = nap_seat_name or current_seat
-        if not nap_end:
-            nap_end = (target.get("resvEndTime") or "")[-8:-3] or "18:00"
+        if target:
+            uuid = target.get("uuid") or target.get("resvId", "")
+            current_seat = (target.get("devInfo") or {}).get("devName", "")
+            seat_names = [nap_seat_name or current_seat]
+            if not nap_end:
+                nap_end = (target.get("resvEndTime") or "")[-8:-3] or "18:00"
+        else:
+            # 上午没约 / 已经结束：不用释放，直接把下午约上。
+            # 座位按午休设置 → 抢座座位列表；结束时间按午休设置 → 闭馆。
+            uuid = ""
+            seat_names = [nap_seat_name] if nap_seat_name else list(cfg.get("seat_list") or [])
+            if not nap_end:
+                nap_end = "20:00" if datetime.now().isoweekday() == 5 else "22:00"
 
+        seat_label = " / ".join(seat_names) or "（未配置座位）"
         conflict = find_reservation_conflict(
             db.school_notice_reviews,
             f"{today_str} {nap_start}:00",
@@ -2137,23 +2149,32 @@ def auto_nap_action(pid: str) -> None:
             log_with_user(logger, 'info', pid, '闭馆保护', _blackout_message(conflict))
             return
 
-        log_with_user(logger, 'info', pid, '自动午休', f"取消预约 {uuid}，将重约 {seat_name} {nap_start}-{nap_end}")
-
-        cancel_ok, cancel_msg = library.release_seat(uuid, target.get("resvStatus"))
-        if not cancel_ok:
-            log_with_user(logger, 'error', pid, '自动午休', f"取消失败：{cancel_msg}")
-            notify_user(cfg, "❌ 自动午休失败", f"学号 {pid}\n取消原预约失败：{cancel_msg}",
-                        always=True)
-            return
-
-        time.sleep(0.5)
-
-        seat_ids = get_seat_ids([seat_name])
-        if not seat_ids:
-            msg = f"取消成功，但未找到座位「{seat_name}」，请手动预约下午时段"
+        seat_ids = get_seat_ids(seat_names) if seat_names else []
+        if not seat_ids and not uuid:
+            msg = f"上午无预约，且未找到可约的座位「{seat_label}」，请手动预约下午时段"
             log_with_user(logger, 'error', pid, '自动午休', msg)
-            notify_user(cfg, "⚠ 自动午休部分失败", f"学号 {pid}\n{msg}", always=True)
+            notify_user(cfg, "⚠ 自动午休失败", f"学号 {pid}\n{msg}", always=True)
             return
+
+        if uuid:
+            log_with_user(logger, 'info', pid, '自动午休', f"取消预约 {uuid}，将重约 {seat_label} {nap_start}-{nap_end}")
+
+            cancel_ok, cancel_msg = library.release_seat(uuid, target.get("resvStatus"))
+            if not cancel_ok:
+                log_with_user(logger, 'error', pid, '自动午休', f"取消失败：{cancel_msg}")
+                notify_user(cfg, "❌ 自动午休失败", f"学号 {pid}\n取消原预约失败：{cancel_msg}",
+                            always=True)
+                return
+
+            time.sleep(0.5)
+
+            if not seat_ids:
+                msg = f"取消成功，但未找到座位「{seat_label}」，请手动预约下午时段"
+                log_with_user(logger, 'error', pid, '自动午休', msg)
+                notify_user(cfg, "⚠ 自动午休部分失败", f"学号 {pid}\n{msg}", always=True)
+                return
+        else:
+            log_with_user(logger, 'info', pid, '自动午休', f"今日无活跃预约，直接预约 {seat_label} {nap_start}-{nap_end}")
 
         resv_msg, _ = library.reserve_seat(
             seat_list=seat_ids,
@@ -2161,12 +2182,12 @@ def auto_nap_action(pid: str) -> None:
             resv_end_time=f"{today_str} {nap_end}:00",
         )
         if "成功" in resv_msg:
-            log_with_user(logger, 'info', pid, '自动午休', f"重新预约成功：{resv_msg}")
-            notify_user(cfg, "✅ 自动午休完成", f"学号 {pid}\n已重新预约 {seat_name} {nap_start}-{nap_end}")
+            log_with_user(logger, 'info', pid, '自动午休', f"预约成功：{resv_msg}")
+            notify_user(cfg, "✅ 自动午休完成", f"学号 {pid}\n{resv_msg}")
         else:
-            log_with_user(logger, 'error', pid, '自动午休', f"重新预约失败：{resv_msg}")
+            log_with_user(logger, 'error', pid, '自动午休', f"预约失败：{resv_msg}")
             notify_user(cfg, "⚠ 自动午休部分失败",
-                        f"学号 {pid}\n取消成功，但重新预约失败：{resv_msg}\n请手动预约下午时段",
+                        f"学号 {pid}\n{'取消成功，但' if uuid else '上午无预约，'}下午预约失败：{resv_msg}\n请手动预约下午时段",
                         always=True)
 
     except Exception as e:

@@ -2667,7 +2667,7 @@ const SHEETS = {
       </div>
       <div class="box tight" style="border-left:4px solid var(--ok)">
         <div class="sub" style="font-weight:700">✓ 每日自动触发</div>
-        <div class="t">在设置页开启后，每天到触发时刻（默认 12:00）自动执行，无需手动操作</div>
+        <div class="t">在设置页开启后，每天到触发时刻（默认 12:00）自动执行，无需手动操作。上午没约或已结束也会直接把下午约上（座位按午休设置，没设就用抢座座位；结束时间没设就到闭馆）</div>
       </div>
       <div class="box tight" style="border-left:4px solid var(--danger)">
         <div class="sub" style="font-weight:700">⚠ 极小占座风险</div>
