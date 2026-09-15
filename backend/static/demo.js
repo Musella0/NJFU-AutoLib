@@ -160,7 +160,6 @@
     notify_email: EMAIL,
     notify_mode: 'simple',
     vpn_password: '',
-    arrived_date: dateKey(today),
   };
 
   const napConfig = {

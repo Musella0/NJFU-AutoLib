@@ -1034,21 +1034,16 @@ def do_nap(pid):
 @app.route("/api/my/accounts/<pid>/arrived", methods=["POST"])
 @own_account_required
 def toggle_arrived(pid):
-    """Toggle the 'arrived at library today' flag for late-protection bypass."""
-    today = datetime.now().strftime("%Y-%m-%d")
-    client, db = get_db()
-    cfg = db.user_config_info.find_one(_account_filter(pid), {"arrived_date": 1})
-    if not cfg:
-        client.close()
-        return jsonify({"error": "账号不存在"}), 404
-    already = cfg.get("arrived_date") == today
-    new_val = "" if already else today
-    db.user_config_info.update_one(
-        _account_filter(pid),
-        {"$set": {"arrived_date": new_val}}
-    )
-    client.close()
-    return jsonify({"arrived": not already}), 200
+    """已废弃：到馆与否由服务端在馆探针判断，不再需要手动标记。
+
+    保留路由只是为了不让旧版安卓小组件上的「我已到馆」按钮报 404；
+    什么都不写，直接告诉客户端不用点。
+    """
+    return jsonify({
+        "arrived": False,
+        "deprecated": True,
+        "message": "已由服务器自动判断是否到馆，无需手动标记",
+    }), 200
 
 
 @app.route("/api/my/accounts/<pid>/verify", methods=["POST"])

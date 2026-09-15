@@ -1610,11 +1610,6 @@ def _record_visit_log(pid: str, uuid: str, target_time_str: str, seat_name: str,
             },
             upsert=True
         )
-        # 服务端状态已确认到馆时，同步主页的“已到馆”状态。
-        if date_str == now.strftime("%Y-%m-%d"):
-            user_config_info.update_one(
-                {"pid": pid}, {"$set": {"arrived_date": date_str}}
-            )
         log_with_user(logger, 'info', pid, '道馆统计',
                       f"记录道馆 {seat_name} {date_str} 共{duration_minutes}分钟")
     except Exception as e:
@@ -1799,7 +1794,7 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
     执行迟到保护动作
 
     迟到保护流程：
-    0. 检查"我已到馆"标志 / 预约状态 / 在馆探针（人已在馆则跳过，不动他的预约）
+    0. 检查预约状态 / 在馆探针（人已在馆则跳过，不动他的预约），全部由服务端判断，不再看手动标记
     1. 取消原预约
     2. 根据 protection_max_minutes 决定行为：
        - 0 / 黑名单：仅取消，不重新预约
@@ -1811,17 +1806,10 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
     pid = user["pid"]
     try:
         # 实时读取最新用户配置，避免缓存
-        today_str = datetime.now().strftime("%Y-%m-%d")
         fresh = user_config_info.find_one({"pid": pid}, {
-            "arrived_date": 1,
             "protection_max_minutes": 1,
             "late_protection_blacklisted": 1
         })
-
-        # 优先检查"我已到馆"手动标志（当天有效）
-        if fresh and fresh.get("arrived_date") == today_str:
-            log_with_user(logger, 'info', pid, '迟到保护', "用户已标记到馆，跳过迟到保护")
-            return
 
         # 读取保护配置
         blacklisted = bool(fresh.get("late_protection_blacklisted")) if fresh else False

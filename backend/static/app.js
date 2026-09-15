@@ -1046,24 +1046,6 @@ async function loadReservations(){
 }
 
 
-async function toggleArrived(){
-  if(!state.currentPid){ toast('请先添加学号','error'); return; }
-  const btn = $('btn-arrived');
-  btn.disabled = true;
-  const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/arrived`, { method:'POST' });
-  btn.disabled = false;
-  if(ok){
-    if(data.arrived){
-      toast('已标记到馆，迟到保护今日不触发','success');
-    }else{
-      toast('已取消到馆标记','info');
-    }
-    await loadAccountDetail(state.currentPid);
-  }else{
-    toast('操作失败','error');
-  }
-}
-
 async function doCancel(){
   closeSheet();
   if(!state.todayResv){ toast('没有可取消的预约','info'); return; }
@@ -1216,10 +1198,6 @@ function renderTodayCard(opt){
   const ACTIVE_STATUSES = [1027, 1093, 3141];
   const canCancel = ACTIVE_STATUSES.includes(resv.resvStatus);
   const lpOn = cfg.late_protection === 'True';
-  const arrived = cfg.arrived_date === new Date().toISOString().slice(0,10);
-  const impliedArrived = resv.resvStatus === 1093 || resv.resvStatus === 3141;
-  const canArrive = ACTIVE_STATUSES.includes(resv.resvStatus);
-  const showArrived = arrived || impliedArrived;
 
   card.style.display = '';
   empty.style.display = 'none';
@@ -1232,10 +1210,8 @@ function renderTodayCard(opt){
       <span class="pill ok"><span class="dot"></span>${escHtml(status)}</span>
       ${lpOn ? '<span class="pill accent">🛡 迟到保护</span>' : ''}
       ${(!NAP_DISABLED && (state.napConfig || {}).auto_daily) ? `<span class="pill accent" style="cursor:pointer" onclick="openNap()">😴 午休 ${escHtml((state.napConfig||{}).trigger_time||'12:00')}</span>` : ''}
-      ${showArrived ? '<span class="pill ok">✓ 已到馆</span>' : ''}
     </div>
     <div class="actions">
-      ${canArrive ? `<button class="btn ${showArrived?'primary':'accent'} lg grow" id="btn-arrived" onclick="toggleArrived()">${showArrived ? '✓ 已到馆' : '✓ 我已到馆'}</button>` : ''}
       ${(canCancel && !NAP_DISABLED) ? `<button class="btn sm" onclick="openNap()">😴 午休</button>` : ''}
       ${canCancel ? `<button class="btn sm" onclick="openSheet('cancel')">取消</button>` : ''}
     </div>`;
@@ -2484,7 +2460,7 @@ const SHEETS = {
       </div>
       <div class="box tight" style="border-left:4px solid var(--ok)">
         <div class="sub" style="font-weight:700">🛡 迟到保护</div>
-        <div class="t">没按时到馆？系统自动把预约推迟 1 小时，座位先给你留着。到了记得点主页的「我已到馆」。推迟后再不来，就按学校规则算违约。( ‵▽′)ψ</div>
+        <div class="t">没按时到馆？系统自动把预约推迟 1 小时，座位先给你留着。人在不在馆由服务器自动判断，刷卡进馆就行，不用手动点。推迟后再不来，就按学校规则算违约。( ‵▽′)ψ</div>
       </div>
       <div class="box tight" style="border-left:4px solid var(--warn)">
         <div class="sub" style="font-weight:700">😴 自动午休</div>
@@ -2508,8 +2484,8 @@ const SHEETS = {
         <div class="t">未按时到馆则自动把预约推迟 1 小时为你保留座位</div>
       </div>
       <div class="box tight" style="border-left:4px solid var(--ok)">
-        <div class="sub" style="font-weight:700">✓ 到馆后手动确认</div>
-        <div class="t">请点击主页的「我已到馆」按钮避免误操作</div>
+        <div class="sub" style="font-weight:700">✓ 到馆自动识别</div>
+        <div class="t">刷卡进馆后服务器会自动识别，已在馆的人不会被推迟</div>
       </div>
       <div class="box tight" style="border-left:4px solid var(--danger)">
         <div class="sub" style="font-weight:700">⚠ 1 小时后仍未到</div>
@@ -2528,8 +2504,8 @@ const SHEETS = {
         <div class="t">未按时到馆则自动把预约推迟 1 小时为你保留座位</div>
       </div>
       <div class="box tight" style="border-left:4px solid var(--ok)">
-        <div class="sub" style="font-weight:700">✓ 到馆后手动确认</div>
-        <div class="t">请点击主页的「我已到馆」按钮避免误操作</div>
+        <div class="sub" style="font-weight:700">✓ 到馆自动识别</div>
+        <div class="t">刷卡进馆后服务器会自动识别，已在馆的人不会被推迟</div>
       </div>
       <div class="box tight" style="border-left:4px solid var(--danger)">
         <div class="sub" style="font-weight:700">⚠ 1 小时后仍未到</div>
@@ -3736,7 +3712,6 @@ async function enterDemoMode(){
     time: defaultWeekTime(),
     seat_list: seats,
     late_protection: 'True',
-    arrived_date: localDateStr(0),
     result: '',
   };
   state.napConfig = { start_time: '14:00', end_time: '', seat: '', auto_daily: true, trigger_time: '12:00' };
