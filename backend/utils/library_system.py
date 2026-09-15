@@ -65,6 +65,24 @@ BUSY_RETRY_MAX = max(0, int(os.getenv("RESERVE_BUSY_RETRY_MAX", "3")))
 # 而不是座位有问题。认出来就现场重登、原座位再打一次。
 AUTH_FAILURE_MARK = "会话失效"
 
+# 下单请求根本没被图书馆受理——webvpn 网关限流/报错、连接被重置、超时、回的不是
+# JSON——这些跟座位空不空毫无关系。认出来就别再往下打备选座位（网关在拒你，
+# 多打只是多烧），把这一段整个交还给队列，等一小会儿从第一张座位重来。
+REJECTED_MARK = "请求未被受理"
+_REJECTED_MARKERS = (
+    "网络请求异常",
+    "预约过程异常",
+    "请求失败: 状态码",
+    "响应不是 JSON",
+    # 图书馆自己的限流/繁忙文案
+    "系统繁忙",
+    "服务器繁忙",
+    "操作频繁",
+    "过于频繁",
+    "请稍后再试",
+    "请求超时",
+)
+
 
 def _is_account_busy(message: str) -> bool:
     """图书馆的账号级锁：「您有预约操作正在进行，请稍后操作」。"""
@@ -73,6 +91,20 @@ def _is_account_busy(message: str) -> bool:
 
 def _is_auth_failure(message: str) -> bool:
     return AUTH_FAILURE_MARK in (message or "")
+
+
+def _is_rejected(message: str) -> bool:
+    """请求没被受理（网关/网络/限流），图书馆压根没看座位。
+
+    「当前设备正在被预约，请稍后重试」和「您有预约操作正在进行」虽然也带「稍后」，
+    但那是图书馆看过座位/账号之后的判定，不算被拒。
+    """
+    text = message or ""
+    if not text or _is_account_busy(text) or "当前设备正在被预约" in text:
+        return False
+    if _is_auth_failure(text):
+        return False
+    return any(mark in text for mark in _REJECTED_MARKERS)
 
 
 def _is_self_conflict(message: str) -> bool:
@@ -268,6 +300,8 @@ class LibrarySystem(BaseSystem):
         # 最近一次成功下单的结构化结果（uuid / 座位 / 时段）。预约接口只回一句给用户看的
         # 中文消息，而占位换约必须拿到 uuid 才能取消、拿到 devId 才能约回同一张座位。
         self.last_reservation: Optional[Dict[str, Any]] = None
+        # 上一次 reserve_seat 是不是因为请求没被受理（网关/网络）而整段收手
+        self.last_segment_rejected = False
         self.vpn: Optional[VPNSystem] = None
 
         # 使用共享会话或创建新会话（新建的同样要带默认超时）
@@ -977,6 +1011,8 @@ class LibrarySystem(BaseSystem):
         # 上一段的结果必须先清掉：调用方靠它判断“这一单落在哪张座位、uuid 是多少”，
         # 留着残留会让失败的一单被当成成功的那一单去取消。
         self.last_reservation = None
+        # 调用方靠它决定要不要把这一段整个放回队列稍后重打。
+        self.last_segment_rejected = False
         try:
             # 确保登录状态
             self.ensure_login()
@@ -1042,12 +1078,26 @@ class LibrarySystem(BaseSystem):
                                           f"该账号在 {target_time} 已有预约，"
                                           f"跳过其余 {skipped} 张备选座位")
                         break
+                    if _is_rejected(res_message):
+                        # 请求没被受理，这张座位到底空不空根本没问到。网关正在拒我们，
+                        # 接着打备选只会继续被拒，还把首选的优先级丢了：就地收手，
+                        # 让调用方稍后把整段从第一张座位重来。
+                        self.last_segment_rejected = True
+                        skipped = len(seat_list) - index - 1
+                        log_with_user('warning', self.username, '预约',
+                                      f"{target_time} 这一段的请求未被受理"
+                                      f"{'，跳过其余 ' + str(skipped) + ' 张备选座位' if skipped else ''}"
+                                      f"，交回队列稍后重打")
+                        break
 
             # 一张都没约上
             if failed_seats:
                 if self_conflict:
                     error_msg = (f"该账号在 {target_time} 时段已有预约，无需也无法再约"
                                  f"（若不是本系统约的，多半是你自己在图书馆系统里约过）。"
+                                 f"详细原因:\n" + "\n".join(failed_seats))
+                elif self.last_segment_rejected:
+                    error_msg = (f"{REJECTED_MARK}（网关/网络拒绝，未能问到座位）。"
                                  f"详细原因:\n" + "\n".join(failed_seats))
                 else:
                     error_msg = f"所有座位预约失败，详细原因:\n" + "\n".join(failed_seats)
@@ -1059,6 +1109,8 @@ class LibrarySystem(BaseSystem):
                 return error_msg, self.user_info
 
         except Exception as e:
+            # 登录/网络层直接抛上来的，同样算没受理，让调用方稍后整段重来。
+            self.last_segment_rejected = isinstance(e, requests.exceptions.RequestException)
             error_msg = f"预约过程出现异常: {str(e)}"
             log_with_user('error', self.username, '预约', error_msg)
             return error_msg, None

@@ -56,6 +56,8 @@ SELF = ("座位 2F-B070(100455871) 期望预约时间x 预约失败: "
         "学工号为：2310104222的用户在当前时段有预约")
 OK = "✅ 09-12 · 08:00-22:00 · 2F-B070 · 预约成功"
 AUTH = f"座位 2F-B070(100455871) 请求失败: {library_system.AUTH_FAILURE_MARK}（返回登录页）"
+REJECTED = "座位 2F-B070(100455871) 请求失败: 状态码 429"
+DEV_BUSY = "座位 2F-B070(100455871) 期望预约时间x 预约失败: 当前设备正在被预约，请稍后重试"
 
 
 class ReserveSeatLoopTests(unittest.TestCase):
@@ -157,6 +159,62 @@ class ReserveSeatLoopTests(unittest.TestCase):
 
         self.assertIn("所有座位预约失败", message)
         library._initialize_login.assert_called_once()
+
+    def test_rejected_request_stops_the_seat_list_and_flags_the_segment(self):
+        """网关把请求拒了（限流、5xx、连接重置），座位空不空根本没问到。
+
+        接着打备选只会继续被拒，还把首选的优先级丢掉；正确做法是就地收手、
+        标记这一段「未被受理」，让队列稍后从第一张座位整段重来。
+        """
+        library = self.make_library([REJECTED, OK])
+
+        message, _ = self._reserve(library, seats=("100455871", "100455873", "100455875"))
+
+        self.assertEqual(library._reserve_single_seat.call_count, 1, "被拒就该收手")
+        self.assertTrue(library.last_segment_rejected)
+        self.assertIn(library_system.REJECTED_MARK, message)
+        self.assertNotIn("所有座位预约失败", message, "这不是「都被抢光了」，别这么报")
+
+    def test_seat_taken_does_not_flag_the_segment_as_rejected(self):
+        library = self.make_library([TAKEN, TAKEN])
+
+        self._reserve(library)
+
+        self.assertFalse(library.last_segment_rejected)
+
+    def test_flag_is_reset_between_segments(self):
+        library = self.make_library([REJECTED, OK])
+
+        self._reserve(library, seats=("100455871",))
+        self.assertTrue(library.last_segment_rejected)
+        self._reserve(library, seats=("100455871",))
+        self.assertFalse(library.last_segment_rejected)
+
+    def test_transport_exception_counts_as_rejected(self):
+        library = self.make_library([library_system.requests.exceptions.ConnectionError("reset")])
+
+        message, _ = self._reserve(library)
+
+        self.assertTrue(library.last_segment_rejected)
+        self.assertIn("异常", message)
+
+
+class RejectionDetectionTests(unittest.TestCase):
+    """「被拒」只认网关/网络/限流；图书馆看过座位或账号之后给的判定都不算。"""
+
+    def test_gateway_and_network_errors_are_rejections(self):
+        for message in (
+            REJECTED,
+            "座位 x(1) 请求失败: 状态码 503",
+            "座位 x(1) 请求失败: 响应不是 JSON",
+            "座位 x(1) 网络请求异常: Connection reset by peer",
+            "座位 x(1) 期望预约时间x 预约失败: 系统繁忙，请稍后再试",
+        ):
+            self.assertTrue(library_system._is_rejected(message), message)
+
+    def test_library_verdicts_are_not_rejections(self):
+        for message in (OK, TAKEN, SELF, BUSY, DEV_BUSY, AUTH, ""):
+            self.assertFalse(library_system._is_rejected(message), message)
 
 
 class AuthFailureDetectionTests(unittest.TestCase):

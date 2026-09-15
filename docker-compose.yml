@@ -108,8 +108,13 @@ services:
       # 定时预约时间（24小时制，默认每天早晨 7:00 预约次日座位）
       - SCHEDULE_HOUR=${SCHEDULE_HOUR:-7}
       - SCHEDULE_MINUTE=${SCHEDULE_MINUTE:-0}
-      # 并发抢座
-      - RESERVE_CONCURRENCY=${RESERVE_CONCURRENCY:-8}
+      # 并发抢座：尽量盖住全部账号的首段，总耗时 ≈ 轮数 × 图书馆延迟
+      - RESERVE_CONCURRENCY=${RESERVE_CONCURRENCY:-16}
+      # 请求没被受理（网关限流/网络异常）时放回队尾重打：最多几次、基础延迟
+      - RESERVE_REJECT_RETRY_MAX=${RESERVE_REJECT_RETRY_MAX:-2}
+      - RESERVE_REJECT_RETRY_DELAY_SECONDS=${RESERVE_REJECT_RETRY_DELAY_SECONDS:-0.5}
+      # 收尾（刷预约状态、发邮件、写面板）的线程数，不占抢座工人的槽位
+      - RESERVE_FINISH_WORKERS=${RESERVE_FINISH_WORKERS:-4}
       # 午休功能总开关，默认关（缺「离馆」接口，已入座的预约释放不掉）
       - NAP_ENABLED=${NAP_ENABLED:-0}
       - HTTP_CONNECT_TIMEOUT=${HTTP_CONNECT_TIMEOUT:-10}

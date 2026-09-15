@@ -38,7 +38,7 @@ import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from typing import List, Dict, Any, Tuple, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
 from pymongo import MongoClient, DESCENDING
@@ -148,8 +148,17 @@ PENDING_CHECKIN_STATUS = 1027       # 待签到——只有这个状态的预约
 _arrival_checks_backfilled = False
 
 # 并发抢座：7:00 时所有账号并行执行，避免串行排队让靠后的用户错过黄金窗口。
-# 上限不宜过高，webvpn 网关和图书馆接口都扛不住太猛的并发。
-RESERVE_CONCURRENCY = int(os.getenv("RESERVE_CONCURRENCY", "8"))
+# 总耗时 ≈ 轮数 × 那一刻的图书馆延迟（2026-09-15：28 个账号并发 8 分 4 轮，开闸头三秒
+# 图书馆延迟 2.6s，跑了 4.7s，丢的三张首选全在第 3、4 轮）。所以并发要尽量盖住
+# 全部账号的第 1 段。「webvpn 有限流」一直是猜的，没实测过；真被拒了有下面的
+# RESERVE_REJECT_RETRY_* 兜底，reserve_attempts 里也留得下证据。
+RESERVE_CONCURRENCY = int(os.getenv("RESERVE_CONCURRENCY", "16"))
+# 请求没被受理（网关限流/网络异常）时，这一段放回队尾、隔多久再从第一张座位重打、最多几次。
+# 延迟按次数递增：0.5s、1.0s……给网关一点喘息，又不至于错过窗口。
+RESERVE_REJECT_RETRY_MAX = max(0, int(os.getenv("RESERVE_REJECT_RETRY_MAX", "2")))
+RESERVE_REJECT_RETRY_DELAY_SECONDS = max(0.0, float(os.getenv("RESERVE_REJECT_RETRY_DELAY_SECONDS", "0.5")))
+# 抢完之后的收尾（刷预约状态、发邮件、写面板）由这几个线程另做，不占抢座工人的槽位。
+RESERVE_FINISH_WORKERS = max(1, int(os.getenv("RESERVE_FINISH_WORKERS", "4")))
 # 午休功能总开关，见 main.py 的同名说明。关掉时每日自动午休整个不跑。
 NAP_ENABLED = os.getenv("NAP_ENABLED", "0").strip().lower() not in ("0", "false", "no", "off")
 
@@ -998,6 +1007,9 @@ class _WorkItem:
         self.due = due
         # 超窗段的占位时间窗；None 表示占不了（后天的段、闭馆等），只排队。
         self.hold_window = hold_window
+        # 请求被拒后放回队列的次数，以及下次最早可以再打的时刻（time.monotonic）。
+        self.retries = 0
+        self.not_before = 0.0
 
     @property
     def seg_label(self) -> str:
@@ -1137,11 +1149,20 @@ def _ensure_library(plan: _UserPlan) -> LibrarySystem:
     return library
 
 
-def _run_item(item: _WorkItem) -> None:
+def _run_item(item: _WorkItem, finish: Optional[Callable[[Callable[[], None]], Any]] = None) -> bool:
     """
     执行队列里的一格。同一账号的格子由队列保证串行，这里不用再加锁。
 
     任何异常只算这一段失败，不影响同账号的其他段，更不影响别的账号。
+
+    finish 是收尾工作的去处（写面板、刷预约状态、发通知）。7:00 的队列传线程池的
+    submit 进来，让抢座工人一拿到图书馆的回应就去接下一个账号——收尾里那次
+    get_reservation_info 又是一个图书馆来回，再加发邮件，以前占着槽位要 0.1~0.4s，
+    每一轮都白白晚这么久。不传就原地做（面板上的「立即预约」、单测）。
+
+    Returns:
+        True 表示这一段的请求没被受理（网关/网络拒绝）、还有重试次数，调用方应
+        把它放回队列稍后重打；这时候结果没写、余量没减，就像没跑过一样。
     """
     plan = item.plan
     pid = plan.pid
@@ -1151,6 +1172,15 @@ def _run_item(item: _WorkItem) -> None:
             ok, line = _reserve_one_segment(
                 library, pid, plan.seat_ids, item.begin, item.end, item.seg_label
             )
+            if (not ok and library.last_segment_rejected
+                    and item.retries < RESERVE_REJECT_RETRY_MAX):
+                item.retries += 1
+                delay = RESERVE_REJECT_RETRY_DELAY_SECONDS * item.retries
+                item.not_before = time.monotonic() + delay
+                log_with_user(logger, 'warning', pid, '二次预约',
+                              f"{item.seg_label} 请求未被受理，{delay:g}s 后重打"
+                              f"（第 {item.retries}/{RESERVE_REJECT_RETRY_MAX} 次）")
+                return True
             plan.any_success = plan.any_success or ok
             plan.any_failure = plan.any_failure or not ok
         else:
@@ -1178,11 +1208,25 @@ def _run_item(item: _WorkItem) -> None:
 
     plan.results[item.idx] = line
     plan.remaining -= 1
+    last = plan.remaining <= 0
+
+    def wrap_up() -> None:
+        # combined 在真正执行时才拼：results 只增不减，收尾线程就算乱序也只会
+        # 写出更全的那份，不会用旧的把新的盖掉。
+        combined = "\n".join(plan.results[idx] for idx in sorted(plan.results))
+        try:
+            update_user_config(pid, combined)
+            if last:
+                _finish_user(plan, combined)
+        except Exception as exc:  # 丢进线程池的任务没人接 future，异常得自己记
+            log_with_user(logger, 'error', pid, '预约收尾', f"收尾异常（座位已约上不受影响）: {exc}")
+
     # 每段跑完就把已有的结果写回面板，最后一段跑完再做收尾。
-    combined = "\n".join(plan.results[idx] for idx in sorted(plan.results))
-    update_user_config(pid, combined)
-    if plan.remaining <= 0:
-        _finish_user(plan, combined)
+    if finish is None:
+        wrap_up()
+    else:
+        finish(wrap_up)
+    return False
 
 
 def _finish_user(plan: _UserPlan, combined: str) -> None:
@@ -1235,7 +1279,9 @@ def reservation(res_item: Dict[str, Any], now: Optional[datetime] = None) -> Non
     if plan is None:
         return
     for item in plan.items:
-        _run_item(item)
+        # 被拒就原地等到重打时刻再来，跟 7:00 队列里的二次预约同一套规则。
+        while _run_item(item):
+            time.sleep(max(0.0, item.not_before - time.monotonic()))
 
 
 def _build_queue(plans: List[_UserPlan]) -> List[_WorkItem]:
@@ -1280,12 +1326,15 @@ def _demote_chronic_self_conflicts(plans: List[_UserPlan]) -> List[_UserPlan]:
     return front + back
 
 
-def _drain_queue(queue: List[_WorkItem], workers: int) -> None:
+def _drain_queue(queue: List[_WorkItem], workers: int,
+                 finish: Optional[Callable[[Callable[[], None]], Any]] = None) -> None:
     """
     多个工人按队列顺序取活干；同一账号的格子绝不同时被两个工人拿走。
 
     不用 ThreadPoolExecutor：它只会按提交顺序死板地取，做不到「这个账号正忙，
-    先跳过它拿下一个」。
+    先跳过它拿下一个」，也做不到「这一格被拒了，放回队尾过一会儿再打」。
+
+    finish 见 _run_item：收尾工作交给它，工人只做「发请求、等回应」这一件事。
     """
     pending = list(queue)
     busy: set = set()
@@ -1294,12 +1343,19 @@ def _drain_queue(queue: List[_WorkItem], workers: int) -> None:
     def take_next() -> Optional[_WorkItem]:
         with cond:
             while pending:
+                now = time.monotonic()
+                wait = 0.2
                 for index, item in enumerate(pending):
-                    if item.plan.pid not in busy:
-                        busy.add(item.plan.pid)
-                        return pending.pop(index)
-                # 剩下的全是正忙账号的后续段，等谁忙完了再看。
-                cond.wait(timeout=0.2)
+                    if item.plan.pid in busy:
+                        continue
+                    if item.not_before > now:
+                        # 被拒后放回来的，还没到重打时刻；先看后面的。
+                        wait = min(wait, item.not_before - now)
+                        continue
+                    busy.add(item.plan.pid)
+                    return pending.pop(index)
+                # 剩下的要么是正忙账号的后续段，要么还没到重打时刻，等一等再看。
+                cond.wait(timeout=wait)
             return None
 
     def worker() -> None:
@@ -1307,13 +1363,17 @@ def _drain_queue(queue: List[_WorkItem], workers: int) -> None:
             item = take_next()
             if item is None:
                 return
+            requeue = False
             try:
-                _run_item(item)
+                requeue = _run_item(item, finish)
             except Exception as exc:  # _run_item 自己兜底，这里防万一
                 log_with_user(logger, 'error', item.plan.pid, '预约异常', f"预约线程异常: {exc}")
             finally:
                 with cond:
                     busy.discard(item.plan.pid)
+                    if requeue:
+                        # 排到队尾：先让别人把首段打完，网关也顺便喘口气。
+                        pending.append(item)
                     cond.notify_all()
 
     threads = [threading.Thread(target=worker, name=f"reserve-{index}", daemon=True)
@@ -1454,7 +1514,15 @@ def process_reservations() -> None:
             log_with_user(logger, 'info', plan.pid, '预约处理',
                           f"排入预约队列: {plan.pid}, 优先级: {plan.cfg.get('priority', 0)}, "
                           f"{len(plan.items)} 段")
-        _drain_queue(queue, workers)
+        # 收尾（写面板、刷预约状态、发邮件）另起线程池，抢座工人一拿到回应就放槽位。
+        # with 块保证收尾全部做完才走到下面的 finally——_finish_user 会把会话存回
+        # prelogin 给补约用，clear 必须在它之后。
+        with ThreadPoolExecutor(max_workers=RESERVE_FINISH_WORKERS,
+                                thread_name_prefix="reserve-finish") as finisher:
+            _drain_queue(queue, workers, finisher.submit)
+            fired = time.time() - started
+            log_with_user(logger, 'info', '系统', '预约处理',
+                          f"开枪阶段结束，耗时 {fired:.1f} 秒，等收尾")
     finally:
         # 没被取走的预登录会话到这里就作废了；只留下 _finish_user 刚存回去、
         # 等着给补约 job 复用的那几条。

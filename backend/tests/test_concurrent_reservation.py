@@ -77,7 +77,8 @@ class ConcurrentReservationTests(unittest.TestCase):
         with patch.object(scheduled_task, "get_all_active_reservations", return_value=accounts), \
              patch.object(scheduled_task, "_plan_reservation_safely",
                           side_effect=lambda item, now=None: fake_plan(item, segments)), \
-             patch.object(scheduled_task, "_run_item", side_effect=run_item), \
+             patch.object(scheduled_task, "_run_item",
+                          side_effect=lambda item, finish=None: run_item(item)), \
              patch.object(scheduled_task, "RESERVE_CONCURRENCY", concurrency):
             scheduled_task.process_reservations()
 
@@ -200,6 +201,108 @@ class ConcurrentReservationTests(unittest.TestCase):
         for account in accounts:
             mine = [idx for pid, idx in order if pid == account["pid"]]
             self.assertEqual(mine, [1, 2], "同一账号的段必须按配置顺序执行")
+
+    def test_finish_work_does_not_hold_the_worker_slot(self):
+        """收尾（写面板、刷预约状态、发邮件）不该占着抢座工人：并发度 1 时，
+        第二个账号必须在第一个账号的收尾做完之前就开枪。"""
+        accounts = self._accounts(2)
+        plans = {a["pid"]: fake_plan(a) for a in accounts}
+        events = []
+        lock = threading.Lock()
+
+        def slow_finish(pid):
+            time.sleep(0.3)
+            with lock:
+                events.append(("finished", pid))
+
+        def fake_reserve(library, pid, seat_ids, begin, end, label):
+            with lock:
+                events.append(("fired", pid))
+            return True, "✅ ok"
+
+        with patch.object(scheduled_task, "_ensure_library", return_value=Mock(last_segment_rejected=False)), \
+             patch.object(scheduled_task, "_reserve_one_segment", side_effect=fake_reserve), \
+             patch.object(scheduled_task, "update_user_config"), \
+             patch.object(scheduled_task, "_finish_user", side_effect=lambda plan, combined: slow_finish(plan.pid)):
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=2) as finisher:
+                scheduled_task._drain_queue(scheduled_task._build_queue(list(plans.values())), 1, finisher.submit)
+
+        fired = [e for e in events if e[0] == "fired"]
+        self.assertEqual(len(fired), 2)
+        self.assertEqual(events[:2], fired, "第二个账号应在第一个账号收尾完成前开枪")
+        self.assertEqual(len([e for e in events if e[0] == "finished"]), 2, "收尾要做完")
+
+    def test_rejected_segment_is_requeued_to_the_tail_and_retried(self):
+        """网关拒了的段放回队尾，隔一小会儿从第一张座位重打；别的账号先走。"""
+        accounts = self._accounts(3)
+        plans = {a["pid"]: fake_plan(a) for a in accounts}
+        victim = accounts[0]["pid"]
+        order = []
+        lock = threading.Lock()
+        libraries = {pid: Mock(last_segment_rejected=False) for pid in plans}
+
+        def fake_reserve(library, pid, seat_ids, begin, end, label):
+            with lock:
+                order.append(pid)
+                first_time = order.count(pid) == 1
+            if pid == victim and first_time:
+                library.last_segment_rejected = True
+                return False, "❌ 请求未被受理"
+            library.last_segment_rejected = False
+            return True, "✅ ok"
+
+        with patch.object(scheduled_task, "_ensure_library", side_effect=lambda plan: libraries[plan.pid]), \
+             patch.object(scheduled_task, "_reserve_one_segment", side_effect=fake_reserve), \
+             patch.object(scheduled_task, "update_user_config"), \
+             patch.object(scheduled_task, "_finish_user") as finish, \
+             patch.object(scheduled_task, "RESERVE_REJECT_RETRY_DELAY_SECONDS", 0.05):
+            scheduled_task._drain_queue(scheduled_task._build_queue(list(plans.values())), 1)
+
+        self.assertEqual(order, [victim, accounts[1]["pid"], accounts[2]["pid"], victim])
+        self.assertEqual(finish.call_count, 3, "每个账号收尾一次，被拒那次不算")
+        self.assertTrue(plans[victim].any_success)
+        self.assertFalse(plans[victim].any_failure, "重打成功后不该留下失败痕迹")
+
+    def test_rejected_segment_gives_up_after_max_retries(self):
+        accounts = self._accounts(1)
+        plan = fake_plan(accounts[0])
+        library = Mock(last_segment_rejected=True)
+        reserve = Mock(return_value=(False, "❌ 请求未被受理"))
+
+        with patch.object(scheduled_task, "_ensure_library", return_value=library), \
+             patch.object(scheduled_task, "_reserve_one_segment", reserve), \
+             patch.object(scheduled_task, "update_user_config") as update, \
+             patch.object(scheduled_task, "_finish_user") as finish, \
+             patch.object(scheduled_task, "RESERVE_REJECT_RETRY_MAX", 2), \
+             patch.object(scheduled_task, "RESERVE_REJECT_RETRY_DELAY_SECONDS", 0.01):
+            scheduled_task._drain_queue(scheduled_task._build_queue([plan]), 4)
+
+        self.assertEqual(reserve.call_count, 3, "首发 + 2 次重打")
+        self.assertTrue(plan.any_failure)
+        finish.assert_called_once()
+        update.assert_called_once_with(plan.pid, "❌ 请求未被受理")
+
+    def test_rejected_retry_waits_for_its_delay(self):
+        accounts = self._accounts(1)
+        plan = fake_plan(accounts[0])
+        library = Mock(last_segment_rejected=True)
+        stamps = []
+
+        def fake_reserve(*args):
+            stamps.append(time.monotonic())
+            library.last_segment_rejected = len(stamps) == 1
+            return (False, "❌") if len(stamps) == 1 else (True, "✅")
+
+        with patch.object(scheduled_task, "_ensure_library", return_value=library), \
+             patch.object(scheduled_task, "_reserve_one_segment", side_effect=fake_reserve), \
+             patch.object(scheduled_task, "update_user_config"), \
+             patch.object(scheduled_task, "_finish_user"), \
+             patch.object(scheduled_task, "RESERVE_REJECT_RETRY_DELAY_SECONDS", 0.2):
+            scheduled_task._drain_queue(scheduled_task._build_queue([plan]), 4)
+
+        self.assertEqual(len(stamps), 2)
+        self.assertGreaterEqual(stamps[1] - stamps[0], 0.19)
 
     def test_empty_queue_is_a_no_op(self):
         with patch.object(scheduled_task, "get_all_active_reservations", return_value=[]), \
