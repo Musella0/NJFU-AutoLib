@@ -1298,9 +1298,13 @@ function renderTomorrowStrip(){
     segs = toSegments(cfg.time.week_time[String(isoNum)]);
   }
   if(isoNum === 5) segs = segs.map(friCap);
-  const timeLabel = segs.length
-    ? (segs.length > 1 ? `${segs.length}段: ${segs.join(' · ')}` : segs[0])
-    : '—';
+  // 明天配置为「休息」（或没配时段）就不会抢，别再显示「明早抢…」误导人
+  if(!segs.length){
+    tt.textContent = state.tomorrowResv ? '明日不自动抢座' : '明日无预约';
+    ss.textContent = state.tomorrowResv ? '明天配置为休息，下面是已有的预约' : '明天配置为休息，不会自动抢座';
+    return;
+  }
+  const timeLabel = segs.length > 1 ? `${segs.length}段: ${segs.join(' · ')}` : segs[0];
   tt.textContent = '按配置自动预约';
   ss.textContent = `明早抢 ${seat} · ${timeLabel}`;
 }
@@ -3716,6 +3720,12 @@ async function enterDemoMode(){
   state.napConfig = { start_time: '14:00', end_time: '', seat: '', auto_daily: true, trigger_time: '12:00' };
   state.todayResv = demoReservation(0, 1093);   // 使用中
   state.tomorrowResv = demoReservation(1, 1027); // 已预约
+  // ?demo=rest：明天配置为休息、也没预约，看「明日无预约」那条
+  if(new URLSearchParams(location.search).get('demo') === 'rest'){
+    const tmr = new Date(Date.now() + 86400000);
+    state.currentCfg.time.week_time[String(tmr.getDay() === 0 ? 7 : tmr.getDay())] = '休息';
+    state.tomorrowResv = null;
+  }
   renderAllAccountViews();
   renderConfig();
   renderHome();

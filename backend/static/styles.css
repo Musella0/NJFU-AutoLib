@@ -263,7 +263,7 @@ body.no-wobble .chip,body.no-wobble .pill{border-radius:999px !important}
 .today-card .time{font-family:var(--hand);font-size:20px;color:var(--ink2);margin-top:4px}
 .today-card .meta-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
 
-.today-card .actions{display:flex;gap:8px;margin-top:16px}
+.today-card .actions{display:flex;gap:8px;margin-top:16px;justify-content:flex-end}
 
 .today-card.tmr-variant{background:var(--tmr-soft);border-color:var(--tmr)}
 .today-card.tmr-variant .stamp{color:var(--tmr);border-color:var(--tmr)}
