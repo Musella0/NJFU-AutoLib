@@ -228,6 +228,14 @@
           </div>
           <div class="toggle" id="cfg-toggle-lp" onclick="toggleLP(this,event)"></div>
         </div>
+        <!-- 只在迟到保护开着时显示；shift 是老行为，cancel 是推过一次后再探一次、没到就取消 -->
+        <div class="field" id="cfg-lp-mode-row" style="display:none;margin:4px 0 10px">
+          <label>推迟 1 小时后仍未到馆</label>
+          <select id="cfg-lp-mode" style="font-size:13px" onchange="scheduleCfgAutosave()">
+            <option value="shift">不再干预，交给图书馆按规则处理（默认）</option>
+            <option value="cancel">开始前 5 分钟再探一次，仍未到馆就取消预约</option>
+          </select>
+        </div>
         <div class="toggle-row" data-nap-wip>
           <div class="info">
             <div class="t1">自动午休 😴</div>
@@ -237,21 +245,8 @@
         </div>
       </div>
 
-      <!-- Unified identity credential -->
-      <div class="box pad mb-lg">
-        <div class="label">统一身份认证</div>
-        <div class="col gap-sm mt">
-          <div class="field">
-            <label>统一身份认证密码（网上办事大厅）</label>
-            <input type="password" id="cfg-vpn" placeholder="如需更新，请重新输入" autocomplete="new-password" style="font-family:var(--mono)">
-          </div>
-          <div class="tiny" style="color:var(--ink3)">💡 已保存的密码不会回显；改过密码后，请重新填写并点「验证并保存」。</div>
-        </div>
-      </div>
-
       <div class="row-flex">
         <button class="btn ghost grow" onclick="go('home')">取消</button>
-        <button class="btn grow" id="btn-verify-cfg" onclick="verifyAndSaveCfg()">验证并保存</button>
         <button class="btn accent grow" id="btn-save-cfg" onclick="saveCfg()">保存配置</button>
       </div>
 
@@ -281,6 +276,12 @@
           <button class="btn sm" id="settings-profile-btn" onclick="openSheet('profile')" style="display:none">编辑</button>
           <button class="btn sm" onclick="openSheet('accounts')">切换学号</button>
         </div>
+      </div>
+      <div class="toggle-row" style="margin-top:8px">
+        <div class="info">
+          <div class="t1">重置密码后请在这里重新校验→</div>
+        </div>
+        <button class="btn sm" onclick="openSheet('reset-pwd')">重新校验</button>
       </div>
       <!-- 只在点的时候去图书馆查一次，没有任何定时任务会自动查；结果就展开在按钮下面 -->
       <div class="toggle-row" style="border:0;padding-bottom:0;margin-top:8px">

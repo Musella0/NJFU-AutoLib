@@ -686,8 +686,12 @@ def save_my_account(pid):
     data = request.get_json(silent=True) or {}
     # Credentials and verified status may only be changed by verify_account.
     allowed = ["seat_list", "mode", "time", "is_reserved",
-               "late_protection", "notify_email", "notify_mode"]
+               "late_protection", "late_protection_mode", "notify_email", "notify_mode"]
     update = {k: v for k, v in data.items() if k in allowed and v is not None}
+
+    # shift：推一次就不管了（默认）；cancel：推过一次之后再探一次，还没到就取消
+    if "late_protection_mode" in update and update["late_protection_mode"] not in ("shift", "cancel"):
+        return jsonify({"error": "迟到保护模式无效"}), 400
 
     if "seat_list" in update:
         seats = update["seat_list"]

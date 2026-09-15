@@ -498,7 +498,7 @@ def _record_credential_failure(cfg: Dict[str, Any], exc: Exception) -> None:
         "🔑 学校密码已失效，自动预约已暂停",
         f"学号 {pid}\n"
         f"统一身份认证连续 {count} 次返回「密码错误」，多半是你刚改过学校密码。\n"
-        f"自动预约已暂停；请打开 AutoLib 的「配置」页，重新填写新密码并点「验证并保存」，"
+        f"自动预约已暂停；请打开 AutoLib「设置 → 账号 → 重新校验」，填新密码并验证，"
         f"验证通过后会自动恢复。\n最近一次错误：{exc}",
         always=True,
     )
@@ -1817,8 +1817,14 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
         if protection_minutes is None:
             protection_minutes = 60
 
+        # 已经推迟过一次的预约（by_protection）只会在 cancel 模式下被注册进来：
+        # 这一轮不再推，人还没到就直接取消。
+        second_pass = bool(seat_dict.get('by_protection'))
+        cancel_only = blacklisted or protection_minutes == 0 or second_pass
+
         log_with_user(logger, 'info', pid, '迟到保护',
-                     f"开始处理座位 {dev_name} 的迟到保护（配置: {protection_minutes}min, 黑名单: {blacklisted}）")
+                     f"开始处理座位 {dev_name} 的迟到保护（配置: {protection_minutes}min, 黑名单: {blacklisted}"
+                     f"{', 已推迟过一次，本轮未到馆则取消' if second_pass else ''}）")
 
         # 闭馆判断必须早于登录和取消。即使配置为“仅取消”，闭馆日也不应让
         # 自动保护流程改动已有预约；用户仍可通过单纯取消接口自行处理。
@@ -1834,8 +1840,8 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
         new_end_str = f"{date_str} {new_end.strftime('%H:%M:%S')}"
         conflict = find_reservation_conflict(
             db.school_notice_reviews,
-            new_begin_str if not (blacklisted or protection_minutes == 0) else begin_time,
-            new_end_str if not (blacklisted or protection_minutes == 0) else end_time,
+            new_begin_str if not cancel_only else begin_time,
+            new_end_str if not cancel_only else end_time,
         )
         if conflict:
             log_with_user(logger, 'info', pid, '闭馆保护', _blackout_message(conflict))
@@ -1917,11 +1923,21 @@ def late_protect_action(user: Dict[str, Any], dev_name: str, seat_dict: Dict[str
             log_with_user(logger, 'error', pid, '迟到保护', f"取消原预约异常: {str(e)}")
             return
 
+        if second_pass:
+            # 推迟那次已经计过数，这次取消不算新的一次保护
+            log_with_user(logger, 'info', pid, '迟到保护',
+                         f"已推迟过一次仍未到馆，预约已取消：{dev_name} {seat_dict['target_time']}")
+            notify_user(user, "🛡 迟到保护：预约已取消",
+                        f"学号 {pid}\n{dev_name} {seat_dict['target_time']}\n"
+                        f"推迟一小时后仍未到馆，按你的设置已取消这条预约，没有违约记录。",
+                        always=True)
+            return
+
         # 累计触发计数
         user_config_info.update_one({"pid": pid}, {"$inc": {"late_protection_count": 1}})
 
         # 黑名单或保护时长为0：仅取消，不重新预约
-        if blacklisted or protection_minutes == 0:
+        if cancel_only:
             log_with_user(logger, 'info', pid, '迟到保护',
                          "已列入黑名单或保护时长为0，预约已取消，不重新预约")
             return
@@ -2030,10 +2046,16 @@ def register_late_protection_jobs(scheduler) -> None:
                     # 日志带上时段：这是唯一一条“今天不给你保护”的记录，
                     # 不打出来的话事后完全查不到保护为什么没触发。
                     if seat_dict.get('by_protection'):
+                        # cancel 模式例外：推过一次的预约再探一次，还没到就取消，
+                        # late_protect_action 看到 by_protection 就只取消不重约。
+                        if (user.get("late_protection_mode") or "shift") != "cancel":
+                            log_with_user(logger, 'debug', pid, '迟到保护',
+                                         f"跳过已受保护的预约 {dev_name} "
+                                         f"{seat_dict['target_time']}（防止级联）")
+                            continue
                         log_with_user(logger, 'debug', pid, '迟到保护',
-                                     f"跳过已受保护的预约 {dev_name} "
-                                     f"{seat_dict['target_time']}（防止级联）")
-                        continue
+                                     f"cancel 模式：已推迟过的预约 {dev_name} "
+                                     f"{seat_dict['target_time']} 再探一次，未到馆则取消")
 
                     begin_str = seat_dict['target_time'][:19]
                     begin_time = datetime.strptime(begin_str, "%Y-%m-%d %H:%M:%S")

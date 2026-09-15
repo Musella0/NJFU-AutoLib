@@ -470,8 +470,8 @@ function renderConfig(){
   $('cfg-toggle-study').classList.toggle('on', !!cfg.study_time_consent);
   $('study-sync-row').style.display = cfg.study_time_consent ? '' : 'none';
 
-  // Stored credentials are never returned by the API or kept in page state.
-  $('cfg-vpn').value = '';
+  $('cfg-lp-mode').value = cfg.late_protection_mode === 'cancel' ? 'cancel' : 'shift';
+  syncLPModeRow();
 
   $('cfg-pid-label').textContent = cfg.pid;
   $('cfg-verify-badge').textContent = cfg.verified ? '✓ 已验证' : '⚠ 未验证';
@@ -792,6 +792,7 @@ async function saveCfg(options = {}){
     time: timeCfg,
     is_reserved: $('cfg-toggle-reserve').classList.contains('on') ? 'True' : 'False',
     late_protection: $('cfg-toggle-lp').classList.contains('on') ? 'True' : 'False',
+    late_protection_mode: ($('cfg-lp-mode') || {}).value === 'cancel' ? 'cancel' : 'shift',
   };
   const btn = $('btn-save-cfg');
   if(!silent){
@@ -827,11 +828,12 @@ async function saveCfg(options = {}){
 }
 
 // 密码只通过学校验证接口更新；普通配置保存永远不接触凭据。
-async function verifyAndSaveCfg(){
+// /verify 通过时后端自己把 verified 置回 true，这里不用再走 saveCfg。
+async function resetPwd(){
   if(!state.currentPid || !state.currentCfg){ toast('请先添加学号','error'); return; }
-  const vpn = $('cfg-vpn').value;
+  const vpn = ($('reset-vpn') || {}).value;
   if(!vpn){ toast('请填写统一身份认证密码','error'); return; }
-  const btn = $('btn-verify-cfg');
+  const btn = $('btn-reset-pwd');
   btn.disabled = true;
   btn.textContent = '验证中...';
   const { ok, data } = await api(
@@ -850,14 +852,15 @@ async function verifyAndSaveCfg(){
     toast('验证成功，但本机没能保存登录状态，请检查浏览器是否禁用了 Cookie 和本地存储','error');
     return;
   }
-  $('cfg-vpn').value = '';
+  closeSheet();
   state.currentCfg.verified = true;
   delete state.currentCfg.credential_invalid_at;
   renderCredentialBanner('cred-banner-config', false);
   renderCredentialBanner('cred-banner-home', true);
   $('cfg-verify-badge').textContent = '✓ 已验证';
   $('cfg-verify-badge').className = 'pill ok';
-  await saveCfg({ verified: true });
+  toast('密码已更新并验证通过','success');
+  await loadAccounts();
 }
 
 // ---------- reserve-now sheet ----------
@@ -1086,8 +1089,8 @@ function renderCredentialBanner(elId, withLink){
       <span class="pill accent">🔑 密码失效</span>
       <div class="sub" style="font-weight:700">自动预约已暂停</div>
     </div>
-    <div class="t">学校统一身份认证从 ${escHtml(cfg.credential_invalid_at)} 起连续拒绝了你的密码，多半是你改过密码。${withLink ? '' : '请在下方重新填写新密码并点「验证并保存」，验证通过后自动恢复。'}</div>
-    ${withLink ? `<div class="row-flex mt"><button class="btn sm accent" onclick="go('config')">去重新验证 →</button></div>` : ''}`;
+    <div class="t">学校统一身份认证从 ${escHtml(cfg.credential_invalid_at)} 起连续拒绝了你的密码，多半是你改过密码。请到「设置 → 账号 → 重新校验」填新密码并验证，通过后自动恢复。</div>
+    <div class="row-flex mt"><button class="btn sm accent" onclick="go('settings');openSheet('reset-pwd')">去重新校验 →</button></div>`;
 }
 
 function renderHome(){
@@ -2147,12 +2150,14 @@ function toggleLP(el, e){
   // Turning OFF is always direct
   if(isOn){
     el.classList.remove('on');
+    syncLPModeRow();
     return;
   }
   // Turning ON: show warning on first use
   const ACK_KEY = 'autolib_lp_warning_ack';
   if(localStorage.getItem(ACK_KEY) === '1'){
     el.classList.add('on');
+    syncLPModeRow();
     return;
   }
   state.pendingLPToggle = el;
@@ -2164,7 +2169,15 @@ function acknowledgeLP(){
   const el = state.pendingLPToggle;
   if(el) el.classList.add('on');
   state.pendingLPToggle = null;
+  syncLPModeRow();
   closeSheet();
+}
+
+// 迟到保护关着时没必要露出「之后怎么办」的选项
+function syncLPModeRow(){
+  const row = $('cfg-lp-mode-row');
+  const tg = $('cfg-toggle-lp');
+  if(row && tg) row.style.display = tg.classList.contains('on') ? '' : 'none';
 }
 
 function cancelLP(){
@@ -2346,6 +2359,19 @@ const SHEETS = {
       <button class="btn accent grow" id="btn-verify-add" onclick="verifyAdd()">验证并保存</button>
     </div>
   `,
+  'reset-pwd': () => `
+    <div class="grab"></div>
+    <h3>重置统一身份认证密码</h3>
+    <div class="desc">在学校改过密码后填新密码，验证通过即更新，所有配置原样保留。已保存的密码不会回显。</div>
+    <div class="col gap-sm" style="margin-top:12px">
+      <div class="field"><label>学号</label><input type="text" value="${escHtml(state.currentPid || '')}" disabled></div>
+      <div class="field"><label>新的统一身份认证密码（网上办事大厅）</label><input type="password" id="reset-vpn" autocomplete="new-password"></div>
+    </div>
+    <div class="row-flex mt-lg">
+      <button class="btn ghost grow" onclick="closeSheet()">取消</button>
+      <button class="btn accent grow" id="btn-reset-pwd" onclick="resetPwd()">验证并保存</button>
+    </div>
+  `,
   cancel: () => `
     <div class="grab"></div>
     <h3>取消今日预约？</h3>
@@ -2492,7 +2518,7 @@ const SHEETS = {
       </div>
       <div class="box tight" style="border-left:4px solid var(--danger)">
         <div class="sub" style="font-weight:700">⚠ 1 小时后仍未到</div>
-        <div class="t">系统将自动释放预约，杜绝恶意占座</div>
+        <div class="t">默认不再干预，由图书馆按规则处理（可能记违约）；也可以在开关下面改成「再探一次，仍未到馆就取消预约」</div>
       </div>
     </div>
     <button class="btn primary mt-lg" style="width:100%" onclick="closeSheet()">我知道了</button>
@@ -2512,7 +2538,7 @@ const SHEETS = {
       </div>
       <div class="box tight" style="border-left:4px solid var(--danger)">
         <div class="sub" style="font-weight:700">⚠ 1 小时后仍未到</div>
-        <div class="t">系统将自动释放预约，杜绝恶意占座</div>
+        <div class="t">默认不再干预，由图书馆按规则处理（可能记违约）；也可以在开关下面改成「再探一次，仍未到馆就取消预约」</div>
       </div>
     </div>
     <div class="row-flex mt-lg">
