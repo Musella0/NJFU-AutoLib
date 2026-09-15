@@ -3424,13 +3424,25 @@ function renderOccupancyDay(day){
     });
   }
   if(dayFill.length){
+    // 区域没拍全的那一次数值偏低，画出来是一个个坑。图上把这种点换成左右最近
+    // 两个拍全的点的平均（只有一侧就照抄那一侧），提示框里的数字仍是原始值。
+    const complete = dayFill.map(f => f.rooms >= 12);
+    const raw = dayFill.map(fillPct);
+    const smoothed = raw.map((v, i) => {
+      if(complete[i]) return v;
+      let l = i - 1; while(l >= 0 && !complete[l]) l--;
+      let r = i + 1; while(r < raw.length && !complete[r]) r++;
+      const lv = l >= 0 ? raw[l] : null, rv = r < raw.length ? raw[r] : null;
+      if(lv != null && rv != null) return (lv + rv) / 2;
+      return lv != null ? lv : (rv != null ? rv : v);
+    });
     drawLineChart($('occ-fill-day'), {
       labels: dayFill.map(f => occFillLabel(f.offset)),
-      series: [{ name: '已约', color: 'var(--tmr)', area: true, values: dayFill.map(fillPct) }],
+      series: [{ name: '已约', color: 'var(--tmr)', area: true, values: smoothed }],
       height: 120,
       xEvery: 4,
       tooltipTitle: i => `${occFillLabel(dayFill[i].offset)} 查到`,
-      tooltipExtra: i => `${dayFill[i].booked} 张${dayFill[i].rooms < 12 ? '（区域没拍全）' : ''}`,
+      tooltipExtra: i => `${dayFill[i].booked} 张${dayFill[i].rooms < 12 ? '（区域没拍全，图上取两侧平均）' : ''}`,
     });
   }
 }
