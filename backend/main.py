@@ -925,9 +925,9 @@ def export_study_time():
     )
 
 
-# 午休功能总开关。图书馆没有给我们「离馆」接口，已刷卡入座的预约删不掉，
-# 午休做到一半必然失败，所以整套先关掉。前端 NAP_DISABLED 也要一起改回来。
-NAP_ENABLED = os.getenv("NAP_ENABLED", "0").strip().lower() not in ("0", "false", "no", "off")
+# 午休功能总开关。已入座的预约现在走 reserve/endAhaed「提前结束」释放，默认开；
+# 上游接口再变可以 NAP_ENABLED=0 整套关掉，前端 NAP_DISABLED 也要一起改。
+NAP_ENABLED = os.getenv("NAP_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
 NAP_DISABLED_MESSAGE = "午休功能维护中 🚧 —— 已入座的预约暂时无法释放，修好后会发公告"
 
 
@@ -978,6 +978,11 @@ def do_nap(pid):
     seat_name = (body.get("seat") or "").strip()
     start_time = (body.get("start_time") or "").strip()
     end_time = (body.get("end_time") or "").strip()
+    # 已入座 / 暂离的预约 delete 会被拒，要走「提前结束」；老客户端不传就两个都试
+    try:
+        resv_status = int(body.get("resv_status"))
+    except (TypeError, ValueError):
+        resv_status = None
 
     if not uuid or not seat_name or not start_time or not end_time:
         return jsonify({"error": "缺少必要参数 uuid / seat / start_time / end_time"}), 400
@@ -1002,7 +1007,7 @@ def do_nap(pid):
             vpn_password=cfg["vpn_password"],
         )
 
-        cancel_ok, cancel_msg = library.delete_seat(uuid)
+        cancel_ok, cancel_msg = library.release_seat(uuid, resv_status)
         if not cancel_ok:
             return jsonify({"error": f"取消失败：{cancel_msg}"}), 200
 

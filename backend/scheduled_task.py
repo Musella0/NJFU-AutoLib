@@ -166,7 +166,7 @@ RESERVE_REJECT_RETRY_DELAY_SECONDS = max(0.0, float(os.getenv("RESERVE_REJECT_RE
 # 抢完之后的收尾（刷预约状态、发邮件、写面板）由这几个线程另做，不占抢座工人的槽位。
 RESERVE_FINISH_WORKERS = max(1, int(os.getenv("RESERVE_FINISH_WORKERS", "4")))
 # 午休功能总开关，见 main.py 的同名说明。关掉时每日自动午休整个不跑。
-NAP_ENABLED = os.getenv("NAP_ENABLED", "0").strip().lower() not in ("0", "false", "no", "off")
+NAP_ENABLED = os.getenv("NAP_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
 
 # 统一身份认证连续几次明确返回「密码错误」，才把账号标成未验证并通知用户。
 # 6:50 预登录 + 6:59:30 复查就是两次，所以真改了密码的账号在 7:00 前就会被摘出队列；
@@ -2139,7 +2139,7 @@ def auto_nap_action(pid: str) -> None:
 
         log_with_user(logger, 'info', pid, '自动午休', f"取消预约 {uuid}，将重约 {seat_name} {nap_start}-{nap_end}")
 
-        cancel_ok, cancel_msg = library.delete_seat(uuid)
+        cancel_ok, cancel_msg = library.release_seat(uuid, target.get("resvStatus"))
         if not cancel_ok:
             log_with_user(logger, 'error', pid, '自动午休', f"取消失败：{cancel_msg}")
             notify_user(cfg, "❌ 自动午休失败", f"学号 {pid}\n取消原预约失败：{cancel_msg}",

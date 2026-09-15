@@ -18,10 +18,9 @@ const state = {
   pendingAnnouncementPopup: null,
 };
 
-// 午休功能整体停用。图书馆的「离馆」接口我们还没接上，人一旦刷卡入座，
-// 上游就拒绝删除这条预约（「预约在当前状态下不能删除」），午休必然半路失败。
-// 接上离馆接口之前先在前端关掉所有入口；后端 NAP_ENABLED=0 兜底，恢复时两边一起改。
-const NAP_DISABLED = true;
+// 午休功能总开关。已入座的预约现在走「提前结束」接口释放，可以用了；
+// 上游接口再变就把这里改回 true，所有入口会自动拆掉，后端 NAP_ENABLED=0 兜底。
+const NAP_DISABLED = false;
 const NAP_WIP_TEXT = '施工中 🚧';
 
 // 首次使用的欢迎弹窗。key 带版本号：以后加了大功能把 v1 改成 v2，老用户会再看到一次。
@@ -2940,7 +2939,7 @@ async function doNap(){
   toast('取消中…','info');
   const { ok, data } = await api(
     `/api/my/accounts/${encodeURIComponent(state.currentPid)}/nap`,
-    { method:'POST', body: { uuid: state.todayResv.uuid, seat, start_time: start, end_time: end } }
+    { method:'POST', body: { uuid: state.todayResv.uuid, resv_status: state.todayResv.resvStatus, seat, start_time: start, end_time: end } }
   );
   if(btn) btn.disabled = false;
 

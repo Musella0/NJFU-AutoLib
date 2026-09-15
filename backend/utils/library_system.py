@@ -1161,6 +1161,71 @@ class LibrarySystem(BaseSystem):
             print(error_msg)
             return False, error_msg
 
+    def end_ahead(self, uuid: str) -> Tuple[bool, str]:
+        """
+        提前结束一条已生效的预约（图书馆网页「提前结束」按钮）。
+
+        接口是 POST ic-web/reserve/endAhaed（上游拼写就是 Ahaed），body 和 delete
+        一样只有 uuid。已刷卡入座 / 暂离的预约 reserve/delete 会拒绝
+        （「预约在当前状态下不能删除」），只能走这个。
+        """
+        try:
+            url = f"{self.base_url}ic-web/reserve/endAhaed{self.vpn_suffix}"
+            response = self.session.post(
+                url,
+                json={"uuid": uuid},
+                headers={"Content-Type": "application/json;charset=UTF-8"}
+            )
+
+            print(f"提前结束 {uuid} 响应状态码: {response.status_code}")
+            print(f"提前结束 {uuid} 响应内容: {response.text}")
+
+            if response.status_code != 200:
+                return False, f"提前结束请求失败: 状态码 {response.status_code}"
+
+            result = response.json()
+            if result.get('code') == 0:
+                try:
+                    db.arrival_checks.update_one(
+                        {"uuid": uuid, "status": "pending"},
+                        {"$set": {
+                            "status": "cancelled",
+                            "checked_at": datetime.now(),
+                            "message": "预约已提前结束",
+                        }},
+                    )
+                except Exception as exc:
+                    log_with_user('warning', self.username, '到馆复查',
+                                  f"取消复查任务失败: {exc}")
+                return True, "提前结束成功"
+            return False, f"提前结束失败: {result.get('message')}"
+
+        except Exception as e:
+            error_msg = f"提前结束时发生异常: {str(e)}"
+            print(error_msg)
+            return False, error_msg
+
+    # 已生效的 resvStatus：1093 使用中、3141 暂离。1027 是还没到点的「已预约」。
+    IN_USE_STATUSES = (1093, 3141)
+
+    def release_seat(self, uuid: str, resv_status=None) -> Tuple[bool, str]:
+        """
+        释放一条今日预约，按状态挑接口：已生效走 end_ahead，未生效走 delete_seat。
+
+        resv_status 不知道（老客户端没传）或挑错了，就换另一个再试一次，
+        两个都失败时把两条消息一起返回。
+        """
+        first, second = self.delete_seat, self.end_ahead
+        if resv_status in self.IN_USE_STATUSES:
+            first, second = second, first
+        ok, msg = first(uuid)
+        if ok:
+            return ok, msg
+        ok2, msg2 = second(uuid)
+        if ok2:
+            return ok2, msg2
+        return False, f"{msg}；{msg2}"
+
     # reserve/operate/rec 的 kind 位，文字照图书馆网页「操作记录」的操作类型一列；
     # consoleKind 是操作端：1 系统、8 闸机、16 电脑端、32 现场预约台。
     # 2「已生效」是系统到点把预约置为生效，人还没进馆；真正的签到是 4（闸机）。
