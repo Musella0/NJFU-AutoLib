@@ -111,7 +111,7 @@
             android:background="@drawable/bg_widget_btn_accent"
             android:gravity="center"
             android:maxLines="1"
-            android:text="✓ 我已到馆"
+            android:text="取消预约"
             android:textColor="@color/on_primary"
             android:textSize="12sp"
             android:textStyle="bold" />

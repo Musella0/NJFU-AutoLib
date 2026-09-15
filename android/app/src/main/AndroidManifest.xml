@@ -58,6 +58,15 @@
             </intent-filter>
         </activity>
 
+        <!-- 小组件「取消预约」的二次确认：透明背景只托一个对话框，不进最近任务 -->
+        <activity
+            android:name=".WidgetCancelActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.AutoLib.Transparent" />
+
         <receiver
             android:name=".ReservationReceiver"
             android:exported="false">

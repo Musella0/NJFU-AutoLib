@@ -17,6 +17,16 @@
         <item name="materialAlertDialogTheme">@style/ThemeOverlay.AutoLib.Dialog</item>
     </style>
 
+    <!-- 只托一个对话框的 Activity（小组件二次确认）：窗口全透明，对话框自己压暗背景 -->
+    <style name="Theme.AutoLib.Transparent" parent="Theme.AutoLib">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+
     <style name="ThemeOverlay.AutoLib.Dialog" parent="ThemeOverlay.MaterialComponents.MaterialAlertDialog">
         <item name="colorSurface">@color/background</item>
         <item name="shapeAppearanceMediumComponent">@style/ShapeAppearance.AutoLib.Large</item>

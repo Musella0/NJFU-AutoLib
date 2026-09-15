@@ -29,11 +29,14 @@ object ReservationCache {
     private const val KEY_UPDATED_AT = "updated_at"
     private const val KEY_NOTIFIED = "notified_signature"
     private const val KEY_STATUS_CODE = "status_code"
-    private const val KEY_ARRIVED_DATE = "arrived_date"
+    private const val KEY_UUID = "uuid"
     private const val KEY_LATE_PROTECTION = "late_protection"
     private const val KEY_RUNNING = "running"
     private const val KEY_MODE = "mode"
     private const val KEY_WEEK = "week_segments"
+
+    private const val CODE_IN_USE = 1093
+    private const val CODE_AWAY = 3141
 
     data class Snapshot(
         val date: String,
@@ -44,14 +47,14 @@ object ReservationCache {
         val status: String,
         /** 学校系统的 resvStatus 原始码，缓存里没有时为 -1。 */
         val statusCode: Int,
+        /** 今日预约的 uuid，小组件上直接取消要用；没有预约时为空。 */
+        val uuid: String,
         val tomorrowSeat: String,
         val tomorrowBegin: String,
         val tomorrowEnd: String,
         /** 没有结构化座位信息时的兜底文案，例如后台抓到的抢座结果首行。 */
         val summary: String,
         val updatedAt: Long,
-        /** 已标记到馆的日期；到馆与否按「是否等于今天」判断，跨天自动失效。 */
-        val arrivedDate: String,
         val lateProtection: Boolean,
         /** 自动预约是否开启（is_reserved）。 */
         val running: Boolean,
@@ -62,7 +65,8 @@ object ReservationCache {
         val hasSeat: Boolean get() = seat.isNotBlank()
         val hasTomorrowSeat: Boolean get() = tomorrowSeat.isNotBlank()
         val isToday: Boolean get() = date == todayKey()
-        val arrived: Boolean get() = arrivedDate == todayKey()
+        /** 图书馆已报「使用中 / 暂离」，人确实刷卡入座了。 */
+        val seated: Boolean get() = statusCode == CODE_IN_USE || statusCode == CODE_AWAY
 
         fun weekSegments(iso: Int): List<String> {
             val array = runCatching { JSONObject(weekJson).optJSONArray(iso.toString()) }.getOrNull()
@@ -85,12 +89,12 @@ object ReservationCache {
             end = it.getString(KEY_END, "").orEmpty(),
             status = it.getString(KEY_STATUS, "").orEmpty(),
             statusCode = it.getInt(KEY_STATUS_CODE, -1),
+            uuid = it.getString(KEY_UUID, "").orEmpty(),
             tomorrowSeat = it.getString(KEY_TOMORROW_SEAT, "").orEmpty(),
             tomorrowBegin = it.getString(KEY_TOMORROW_BEGIN, "").orEmpty(),
             tomorrowEnd = it.getString(KEY_TOMORROW_END, "").orEmpty(),
             summary = it.getString(KEY_SUMMARY, "").orEmpty(),
             updatedAt = it.getLong(KEY_UPDATED_AT, 0L),
-            arrivedDate = it.getString(KEY_ARRIVED_DATE, "").orEmpty(),
             lateProtection = it.getBoolean(KEY_LATE_PROTECTION, false),
             running = it.getBoolean(KEY_RUNNING, false),
             mode = it.getString(KEY_MODE, "").orEmpty(),
@@ -120,6 +124,7 @@ object ReservationCache {
             .putString(KEY_END, timeOf(today, "resvEndTime"))
             .putString(KEY_STATUS, if (today == null) "今日暂无预约" else todayStatus)
             .putInt(KEY_STATUS_CODE, today?.optInt("resvStatus", -1) ?: -1)
+            .putString(KEY_UUID, today?.optString("uuid").orEmpty())
             .putString(KEY_TOMORROW_SEAT, seatOf(tomorrow))
             .putString(KEY_TOMORROW_BEGIN, timeOf(tomorrow, "resvBeginTime"))
             .putString(KEY_TOMORROW_END, timeOf(tomorrow, "resvEndTime"))
@@ -134,23 +139,29 @@ object ReservationCache {
         running: Boolean,
         mode: String,
         weekJson: String,
-        arrivedDate: String,
         lateProtection: Boolean,
     ) {
         prefs(context).edit()
             .putBoolean(KEY_RUNNING, running)
             .putString(KEY_MODE, mode)
             .putString(KEY_WEEK, weekJson)
-            .putString(KEY_ARRIVED_DATE, arrivedDate)
             .putBoolean(KEY_LATE_PROTECTION, lateProtection)
             .apply()
         SeatWidgets.refresh(context)
     }
 
-    /** 小组件里点「我已到馆」成功后回写，让三个组件立即变化。 */
-    fun saveArrived(context: Context, arrived: Boolean) {
+    /** 小组件上取消今日预约成功后调用：抹掉今天的座位，明日的照旧。 */
+    fun clearToday(context: Context) {
         prefs(context).edit()
-            .putString(KEY_ARRIVED_DATE, if (arrived) todayKey() else "")
+            .putString(KEY_DATE, todayKey())
+            .putString(KEY_SEAT, "")
+            .putString(KEY_BEGIN, "")
+            .putString(KEY_END, "")
+            .putString(KEY_STATUS, "今日暂无预约")
+            .putInt(KEY_STATUS_CODE, -1)
+            .putString(KEY_UUID, "")
+            .putString(KEY_SUMMARY, "")
+            .putLong(KEY_UPDATED_AT, System.currentTimeMillis())
             .apply()
         SeatWidgets.refresh(context)
     }
@@ -170,6 +181,7 @@ object ReservationCache {
                 .putString(KEY_END, "")
                 .putString(KEY_STATUS, "")
                 .putInt(KEY_STATUS_CODE, -1)
+                .putString(KEY_UUID, "")
                 .putString(KEY_TOMORROW_SEAT, "")
                 .putString(KEY_TOMORROW_BEGIN, "")
                 .putString(KEY_TOMORROW_END, "")

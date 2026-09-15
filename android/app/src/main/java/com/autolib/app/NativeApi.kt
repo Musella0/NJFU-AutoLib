@@ -51,7 +51,7 @@ class NativeApi(context: Context) {
     fun getBlocking(path: String, readTimeoutMs: Int = 20_000): ApiResponse =
         execute("GET", path, null, readTimeoutMs)
 
-    /** 同上，小组件按钮（如「我已到馆」）在后台线程直接调用。 */
+    /** 同上，小组件的「取消预约」确认后在后台线程直接调用。 */
     fun postBlocking(path: String, body: JSONObject = JSONObject(), readTimeoutMs: Int = 20_000): ApiResponse =
         execute("POST", path, body, readTimeoutMs)
 

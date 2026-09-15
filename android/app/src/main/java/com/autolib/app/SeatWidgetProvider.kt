@@ -12,14 +12,11 @@ import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
-import android.os.Handler
-import android.os.Looper
 import android.text.SpannableString
 import android.text.Spanned
 import android.text.style.ForegroundColorSpan
 import android.view.View
 import android.widget.RemoteViews
-import android.widget.Toast
 import androidx.core.content.ContextCompat
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -29,25 +26,24 @@ import java.util.Locale
 /**
  * 桌面小组件，三个规格共用 [ReservationCache] 一个数据源：
  *
- * - SMALL  2×2 专注今天：座位、进度、「我已到馆」
+ * - SMALL  2×2 专注今天：座位、进度、「取消预约」
  * - MEDIUM 4×2 今天 + 明日两栏
  * - LARGE  4×4 完整一天 + 明日 + 本周节奏
  *
  * 小组件由桌面进程渲染，只能用 RemoteViews 白名单里的控件，「本周节奏」这类
- * 图表画进 Bitmap 塞给 ImageView。「我已到馆」是唯一在组件里直接发请求的动作
- * （一次纯数据库写，不触发学校登录）；午休 / 取消 / 调整明日需要确认或选时间，
+ * 图表画进 Bitmap 塞给 ImageView。「取消预约」不进 App，弹一个透明的
+ * [WidgetCancelActivity] 二次确认后直接发请求；午休 / 调整明日要选时间，
  * 深链进 App 打开对应对话框。
  */
 object SeatWidgets {
-    const val ACTION_ARRIVED = "com.autolib.app.WIDGET_ARRIVED"
-
     /** 深链动作前缀，MainActivity 按后缀打开对应对话框。 */
     const val ACTION_PREFIX = "com.autolib.app.widget."
 
     private val ACTIVE_CODES = setOf(1027, 1093, 3141)
     private val BREACHED_CODES = setOf(1169, 3281)
     private const val CODE_RESERVED = 1027
-    private const val CODE_FINISHED = 3265
+    /** 1217 与 3265 都是已结束。 */
+    private val FINISHED_CODES = setOf(1217, 3265)
 
     /** 「本周节奏」以上的固定内容高度，以及行高的上下限（dp）。 */
     private const val CHART_TOP_DP = 300
@@ -199,9 +195,9 @@ object SeatWidgets {
             }
             bindPrimaryAction(context, views, R.id.w_action, s)
             views.setViewVisibility(R.id.w_action_nap, View.VISIBLE)
-            views.setViewVisibility(R.id.w_action_cancel, View.VISIBLE)
+            views.setViewVisibility(R.id.w_action_tomorrow, View.VISIBLE)
             views.setOnClickPendingIntent(R.id.w_action_nap, openApp(context, "nap", 21))
-            views.setOnClickPendingIntent(R.id.w_action_cancel, openApp(context, "cancel", 22))
+            views.setOnClickPendingIntent(R.id.w_action_tomorrow, openApp(context, "tomorrow", 23))
         } else {
             badge(context, views, R.id.w_badge, null)
             badge(context, views, R.id.w_badge2, null)
@@ -215,7 +211,7 @@ object SeatWidgets {
             views.setTextViewText(R.id.w_elapsed, "")
             views.setTextViewText(R.id.w_remaining, "")
             views.setViewVisibility(R.id.w_action_nap, View.GONE)
-            views.setViewVisibility(R.id.w_action_cancel, View.GONE)
+            views.setViewVisibility(R.id.w_action_tomorrow, View.GONE)
             if (fresh) action(context, views, R.id.w_action, "⚡ 立即预约", accent = true, intent = openApp(context, "reserve", 24))
             else action(context, views, R.id.w_action, "打开 App", accent = true, intent = openApp(context, "open", 20))
         }
@@ -284,21 +280,23 @@ object SeatWidgets {
         }
     }
 
-    /** 今日主按钮：活跃预约时是「我已到馆」，已到馆后变成打开 App 的确认样式。 */
+    /**
+     * 今日主按钮：活跃预约时是「取消预约」（已入座则叫「离馆」，同一个接口），
+     * 点了弹 [WidgetCancelActivity] 二次确认，不会一碰就取消。
+     */
     private fun bindPrimaryAction(context: Context, views: RemoteViews, id: Int, s: ReservationCache.Snapshot) {
         val code = s.statusCode
         when {
-            code == CODE_FINISHED ->
+            code in FINISHED_CODES ->
                 action(context, views, id, "我还能学！", accent = true, intent = openApp(context, "reserve", 24))
             code in BREACHED_CODES ->
                 action(context, views, id, "⚡ 再次预约", accent = true, intent = openApp(context, "reserve", 24))
-            s.arrived ->
-                action(context, views, id, "✓ 已到馆", accent = false, intent = openApp(context, "open", 20))
             else ->
-                action(context, views, id, "✓ 我已到馆", accent = true,
-                    intent = PendingIntent.getBroadcast(
+                action(context, views, id, if (s.seated) "离馆" else "取消预约", accent = false,
+                    intent = PendingIntent.getActivity(
                         context, 30,
-                        Intent(context, SeatWidgetProvider::class.java).setAction(ACTION_ARRIVED),
+                        Intent(context, WidgetCancelActivity::class.java)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
                     ))
         }
@@ -355,16 +353,16 @@ object SeatWidgets {
         return when (s.statusCode) {
             1093 -> BadgeStyle(text, R.drawable.bg_widget_badge_success, R.color.success)
             3141 -> BadgeStyle(text, R.drawable.bg_widget_badge_accent, R.color.primary)
-            CODE_FINISHED -> BadgeStyle(text, R.drawable.bg_widget_badge_muted, R.color.text_muted)
+            in FINISHED_CODES -> BadgeStyle(text, R.drawable.bg_widget_badge_muted, R.color.text_muted)
             in BREACHED_CODES -> BadgeStyle(text, R.drawable.bg_widget_badge_danger, R.color.danger)
             else -> BadgeStyle(text, R.drawable.bg_widget_badge_success, R.color.success)
         }
     }
 
-    /** 大号组件的第二枚徽章：已到馆 > 待签到 > 迟到保护。 */
+    /** 大号组件的第二枚徽章：已到馆 > 待签到 > 迟到保护。到馆看图书馆的座位状态，不再有手动标记。 */
     private fun secondaryBadge(s: ReservationCache.Snapshot): BadgeStyle? = when {
         s.statusCode !in ACTIVE_CODES -> null
-        s.arrived || s.statusCode == 1093 ->
+        s.seated ->
             BadgeStyle("✓ 已到馆", R.drawable.bg_widget_badge_success, R.color.success)
         s.statusCode == CODE_RESERVED && nowMinutes() >= minutesOf(s.begin) ->
             BadgeStyle("待签到", R.drawable.bg_widget_badge_danger, R.color.danger)
@@ -392,7 +390,7 @@ object SeatWidgets {
         val begin = minutesOf(s.begin)
         val end = minutesOf(s.end)
         return when {
-            s.statusCode == CODE_FINISHED || now >= end ->
+            s.statusCode in FINISHED_CODES || now >= end ->
                 if (compact) "已结束" else "已结束 · 今天辛苦了"
             now < begin -> if (compact) "${s.begin} 开始" else "未开始 · ${s.begin} 开始"
             else -> {
@@ -547,40 +545,6 @@ object SeatWidgets {
 
     // endregion
 
-    /** 「我已到馆」在小组件里直接调 API，成功后回写缓存刷新三个组件。 */
-    fun handleArrived(context: Context, pending: android.content.BroadcastReceiver.PendingResult) {
-        val app = context.applicationContext
-        Thread {
-            try {
-                val snapshot = ReservationCache.read(app)
-                if (snapshot.pid.isBlank()) {
-                    toast(app, "请先打开 App 同步数据")
-                    return@Thread
-                }
-                val api = NativeApi(app)
-                val response = api.postBlocking("/api/my/accounts/${api.encoded(snapshot.pid)}/arrived")
-                if (response.ok) {
-                    val arrived = response.jsonObject?.optBoolean("arrived") == true
-                    ReservationCache.saveArrived(app, arrived)
-                    toast(app, if (arrived) "已标记到馆，迟到保护今日不触发" else "已取消到馆标记")
-                } else {
-                    toast(app, response.message("操作失败，请打开 App 重试"))
-                    refresh(app)
-                }
-            } catch (_: Exception) {
-                toast(app, "网络异常，请打开 App 重试")
-                refresh(app)
-            } finally {
-                pending.finish()
-            }
-        }.start()
-    }
-
-    private fun toast(context: Context, message: String) {
-        Handler(Looper.getMainLooper()).post {
-            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
-        }
-    }
 }
 
 abstract class BaseSeatWidgetProvider : AppWidgetProvider() {
@@ -617,13 +581,6 @@ abstract class BaseSeatWidgetProvider : AppWidgetProvider() {
             if (landscape) AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT
             else AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT
         )
-    }
-
-    override fun onReceive(context: Context, intent: Intent) {
-        super.onReceive(context, intent)
-        if (intent.action == SeatWidgets.ACTION_ARRIVED) {
-            SeatWidgets.handleArrived(context, goAsync())
-        }
     }
 }
 

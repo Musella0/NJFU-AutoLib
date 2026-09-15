@@ -3,6 +3,7 @@ package com.autolib.app
 import android.annotation.SuppressLint
 import android.appwidget.AppWidgetManager
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
@@ -71,9 +72,6 @@ class MainActivity : AppCompatActivity() {
     /** 小组件按钮深链进来要打开的对话框，主页数据就绪后消费。 */
     private var pendingWidgetAction: String? = null
 
-    /** 已自动补过到馆记录的日期，防止重复提交。 */
-    private var autoArrivedFor: String? = null
-
     /** 公告栏的表情/应援按钮，连点攒包和飞掷动画都在里面。 */
     private val reactions by lazy { Reactions(this, api) }
 
@@ -91,7 +89,7 @@ class MainActivity : AppCompatActivity() {
     private var reservationsPid = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        AppCompatDelegate.setDefaultNightMode(nightModeOf(storedTheme()))
+        applyStoredNightMode(this)
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
@@ -412,7 +410,7 @@ class MainActivity : AppCompatActivity() {
         loadNotices(notices)
     }
 
-    /** 把小组件要用的周计划、到馆与保护状态写进缓存。 */
+    /** 把小组件要用的周计划与保护状态写进缓存。 */
     private fun cacheWidgetPlan(cfg: JSONObject?) {
         if (cfg == null) {
             // cfg 为 null 有两种原因：确实没有学号，或者详情没拉到（网络异常）。
@@ -427,7 +425,6 @@ class MainActivity : AppCompatActivity() {
             running = cfg.optString("is_reserved") == "True",
             mode = cfg.optString("mode").orEmpty().ifBlank { "week_time" },
             weekJson = week.toString(),
-            arrivedDate = cfg.optString("arrived_date"),
             lateProtection = cfg.optString("late_protection") == "True",
         )
     }
@@ -484,7 +481,7 @@ class MainActivity : AppCompatActivity() {
         })
         content.addView(text("$begin  —  $end", 18, true).apply { setTextColor(color(R.color.text_secondary)) })
 
-        if (!tomorrow && code == STATUS_FINISHED) {
+        if (!tomorrow && code in FINISHED_STATUSES) {
             content.addView(text("任务完成，该休息了 ☕", 18, true))
             content.addView(text("今日学习已结束", 14))
             content.addView(action("我还能学！", accent = true) { showReserveDialog() })
@@ -496,20 +493,15 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val arrived = cfg?.optString("arrived_date") == todayStamp()
-        val showArrived = arrived || code == STATUS_IN_USE || code == STATUS_AWAY
-        if (!tomorrow && !arrived && (code == STATUS_IN_USE || code == STATUS_AWAY)) {
-            // 图书馆已经报"使用中/暂离"，说明人确实刷卡入座了，把到馆记录补上，
-            // 免得迟到保护在后台误判成没来。
-            autoMarkArrived()
-        }
+        // 图书馆报「使用中 / 暂离」就是人已经刷卡入座；到馆与否服务器自己探，客户端不再标记
+        val seated = code == STATUS_IN_USE || code == STATUS_AWAY
         content.addView(pillRow(
             statusPill(reservationStatus(code),
                 if (tomorrow) R.color.tomorrow else R.color.success,
                 if (tomorrow) R.color.tomorrow_soft else R.color.success_soft),
             if (!tomorrow && cfg?.optString("late_protection") == "True")
                 statusPill("🛡 迟到保护", R.color.primary, R.color.accent_soft) else null,
-            if (!tomorrow && showArrived)
+            if (!tomorrow && seated)
                 statusPill("✓ 已到馆", R.color.success, R.color.success_soft) else null,
             // 取消明日不是这张卡的重点，做成跟在状态徽章后面的小药丸而不是整行按钮
             if (tomorrow && code in ACTIVE_STATUSES)
@@ -519,12 +511,10 @@ class MainActivity : AppCompatActivity() {
         ))
         if (!tomorrow && code in ACTIVE_STATUSES) {
             val row = horizontal()
-            // 到馆按钮文字最长，多分一点宽度，否则"已到馆"会被挤到第二行
-            row.addView(action(if (showArrived) "✓ 已到馆" else "✓ 我已到馆", 1.5f, accent = !showArrived) { toggleArrived() })
-            row.addView(action("午休", 1f) { showNapDialog(reservation) })
+            row.addView(action("😴 午休", 1f, accent = true) { showNapDialog(reservation) })
             // 已经入座的话释放座位是"离馆"；还没到馆才是撤销这次预约
-            row.addView(action(if (showArrived) "离馆" else "取消", 1f, danger = true) {
-                confirmCancel(reservation, leaving = showArrived)
+            row.addView(action(if (seated) "离馆" else "取消", 1f, danger = true) {
+                confirmCancel(reservation, leaving = seated)
             })
             content.addView(row)
         }
@@ -813,39 +803,6 @@ class MainActivity : AppCompatActivity() {
             }.show()
     }
 
-    /**
-     * 依据图书馆返回的座位状态补一条到馆记录。
-     *
-     * `/arrived` 是 toggle 语义（已是今天就清空），所以只在确认当前**不是**已到馆时才调，
-     * 否则会把状态反向清掉。[autoArrivedFor] 防止渲染重入时重复提交——请求在飞的
-     * 期间 currentConfig 还没更新，条件仍然成立。
-     */
-    private fun autoMarkArrived() {
-        val today = todayStamp()
-        if (autoArrivedFor == today || currentPid.isBlank()) return
-        autoArrivedFor = today
-        api.post("/api/my/accounts/${api.encoded(currentPid)}/arrived") { response ->
-            if (response.ok && response.jsonObject?.optBoolean("arrived") == true) {
-                currentConfig?.put("arrived_date", today)
-                ReservationCache.saveArrived(this, true)
-                renderCurrentPage()
-            } else {
-                // 没写成就让下次渲染再试
-                autoArrivedFor = null
-            }
-        }
-    }
-
-    private fun toggleArrived() {
-        setBusy(true)
-        api.post("/api/my/accounts/${api.encoded(currentPid)}/arrived") { response ->
-            setBusy(false)
-            if (!response.ok) return@post toast(response.message("操作失败"))
-            toast(if (response.jsonObject?.optBoolean("arrived") == true) "已标记到馆，迟到保护今日不触发" else "已取消到馆标记")
-            loadAccountDetail(currentPid) { renderHome(refresh = true) }
-        }
-    }
-
     private fun showNapDialog(reservation: JSONObject) {
         val currentSeat = reservation.optJSONObject("devInfo")?.optString("devName").orEmpty()
         val end = reservation.optString("resvEndTime").substringAfter(' ', "").take(5)
@@ -1113,7 +1070,7 @@ class MainActivity : AppCompatActivity() {
             addView(autoReserve)
             addView(text("每日定时自动执行。关闭后暂停所有自动预约。", 12).apply { setTextColor(color(R.color.text_muted)) })
             addView(lateProtection)
-            addView(text("未到馆时自动推迟预约最多 1 小时。", 12).apply { setTextColor(color(R.color.text_muted)) })
+            addView(text("未到馆时自动推迟预约最多 1 小时，是否在馆由服务器自动识别。", 12).apply { setTextColor(color(R.color.text_muted)) })
             addView(autoNap)
             addView(text("每日到「午休开始」时刻自动续约下午时段。", 12).apply { setTextColor(color(R.color.text_muted)) })
         }))
@@ -1887,12 +1844,6 @@ class MainActivity : AppCompatActivity() {
     // ---- 主题：跟随系统 / 亮色 / 暗色，三档循环，与网页端一致 ----
     private fun storedTheme() = getPreferences(MODE_PRIVATE).getString(PREF_THEME, THEME_SYSTEM) ?: THEME_SYSTEM
 
-    private fun nightModeOf(theme: String) = when (theme) {
-        THEME_LIGHT -> AppCompatDelegate.MODE_NIGHT_NO
-        THEME_DARK -> AppCompatDelegate.MODE_NIGHT_YES
-        else -> AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM
-    }
-
     /**
      * 三档并列的分段控件：跟随系统 / 亮色 / 暗色，选中的那格用卡片色抬起来。
      * 比原来的「切换主题」按钮少一次盲猜——三个选项和当前状态一眼可见。
@@ -2563,7 +2514,6 @@ class MainActivity : AppCompatActivity() {
     }
     private fun hourRange(segment: String): Pair<Float, Float> =
         minutesOf(segment.substringBefore('-')) / 60f to minutesOf(segment.substringAfter('-')) / 60f
-    private fun todayStamp() = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
     private fun findReservation(list: JSONArray, dayOffset: Int): JSONObject? {
         val calendar = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, dayOffset) }
         val prefix = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(calendar.time)
@@ -2571,7 +2521,7 @@ class MainActivity : AppCompatActivity() {
     }
     private fun reservationStatus(code: Int) = mapOf(
         1027 to "已预约", 1093 to "使用中", 1169 to "已违约",
-        3141 to "暂离", 3265 to "已结束", 3281 to "已违约",
+        1217 to "已结束", 3141 to "暂离", 3265 to "已结束", 3281 to "已违约",
     )[code] ?: "状态 $code"
     private fun announcementColor(level: String) = when (level) {
         "success" -> R.color.success
@@ -2606,7 +2556,6 @@ class MainActivity : AppCompatActivity() {
         private const val PAGE_SETTINGS = 3
         private const val STATUS_IN_USE = 1093
         private const val STATUS_AWAY = 3141
-        private const val STATUS_FINISHED = 3265
         private const val TAG_SEGMENT = "seg"
         private const val TAG_START = "start"
         private const val TAG_END = "end"
@@ -2621,6 +2570,22 @@ class MainActivity : AppCompatActivity() {
         /** 预约结果的复用窗口：切页返回不再重查，超过才自动刷新。 */
         private const val RESERVATION_TTL_MS = 3 * 60 * 1000L
         private const val PREF_THEME = "theme"
+
+        private fun nightModeOf(theme: String) = when (theme) {
+            THEME_LIGHT -> AppCompatDelegate.MODE_NIGHT_NO
+            THEME_DARK -> AppCompatDelegate.MODE_NIGHT_YES
+            else -> AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM
+        }
+
+        /**
+         * 按设置页存的主题设夜间模式。主题存在 MainActivity 的私有 prefs 里，
+         * 从小组件直接拉起的 [WidgetCancelActivity] 没经过主界面，也要用这份。
+         */
+        fun applyStoredNightMode(context: Context) {
+            val theme = context.getSharedPreferences("MainActivity", Context.MODE_PRIVATE)
+                .getString(PREF_THEME, THEME_SYSTEM) ?: THEME_SYSTEM
+            AppCompatDelegate.setDefaultNightMode(nightModeOf(theme))
+        }
         /** 抢座优先级最多 3 个：再往下排也轮不到，与后端 MAX_SEAT_LIST 同值。 */
         private const val MAX_SEATS = 3
         /** 通知范围，取值与后端 NOTIFY_MODES 一致：simple 只发异常，full 连成功回执一起发。 */
@@ -2636,7 +2601,7 @@ class MainActivity : AppCompatActivity() {
         private const val LATE_PROTECTION_INFO =
             "开启后，系统会在你预约开始前检查是否到馆。\n\n" +
                 "· 最多保护 1 小时：未按时到馆则自动把预约推迟 1 小时为你保留座位\n" +
-                "· 到馆后手动确认：请点击主页的「我已到馆」按钮避免误操作\n" +
+                "· 到馆自动识别：刷卡进馆后服务器会自动识别，已在馆的人不会被推迟\n" +
                 "· 1 小时后仍未到：系统将自动释放预约，杜绝恶意占座"
         private const val NAP_INFO =
             "专为午休设计的快捷功能，出门吃饭前点一下，回来时座位还在。\n\n" +
@@ -2645,6 +2610,8 @@ class MainActivity : AppCompatActivity() {
                 "· 极小占座风险：取消到重新预约约需 1 秒，极低概率被他人抢占"
         private val ACTIVE_STATUSES = setOf(1027, 1093, 3141)
         private val BREACHED_STATUSES = setOf(1169, 3281)
+        /** 1217 与 3265 实测都是已结束，只是图书馆没说两者差在哪。 */
+        private val FINISHED_STATUSES = setOf(1217, 3265)
         private val DAY_LABELS = listOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")
         private val DAY_SHORT = listOf("一", "二", "三", "四", "五", "六", "日")
         private val WEEK_SHORT = listOf("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
