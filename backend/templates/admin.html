@@ -1,0 +1,1059 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AutoLib · 管理后台</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700;900&family=JetBrains+Mono:wght@400;500&display=swap');
+  :root{--bg:#06080d;--bg2:#0d1117;--bg3:#161b22;--card:#0d1117;--border:#21262d;--border2:#30363d;--text:#e6edf3;--text2:#8b949e;--text3:#484f58;--accent:#58a6ff;--accent-dim:rgba(88,166,255,.1);--green:#3fb950;--green-dim:rgba(63,185,80,.12);--red:#f85149;--red-dim:rgba(248,81,73,.12);--yellow:#d29922;--purple:#bc8cff;--mono:'JetBrains Mono',monospace;--sans:'Noto Sans SC',-apple-system,sans-serif;--radius:8px}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh;-webkit-font-smoothing:antialiased}
+  .topbar{background:var(--bg2);border-bottom:1px solid var(--border);padding:0 32px;height:56px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+  .topbar-left{display:flex;align-items:center;gap:16px}
+  .topbar-logo{font-size:16px;font-weight:700;display:flex;align-items:center;gap:8px}
+  .topbar-logo span{background:linear-gradient(135deg,var(--accent),var(--purple));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  .topbar-sep{color:var(--text3);font-size:20px;font-weight:300}
+  .topbar-page{font-size:14px;color:var(--text2)}
+  .topbar-right{display:flex;gap:8px}
+  .topbar-btn{padding:5px 12px;font-size:12px;font-family:var(--sans);color:var(--text2);background:var(--bg3);border:1px solid var(--border);border-radius:6px;cursor:pointer;transition:all .15s;text-decoration:none}
+  .topbar-btn:hover{color:var(--text);border-color:var(--border2)}
+  .container{max-width:1200px;margin:0 auto;padding:24px 32px}
+  /* Login */
+  .admin-login-wrap{display:flex;align-items:center;justify-content:center;min-height:70vh}
+  .admin-login-card{background:var(--bg2);border:1px solid var(--border);border-radius:16px;padding:40px;width:380px;max-width:90vw}
+  .al-title{font-size:20px;font-weight:700;text-align:center;margin-bottom:20px}
+  .al-field{margin-bottom:12px;display:flex;flex-direction:column;gap:4px}
+  .al-field label{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:1px}
+  .al-field input{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:var(--mono);outline:none}
+  .al-field input:focus{border-color:var(--accent)}
+  .al-btn{width:100%;padding:10px;background:var(--accent);color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:500;cursor:pointer;font-family:var(--sans);margin-top:8px}
+  .al-btn:hover{opacity:.9}
+  .al-hint{font-size:11px;color:var(--text3);text-align:center;margin-top:8px}
+  .al-link{display:block;margin:12px auto 0;background:none;border:none;color:var(--accent);font-size:12px;cursor:pointer;font-family:var(--sans)}
+  .al-link:hover{text-decoration:underline}
+  /* Stats */
+  .stats{display:flex;gap:12px;margin-bottom:24px}
+  .stat-card{flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:16px 20px}
+  .stat-label{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:4px}
+  .stat-value{font-family:var(--mono);font-size:28px;font-weight:700}
+  /* Buttons */
+  .btn{padding:7px 14px;font-size:12px;font-family:var(--sans);font-weight:500;border-radius:6px;border:1px solid var(--border);cursor:pointer;transition:all .15s;display:inline-flex;align-items:center;gap:4px}
+  .btn-sm{padding:4px 10px;font-size:11px}
+  .btn-blue{background:var(--accent-dim);color:var(--accent);border-color:rgba(88,166,255,.2)}
+  .btn-blue:hover{background:rgba(88,166,255,.2)}
+  .btn-green{background:var(--green-dim);color:var(--green);border-color:rgba(63,185,80,.2)}
+  .btn-green:hover{background:rgba(63,185,80,.2)}
+  .btn-red{background:var(--red-dim);color:var(--red);border-color:rgba(248,81,73,.2)}
+  .btn-red:hover{background:rgba(248,81,73,.2)}
+  .btn-ghost{background:var(--bg3);color:var(--text2)}
+  .btn-ghost:hover{color:var(--text);background:var(--border)}
+  /* User cards */
+  .user-grid{display:flex;flex-direction:column;gap:12px}
+  .user-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;transition:border-color .15s}
+  .user-card:hover{border-color:var(--border2)}
+  .uc-header{display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--border);background:var(--card)}
+  .uc-header-left{display:flex;align-items:center;gap:12px}
+  .uc-avatar{width:36px;height:36px;border-radius:50%;background:var(--accent-dim);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:13px;font-weight:700;color:var(--accent)}
+  .uc-pid{font-family:var(--mono);font-size:15px;font-weight:600}
+  .uc-updated{font-size:11px;color:var(--text3);margin-top:1px}
+  .uc-header-right{display:flex;align-items:center;gap:8px}
+  .toggle-group{display:flex;align-items:center;gap:6px}
+  .toggle-label{font-size:11px;color:var(--text3)}
+  .toggle{position:relative;width:36px;height:20px;cursor:pointer}
+  .toggle input{display:none}
+  .toggle-track{position:absolute;inset:0;background:var(--border);border-radius:10px;transition:background .2s}
+  .toggle input:checked+.toggle-track{background:var(--green)}
+  .toggle-thumb{position:absolute;top:2px;left:2px;width:16px;height:16px;background:#fff;border-radius:50%;transition:transform .2s;pointer-events:none}
+  .toggle input:checked~.toggle-thumb{transform:translateX(16px)}
+  .uc-body{padding:16px 20px;display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px}
+  .uc-field{display:flex;flex-direction:column;gap:3px}
+  .uc-field-label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;font-weight:500}
+  .uc-field-value{font-size:13px;color:var(--text);font-family:var(--mono);word-break:break-all}
+  .uc-field-value.empty{color:var(--text3);font-style:italic;font-family:var(--sans)}
+  .seat-tags{display:flex;flex-wrap:wrap;gap:4px}
+  .seat-tag{font-family:var(--mono);font-size:11px;padding:2px 8px;border-radius:4px;background:var(--accent-dim);color:var(--accent);border:1px solid rgba(88,166,255,.15)}
+  .time-slots{display:flex;flex-direction:column;gap:2px;font-family:var(--mono);font-size:11px}
+  .time-slot{display:flex;gap:6px;color:var(--text2)}
+  .time-slot .day{color:var(--text3);min-width:24px}
+  .owned-info{font-family:var(--mono);font-size:11px;color:var(--text2);display:flex;flex-direction:column;gap:2px}
+  .owned-item{display:flex;align-items:center;gap:6px}
+  .owned-dot{width:5px;height:5px;border-radius:50%;background:var(--green);flex-shrink:0}
+  .uc-footer{padding:10px 20px;border-top:1px solid var(--border)}
+  .uc-result{font-size:11px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .uc-result.success{color:var(--green)}.uc-result.fail{color:var(--red)}
+  .uc-result.wait,.td-result.wait{color:var(--yellow)}
+  .uc-result.skip,.td-result.skip{color:var(--text2)}
+  /* Modal */
+  .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:999;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
+  .modal-overlay.show{display:flex}
+  .modal{background:var(--bg2);border:1px solid var(--border2);border-radius:12px;width:480px;max-width:90vw;max-height:85vh;overflow-y:auto;box-shadow:0 16px 70px rgba(0,0,0,.5)}
+  .modal-header{padding:20px 24px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+  .modal-title{font-size:16px;font-weight:600}
+  .modal-close{background:none;border:none;color:var(--text3);font-size:20px;cursor:pointer;padding:4px;line-height:1}
+  .modal-close:hover{color:var(--text)}
+  .modal-body{padding:20px 24px;display:flex;flex-direction:column;gap:14px}
+  .modal-field{display:flex;flex-direction:column;gap:4px}
+  .modal-field label{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:1px}
+  .modal-field input,.modal-field select{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:var(--mono);outline:none}
+  .modal-field input:focus{border-color:var(--accent)}
+  .modal-footer{padding:16px 24px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px}
+  .confirm-text{font-size:14px;color:var(--text2);line-height:1.7;text-align:center;padding:20px}
+  .confirm-pid{font-family:var(--mono);color:var(--red);font-weight:600}
+  .loading{text-align:center;padding:60px 0;color:var(--text3)}
+  .spinner{width:20px;height:20px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite;display:inline-block;margin-bottom:12px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .toast-box{position:fixed;top:16px;right:16px;z-index:9999;display:flex;flex-direction:column;gap:8px}
+  .toast{padding:10px 16px;border-radius:6px;font-size:13px;font-weight:500;animation:fadeIn .25s ease;box-shadow:0 4px 24px rgba(0,0,0,.4)}
+  .toast-ok{background:var(--green-dim);color:var(--green);border:1px solid rgba(63,185,80,.2)}
+  .toast-err{background:var(--red-dim);color:var(--red);border:1px solid rgba(248,81,73,.2)}
+  .toast-info{background:var(--accent-dim);color:var(--accent);border:1px solid rgba(88,166,255,.2)}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(-10px)}}
+  /* Announcements */
+  .section-bar{display:flex;align-items:center;justify-content:space-between;margin:28px 0 12px}
+  .section-title{font-size:13px;color:var(--text2);text-transform:uppercase;letter-spacing:1.5px;font-weight:600;display:flex;align-items:center;gap:8px}
+  .section-title::before{content:'';width:3px;height:14px;background:var(--accent);border-radius:2px}
+  .ann-grid{display:flex;flex-direction:column;gap:10px;margin-bottom:24px}
+  .ann-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:14px 18px;display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+  .ann-card:hover{border-color:var(--border2)}
+  .ann-main{flex:1;min-width:0}
+  .ann-head{display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap}
+  .ann-title{font-size:14px;font-weight:600}
+  .ann-badge{font-size:10px;padding:2px 8px;border-radius:10px;text-transform:uppercase;letter-spacing:.5px;font-weight:600}
+  .ann-badge.info{background:var(--accent-dim);color:var(--accent)}
+  .ann-badge.success{background:var(--green-dim);color:var(--green)}
+  .ann-badge.warning{background:rgba(210,153,34,.15);color:var(--yellow)}
+  .ann-badge.danger{background:var(--red-dim);color:var(--red)}
+  .ann-badge.pinned{background:rgba(188,140,255,.15);color:var(--purple)}
+  .ann-badge.off{background:var(--bg3);color:var(--text3)}
+  .ann-content{font-size:12px;color:var(--text2);line-height:1.6;word-break:break-word;max-height:72px;overflow:hidden}
+  .ann-content.md p{margin:0 0 4px}
+  .ann-content.md > *:first-child{margin-top:0}
+  .ann-content.md h3,.ann-content.md h4,.ann-content.md h5,.ann-content.md h6{font-size:13px;color:var(--text);margin:4px 0 2px}
+  .ann-content.md ul,.ann-content.md ol{margin:0 0 4px;padding-left:18px}
+  .ann-content.md a{color:var(--accent)}
+  .ann-content.md code,.ann-content.md pre{font-family:var(--mono);background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:0 4px}
+  .ann-content.md pre{padding:6px 8px;overflow-x:auto}
+  .ann-content.md pre code{border:0;padding:0;background:none}
+  .ann-content.md blockquote{margin:0 0 4px;padding-left:8px;border-left:2px solid var(--border2);color:var(--text3)}
+  .ann-content.md hr{border:0;border-top:1px solid var(--border);margin:6px 0}
+  .ann-meta{font-size:10px;color:var(--text3);margin-top:6px;font-family:var(--mono)}
+  .ann-actions{display:flex;gap:6px;flex-shrink:0}
+  .modal-field textarea{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:var(--sans);outline:none;min-height:100px;resize:vertical}
+  .modal-field textarea:focus{border-color:var(--accent)}
+  .checkbox-row{display:flex;gap:16px;align-items:center}
+  .checkbox-row label{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);cursor:pointer}
+  /* Toolbar: filters / grouping / column picker */
+  .toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px;margin-bottom:12px}
+  .tb-group{display:flex;align-items:center;gap:6px}
+  .tb-label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;font-weight:500;white-space:nowrap}
+  .tb-select,.tb-input{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 8px;color:var(--text);font-size:12px;font-family:var(--mono);outline:none}
+  .tb-select:focus,.tb-input:focus{border-color:var(--accent)}
+  .tb-input{width:160px;font-family:var(--sans)}
+  .tb-spacer{flex:1}
+  .tb-count{font-family:var(--mono);font-size:12px;color:var(--text3);white-space:nowrap}
+  .seg{display:flex;border:1px solid var(--border);border-radius:6px;overflow:hidden}
+  .seg button{padding:5px 12px;font-size:12px;font-family:var(--sans);background:var(--bg);color:var(--text2);border:none;cursor:pointer;transition:all .15s}
+  .seg button+button{border-left:1px solid var(--border)}
+  .seg button:hover{color:var(--text)}
+  .seg button.on{background:var(--accent-dim);color:var(--accent)}
+  .colpick{position:relative}
+  .colpick-panel{display:none;position:absolute;right:0;top:calc(100% + 6px);z-index:50;background:var(--bg2);border:1px solid var(--border2);border-radius:8px;padding:10px;width:210px;max-height:320px;overflow-y:auto;box-shadow:0 12px 40px rgba(0,0,0,.5)}
+  .colpick.open .colpick-panel{display:block}
+  .colpick-panel label{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text2);padding:5px 6px;border-radius:4px;cursor:pointer}
+  .colpick-panel label:hover{background:var(--bg3);color:var(--text)}
+  .colpick-panel label.locked{color:var(--text3);cursor:not-allowed}
+  .colpick-foot{display:flex;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid var(--border)}
+  /* Group sections */
+  .grp{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:10px;overflow:hidden}
+  .grp-head{display:flex;align-items:center;gap:10px;padding:10px 16px;cursor:pointer;user-select:none;background:var(--card);border-bottom:1px solid var(--border)}
+  .grp-head:hover{background:var(--bg3)}
+  .grp.collapsed>.grp-head{border-bottom:none}
+  .grp.collapsed>.grp-body{display:none}
+  .grp-caret{color:var(--text3);font-size:10px;transition:transform .15s;flex-shrink:0}
+  .grp.collapsed>.grp-head .grp-caret{transform:rotate(-90deg)}
+  .grp-name{font-size:13px;font-weight:600}
+  .grp-code{font-family:var(--mono);color:var(--accent)}
+  .grp-stats{display:flex;gap:10px;margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--text3);flex-shrink:0}
+  .grp-stats .ok{color:var(--green)}
+  .grp-stats .bad{color:var(--red)}
+  .grp-stats .wait{color:var(--yellow)}
+  .grp-sub{border:1px solid var(--border);border-radius:6px;margin:10px 12px}
+  .grp-sub>.grp-head{padding:8px 12px;background:transparent}
+  .grp-sub .grp-name{font-size:12px;font-weight:500;color:var(--text2)}
+  /* Table view */
+  .tbl-wrap{overflow-x:auto}
+  table.tbl{width:100%;border-collapse:collapse;font-size:12px}
+  table.tbl th{text-align:left;font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;font-weight:500;padding:8px 12px;border-bottom:1px solid var(--border);white-space:nowrap;background:var(--card)}
+  table.tbl td{padding:9px 12px;border-bottom:1px solid var(--border);color:var(--text2);vertical-align:top}
+  table.tbl tr:last-child td{border-bottom:none}
+  table.tbl tbody tr:hover{background:rgba(88,166,255,.04)}
+  .td-mono{font-family:var(--mono);color:var(--text)}
+  .td-pid{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--text);white-space:nowrap}
+  .td-nowrap{white-space:nowrap}
+  .td-result{max-width:340px;line-height:1.5}
+  .td-actions{white-space:nowrap;display:flex;gap:4px;align-items:center}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;vertical-align:middle}
+  .dot-on{background:var(--green)}.dot-off{background:var(--text3)}
+  .empty-note{color:var(--text3);font-style:italic}
+  @media(max-width:768px){.container{padding:16px}.topbar{padding:0 16px}.stats{flex-direction:column}.uc-body{grid-template-columns:1fr 1fr}.uc-header{flex-direction:column;align-items:flex-start;gap:10px}.uc-header-right{align-self:flex-end}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-left">
+    <div class="topbar-logo">📚 <span>AutoLib</span></div>
+    <span class="topbar-sep">/</span>
+    <span class="topbar-page">管理后台</span>
+  </div>
+  <div class="topbar-right" id="admin-nav" style="display:none">
+    <a href="/" class="topbar-btn">← 用户端</a>
+    <button class="topbar-btn" onclick="loadUsers()">↻ 刷新</button>
+    <button class="topbar-btn" onclick="adminLogout()">退出</button>
+  </div>
+</div>
+
+<div class="container">
+  <!-- Admin Login -->
+  <div id="admin-login" style="display:none">
+    <div class="admin-login-wrap">
+      <div class="admin-login-card">
+        <div class="al-title">管理员登录</div>
+        <div class="al-field"><label>管理员账号</label><input type="text" id="adm-username" autocomplete="username" autofocus></div>
+        <div class="al-field"><label>密码</label><input type="password" id="adm-password" autocomplete="current-password"></div>
+        <button class="al-btn" onclick="adminLogin()">登录</button>
+        <button class="al-link" onclick="showPasswordReset()">忘记密码？使用邮箱验证码重置</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Password reset -->
+  <div id="password-reset" style="display:none">
+    <div class="admin-login-wrap">
+      <div class="admin-login-card">
+        <div class="al-title">找回管理员密码</div>
+        <div class="al-field"><label>管理员账号</label><input type="text" id="reset-username" autocomplete="username"></div>
+        <button class="al-btn" id="btn-send-code" onclick="requestResetCode()">发送邮箱验证码</button>
+        <div class="al-field" style="margin-top:16px"><label>邮箱验证码</label><input type="text" id="reset-code" inputmode="numeric" maxlength="6" autocomplete="one-time-code"></div>
+        <div class="al-field"><label>新密码</label><input type="password" id="reset-password" autocomplete="new-password" placeholder="至少8位，包含字母和数字"></div>
+        <button class="al-btn" onclick="confirmPasswordReset()">重置密码</button>
+        <div class="al-hint">验证码 10 分钟内有效，最多尝试 5 次</div>
+        <button class="al-link" onclick="showAdminLogin()">返回登录</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Admin Main -->
+  <div id="admin-main" style="display:none">
+    <div class="stats">
+      <div class="stat-card"><div class="stat-label">总用户</div><div class="stat-value" style="color:var(--accent)" id="s-total">-</div></div>
+      <div class="stat-card"><div class="stat-label">预约中</div><div class="stat-value" style="color:var(--green)" id="s-on">-</div></div>
+      <div class="stat-card"><div class="stat-label">已暂停</div><div class="stat-value" style="color:var(--red)" id="s-off">-</div></div>
+      <div class="stat-card"><div class="stat-label">迟到保护</div><div class="stat-value" style="color:var(--yellow)" id="s-lp">-</div></div>
+      <div class="stat-card"><div class="stat-label">保护触发次数</div><div class="stat-value" style="color:var(--purple)" id="s-lp-count">-</div></div>
+    </div>
+    <div class="section-bar">
+      <div class="section-title">学校闭馆审核</div>
+      <button class="btn btn-blue btn-sm" onclick="loadSchoolReviews()">↻ 刷新审核</button>
+    </div>
+    <div class="ann-grid" id="school-review-grid"><div class="loading" style="padding:24px 0"><div>加载中...</div></div></div>
+
+    <div class="section-bar">
+      <div class="section-title">公告管理</div>
+      <button class="btn btn-green btn-sm" onclick="openAnnForm()">+ 新建公告</button>
+    </div>
+    <div class="ann-grid" id="ann-grid"><div class="loading" style="padding:24px 0"><div>加载中...</div></div></div>
+
+    <div class="section-bar">
+      <div class="section-title">客户端版本</div>
+      <button class="btn btn-green btn-sm" onclick="openAppVerForm()">登记新版本</button>
+    </div>
+    <div class="ann-grid" id="appver-box"><div class="loading" style="padding:24px 0"><div>加载中...</div></div></div>
+
+    <div class="section-bar">
+      <div class="section-title">用户列表</div>
+      <span class="tb-count" id="u-count"></span>
+    </div>
+    <div class="toolbar">
+      <div class="tb-group">
+        <span class="tb-label">视图</span>
+        <div class="seg" id="seg-view">
+          <button data-view="table" onclick="setView('table')">表格</button>
+          <button data-view="card" onclick="setView('card')">卡片</button>
+        </div>
+      </div>
+      <div class="tb-group">
+        <span class="tb-label">分类</span>
+        <div class="seg" id="seg-group">
+          <button data-group="none" onclick="setGroup('none')">不分类</button>
+          <button data-group="college" onclick="setGroup('college')">学院</button>
+          <button data-group="college_class" onclick="setGroup('college_class')">学院 / 班级</button>
+        </div>
+      </div>
+      <div class="tb-group">
+        <span class="tb-label">学院</span>
+        <select class="tb-select" id="f-college" onchange="onCollegeFilter(this.value)"></select>
+      </div>
+      <div class="tb-group">
+        <span class="tb-label">班级</span>
+        <select class="tb-select" id="f-class" onchange="setFilter('klass',this.value)"></select>
+      </div>
+      <div class="tb-group">
+        <span class="tb-label">搜索</span>
+        <input class="tb-input" id="f-q" type="search" placeholder="学号 / 座位 / 结果" oninput="setFilter('q',this.value)">
+      </div>
+      <div class="tb-spacer"></div>
+      <div class="colpick" id="colpick">
+        <button class="btn btn-ghost btn-sm" onclick="toggleColPick(event)">栏目 ▾</button>
+        <div class="colpick-panel" id="colpick-panel">
+          <div class="colpick-foot" style="margin:0 0 6px;padding:0 0 8px">
+            <button class="btn btn-ghost btn-sm" onclick="resetCols()">恢复默认</button>
+            <button class="btn btn-ghost btn-sm" onclick="setAllCols(true)">全选</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="user-grid" id="grid"><div class="loading"><div class="spinner"></div><div>加载中...</div></div></div>
+  </div>
+</div>
+
+<!-- School Notice Review Modal -->
+<div class="modal-overlay" id="m-school-review">
+  <div class="modal" style="width:680px">
+    <div class="modal-header"><div class="modal-title" id="school-review-title">学校闭馆审核</div><button class="modal-close" onclick="closeM('m-school-review')">✕</button></div>
+    <div class="modal-body">
+      <div class="modal-field"><label>学校原文</label><textarea id="school-review-content" readonly style="min-height:180px"></textarea></div>
+      <div class="modal-field"><label>原始网址</label><a id="school-review-url" target="_blank" rel="noopener noreferrer" style="color:var(--accent);word-break:break-all"></a></div>
+      <div class="modal-field"><label>AI 证据 / 不确定项</label><textarea id="school-review-evidence" readonly></textarea></div>
+      <div class="modal-field"><label>影响类型</label><select id="school-review-effect"><option value="venue_closed">全馆闭馆</option><option value="partial_closure">部分闭馆</option></select></div>
+      <div class="modal-field"><label>暂停预约时间（北京时间）</label><input type="datetime-local" id="school-review-from"></div>
+      <div class="modal-field"><label>恢复预约时间（北京时间）</label><input type="datetime-local" id="school-review-until"></div>
+      <div class="modal-field"><label>影响范围</label><input type="text" id="school-review-scope" value="all_seats" readonly></div>
+      <div id="school-review-conflicts" style="color:var(--red);font-size:12px"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-red" id="school-review-cancel" onclick="cancelSchoolReview()">取消规则</button>
+      <button class="btn btn-ghost" onclick="closeM('m-school-review')">关闭</button>
+      <button class="btn btn-green" id="school-review-save" onclick="saveSchoolReview()">确认并启用</button>
+    </div>
+  </div>
+</div>
+
+<!-- Announcement Form Modal -->
+<!-- 安卓版本登记：网页端的下载卡片和 App 内的升级检查都读这一条 -->
+<div class="modal-overlay" id="m-appver">
+  <div class="modal">
+    <div class="modal-header"><div class="modal-title">登记新版本</div><button class="modal-close" onclick="closeM('m-appver')">✕</button></div>
+    <div class="modal-body">
+      <div class="modal-field"><label>版本名 versionName</label><input type="text" id="av-f-name" placeholder="如：0.2.4" oninput="onAppVerName()"></div>
+      <div class="modal-field"><label>版本号 versionCode</label><input type="number" id="av-f-code" min="1" step="1" placeholder="只增不减，必须比上一版大"></div>
+      <div class="modal-field"><label>下载地址</label><input type="text" id="av-f-url" placeholder="https://.../download/AutoLib-x.y.z.apk" oninput="this.dataset.auto='0'"></div>
+      <div class="modal-field"><label>更新说明</label><textarea id="av-f-notes" placeholder="会显示在网页下载卡片和 App 的升级弹窗里"></textarea></div>
+      <div class="al-hint" id="av-hint" style="margin-top:4px"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeM('m-appver')">取消</button>
+      <button class="btn btn-green" onclick="saveAppVersion()">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="m-ann">
+  <div class="modal">
+    <div class="modal-header"><div class="modal-title" id="ann-title">新建公告</div><button class="modal-close" onclick="closeM('m-ann')">✕</button></div>
+    <div class="modal-body">
+      <div class="modal-field"><label>标题</label><input type="text" id="ann-f-title" placeholder="公告标题"></div>
+      <div class="modal-field"><label>内容</label><textarea id="ann-f-content" placeholder="支持 Markdown：**粗体**、- 列表、[文字](链接)、> 引用"></textarea></div>
+      <div class="modal-field">
+        <label>级别</label>
+        <select id="ann-f-level">
+          <option value="info">信息 (蓝)</option>
+          <option value="success">成功 (绿)</option>
+          <option value="warning">警告 (黄)</option>
+          <option value="danger">危险 (红)</option>
+        </select>
+      </div>
+      <div class="modal-field">
+        <label>&nbsp;</label>
+        <div class="checkbox-row">
+          <label><input type="checkbox" id="ann-f-pinned"> 置顶</label>
+          <label><input type="checkbox" id="ann-f-active" checked> 启用</label>
+          <label><input type="checkbox" id="ann-f-popup"> 打开网页就弹出</label>
+        </div>
+      </div>
+      <div class="modal-field"><label>表情按钮</label><input type="text" id="ann-f-reactions" placeholder="空格分隔，如：💩 👊 🌹；留空则不显示"></div>
+      <div class="modal-field">
+        <label>应援按钮</label>
+        <div class="checkbox-row" style="gap:8px">
+          <input type="text" id="ann-f-cheer-label" placeholder="按钮文字，如：会赢的" style="flex:1">
+          <input type="text" id="ann-f-cheer-emojis" placeholder="点击飘出的表情，如：👊📖🔥" style="flex:1">
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer"><button class="btn btn-ghost" onclick="closeM('m-ann')">取消</button><button class="btn btn-green" onclick="saveAnn()">保存</button></div>
+  </div>
+</div>
+
+<!-- Announcement Delete Confirm -->
+<div class="modal-overlay" id="m-ann-del">
+  <div class="modal" style="width:400px">
+    <div class="modal-header"><div class="modal-title">确认删除公告</div><button class="modal-close" onclick="closeM('m-ann-del')">✕</button></div>
+    <div class="confirm-text" id="ann-del-text"></div>
+    <div class="modal-footer"><button class="btn btn-ghost" onclick="closeM('m-ann-del')">取消</button><button class="btn btn-red" id="btn-ann-del">删除</button></div>
+  </div>
+</div>
+
+<!-- Edit Priority Modal -->
+<div class="modal-overlay" id="m-edit">
+  <div class="modal">
+    <div class="modal-header"><div class="modal-title" id="ed-title">编辑优先级</div><button class="modal-close" onclick="closeM('m-edit')">✕</button></div>
+    <div class="modal-body">
+      <div class="modal-field"><label>优先级（数字越大越优先）</label><input type="number" id="ed-priority" min="0" max="99"></div>
+    </div>
+    <div class="modal-footer"><button class="btn btn-ghost" onclick="closeM('m-edit')">取消</button><button class="btn btn-green" onclick="savePriority()">保存</button></div>
+  </div>
+</div>
+
+<!-- Delete Confirm -->
+<div class="modal-overlay" id="m-del">
+  <div class="modal" style="width:400px">
+    <div class="modal-header"><div class="modal-title">确认删除</div><button class="modal-close" onclick="closeM('m-del')">✕</button></div>
+    <div class="confirm-text" id="del-text"></div>
+    <div class="modal-footer"><button class="btn btn-ghost" onclick="closeM('m-del')">取消</button><button class="btn btn-red" id="btn-del">删除</button></div>
+  </div>
+</div>
+
+<!-- 迟到保护设置 Modal -->
+<div class="modal-overlay" id="m-protect">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title" id="protect-title">迟到保护设置</div>
+      <button class="modal-close" onclick="closeM('m-protect')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="background:rgba(88,166,255,.06);border:1px solid rgba(88,166,255,.15);border-radius:8px;padding:12px 14px;font-size:12px;color:var(--text2);line-height:1.7;margin-bottom:4px">
+        <strong style="color:var(--accent)">保护时长</strong>：系统触发迟到保护后，将原预约推迟的分钟数。推迟后若用户仍未到馆（非永久模式），不再二次保护，预约自动释放。<br>
+        <strong style="color:var(--red)">黑名单</strong>：用户无法使用迟到保护，触发时直接取消预约，不推迟。
+      </div>
+      <div class="modal-field">
+        <label>触发次数（历史累计）</label>
+        <div id="protect-count" style="font-family:var(--mono);font-size:20px;font-weight:700;color:var(--purple);padding:4px 0">-</div>
+      </div>
+      <div class="modal-field">
+        <label>保护时长</label>
+        <select id="protect-duration">
+          <option value="0">0 分钟（触发即取消，不推迟）</option>
+          <option value="30">30 分钟</option>
+          <option value="60">1 小时（默认）</option>
+          <option value="90">1.5 小时</option>
+          <option value="120">2 小时</option>
+          <option value="-1">永久（无限推迟，不自动释放）</option>
+        </select>
+      </div>
+      <div class="modal-field">
+        <label>&nbsp;</label>
+        <div class="checkbox-row">
+          <label><input type="checkbox" id="protect-blacklist"> 加入黑名单（直接取消，忽略上方时长设置）</label>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeM('m-protect')">取消</button>
+      <button class="btn btn-green" onclick="saveProtect()">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-box" id="tbox"></div>
+
+<script src="{{ url_for('static', filename='markdown.js') }}?v={{ static_v }}"></script>
+<script>
+let users=[],editPid=null,announcements=[],editAnnId=null,schoolReviews=[],editSchoolReviewId=null;
+function toast(m,t='info'){const b=document.getElementById('tbox'),e=document.createElement('div');e.className='toast toast-'+({success:'ok',error:'err'}[t]||'info');e.textContent=m;b.appendChild(e);setTimeout(()=>{e.style.opacity='0';setTimeout(()=>e.remove(),300)},3000)}
+function openM(id){document.getElementById(id).classList.add('show')}
+function closeM(id){document.getElementById(id).classList.remove('show')}
+function esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+
+// ===== Admin Auth =====
+async function checkAdmin(){try{const r=await fetch('/api/admin/me'),d=await r.json();if(d.is_admin){showAdminMain();}else{document.getElementById('admin-login').style.display='';}}catch(e){document.getElementById('admin-login').style.display='';}}
+async function adminLogin(){
+  const username=document.getElementById('adm-username').value.trim();
+  const password=document.getElementById('adm-password').value;
+  if(!username||!password)return toast('请输入管理员账号和密码','error');
+  try{const r=await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password})});const d=await r.json();if(r.ok){document.getElementById('adm-password').value='';toast('登录成功','success');showAdminMain();}else toast(d.error,'error');}catch(e){toast('网络错误','error')}
+}
+async function adminLogout(){await fetch('/api/admin/logout',{method:'POST'});location.reload();}
+function showAdminLogin(){document.getElementById('password-reset').style.display='none';document.getElementById('admin-main').style.display='none';document.getElementById('admin-nav').style.display='none';document.getElementById('admin-login').style.display='';}
+function showPasswordReset(){document.getElementById('reset-username').value=document.getElementById('adm-username').value.trim();document.getElementById('admin-login').style.display='none';document.getElementById('password-reset').style.display='';}
+function showAdminMain(){document.getElementById('admin-login').style.display='none';document.getElementById('password-reset').style.display='none';document.getElementById('admin-main').style.display='';document.getElementById('admin-nav').style.display='flex';loadUsers();loadSchoolReviews();loadAnnouncements();loadAppVersion();}
+async function requestResetCode(){
+  const username=document.getElementById('reset-username').value.trim();
+  if(!username)return toast('请输入管理员账号','error');
+  const btn=document.getElementById('btn-send-code');btn.disabled=true;
+  try{const r=await fetch('/api/admin/password-reset/request',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username})});const d=await r.json();toast(d.message||d.error,r.ok?'success':'error');}catch(e){toast('网络错误','error')}finally{btn.disabled=false;}
+}
+async function confirmPasswordReset(){
+  const username=document.getElementById('reset-username').value.trim();
+  const code=document.getElementById('reset-code').value.trim();
+  const new_password=document.getElementById('reset-password').value;
+  if(!username||!code||!new_password)return toast('请填写账号、验证码和新密码','error');
+  try{const r=await fetch('/api/admin/password-reset/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,code,new_password})});const d=await r.json();if(r.ok){toast(d.message,'success');document.getElementById('adm-username').value=username;document.getElementById('reset-code').value='';document.getElementById('reset-password').value='';showAdminLogin();}else toast(d.error,'error');}catch(e){toast('网络错误','error')}
+}
+
+// ===== Users =====
+async function loadUsers(){
+  try{
+    document.getElementById('grid').innerHTML='<div style="color:var(--text3);text-align:center;padding:40px">加载中…</div>';
+    const r=await fetch('/api/users',{cache:'no-store'});if(r.status===403){showAdminLogin();toast('登录已失效，请重新登录','error');return;}
+    if(!r.ok){const d=await r.json().catch(()=>({}));document.getElementById('grid').innerHTML=`<div style="color:var(--red);text-align:center;padding:40px">加载失败：${d.error||r.statusText}</div>`;return;}
+    users=await r.json();
+    if(!Array.isArray(users)){document.getElementById('grid').innerHTML='<div style="color:var(--red);text-align:center;padding:40px">加载失败：数据格式异常</div>';return;}
+    const on=users.filter(u=>u.is_reserved==='True').length;
+    const lpOn=users.filter(u=>u.late_protection==='True').length;
+    const lpTotal=users.reduce((s,u)=>s+(u.late_protection_count||0),0);
+    document.getElementById('s-total').textContent=users.length;
+    document.getElementById('s-on').textContent=on;
+    document.getElementById('s-off').textContent=users.length-on;
+    document.getElementById('s-lp').textContent=lpOn+(users.filter(u=>u.late_protection_blacklisted).length?` (黑名单${users.filter(u=>u.late_protection_blacklisted).length})`:'' );
+    document.getElementById('s-lp-count').textContent=lpTotal;
+    renderAll();}catch(e){document.getElementById('grid').innerHTML=`<div style="color:var(--red);text-align:center;padding:40px">加载失败：${e.message||e}</div>`;}
+}
+// ---- 分类：学院 / 班级 ----
+// 学院号和班级号由后端从学号里拆好（见 utils/student_id.py），前端只负责展示和分组。
+const UNCLASSIFIED='__none__';
+function collegeKey(u){return u.id_recognized?u.college_code:UNCLASSIFIED}
+function classKey(u){return u.id_recognized?u.class_key:UNCLASSIFIED}
+function collegeLabel(k){return k===UNCLASSIFIED?'未分类学号':k+' 院'}
+function classLabel(k){return k===UNCLASSIFIED?'未分类学号':(k.split('-')[1]||'?')+' 班'}
+function classFullLabel(k){if(k===UNCLASSIFIED)return'未分类学号';const[c,n]=k.split('-');return`${c} 院 ${n} 班`}
+// 未分类永远沉到最后，别夹在学院中间。
+function cmpKey(a,b){if(a===UNCLASSIFIED)return 1;if(b===UNCLASSIFIED)return -1;return a.localeCompare(b)}
+function groupBy(list,fn){const m=new Map();for(const u of list){const k=fn(u);if(!m.has(k))m.set(k,[]);m.get(k).push(u)}return m}
+
+// ---- 多栏分类：可选显示哪些栏 ----
+const COLS=[
+  {key:'pid',label:'学号',fixed:true},
+  {key:'college',label:'学院'},
+  {key:'class',label:'班级'},
+  {key:'seats',label:'目标座位'},
+  {key:'owned',label:'当前持有'},
+  {key:'result',label:'预约结果'},
+  {key:'switch',label:'开关'},
+  {key:'protect',label:'迟到保护'},
+  {key:'priority',label:'优先级'},
+  {key:'mode',label:'模式'},
+  {key:'time',label:'时间配置'},
+  {key:'web_uid',label:'所属用户'},
+  {key:'email',label:'通知邮箱'},
+  {key:'updated',label:'更新时间'},
+  {key:'actions',label:'操作',fixed:true},
+];
+const FIXED_COLS=COLS.filter(c=>c.fixed).map(c=>c.key);
+const DEFAULT_COLS=['pid','college','class','seats','owned','result','switch','actions'];
+
+function lsGet(k,d){try{const v=localStorage.getItem('autolib_admin_'+k);return v===null?d:JSON.parse(v)}catch(e){return d}}
+function lsSet(k,v){try{localStorage.setItem('autolib_admin_'+k,JSON.stringify(v))}catch(e){}}
+function normCols(raw){
+  // 存档里的栏目名可能来自旧版本，先按 COLS 过一遍，再补回不可取消的固定栏，
+  // 免得表格连学号和操作都渲染不出来。
+  const known=COLS.map(c=>c.key);
+  const picked=(Array.isArray(raw)?raw:[]).filter(k=>known.includes(k));
+  const merged=picked.length?picked:DEFAULT_COLS.slice();
+  return known.filter(k=>merged.includes(k)||FIXED_COLS.includes(k));
+}
+
+let viewMode=lsGet('view','table')==='card'?'card':'table';
+let groupMode=['none','college','college_class'].includes(lsGet('group','college_class'))?lsGet('group','college_class'):'college_class';
+let cols=normCols(lsGet('cols',null));
+let filters={college:'',klass:'',q:''};
+const collapsed=new Set();
+
+function setView(v){viewMode=v;lsSet('view',v);renderAll()}
+function setGroup(v){groupMode=v;lsSet('group',v);renderAll()}
+function setFilter(k,v){filters[k]=v;renderAll()}
+function onCollegeFilter(v){filters.college=v;filters.klass='';renderAll()}
+function syncControls(){
+  document.querySelectorAll('#seg-view button').forEach(b=>b.classList.toggle('on',b.dataset.view===viewMode));
+  document.querySelectorAll('#seg-group button').forEach(b=>b.classList.toggle('on',b.dataset.group===groupMode));
+}
+function toggleColPick(e){e.stopPropagation();document.getElementById('colpick').classList.toggle('open')}
+function toggleCol(key,on){cols=normCols(on?cols.concat([key]):cols.filter(k=>k!==key));lsSet('cols',cols);renderAll()}
+function setAllCols(){cols=COLS.map(c=>c.key);lsSet('cols',cols);buildColPick();renderAll()}
+function resetCols(){cols=DEFAULT_COLS.slice();lsSet('cols',cols);buildColPick();renderAll()}
+function buildColPick(){
+  const panel=document.getElementById('colpick-panel'),foot=panel.firstElementChild;
+  panel.innerHTML='';panel.appendChild(foot);
+  for(const c of COLS){
+    const row=document.createElement('label');
+    if(c.fixed)row.className='locked';
+    const box=document.createElement('input');
+    box.type='checkbox';box.checked=cols.includes(c.key);box.disabled=!!c.fixed;
+    if(!c.fixed)box.onchange=()=>toggleCol(c.key,box.checked);
+    row.appendChild(box);row.appendChild(document.createTextNode(' '+c.label));
+    panel.appendChild(row);
+  }
+}
+document.addEventListener('click',e=>{const p=document.getElementById('colpick');if(p&&!p.contains(e.target))p.classList.remove('open')});
+
+function ownedNames(u){
+  const out=[];
+  for(const[n,list]of Object.entries(u.owned_seat||{}))for(const s of list||[])out.push(n+' '+(s.target_time||''));
+  return out;
+}
+function matchedUsers(){
+  const q=(filters.q||'').trim().toLowerCase();
+  return users.filter(u=>{
+    if(filters.college&&collegeKey(u)!==filters.college)return false;
+    if(filters.klass&&classKey(u)!==filters.klass)return false;
+    if(!q)return true;
+    const hay=[u.pid,u.web_uid,u.result,(u.seat_list||[]).join(' '),ownedNames(u).join(' ')].join(' ').toLowerCase();
+    return hay.includes(q);
+  }).sort((a,b)=>String(a.pid||'').localeCompare(String(b.pid||'')));
+}
+function fillFilters(){
+  const csel=document.getElementById('f-college');
+  const colleges=[...new Set(users.map(collegeKey))].sort(cmpKey);
+  csel.innerHTML='<option value="">全部学院</option>'+colleges.map(k=>
+    `<option value="${k}">${collegeLabel(k)} · ${users.filter(u=>collegeKey(u)===k).length}</option>`).join('');
+  csel.value=colleges.includes(filters.college)?filters.college:(filters.college='');
+  const ksel=document.getElementById('f-class');
+  const pool=filters.college?users.filter(u=>collegeKey(u)===filters.college):users;
+  const classes=[...new Set(pool.map(classKey))].sort(cmpKey);
+  ksel.innerHTML='<option value="">全部班级</option>'+classes.map(k=>
+    `<option value="${k}">${(filters.college?classLabel(k):classFullLabel(k))} · ${pool.filter(u=>classKey(u)===k).length}</option>`).join('');
+  ksel.value=classes.includes(filters.klass)?filters.klass:(filters.klass='');
+}
+
+function renderAll(){
+  const g=document.getElementById('grid');
+  syncControls();fillFilters();
+  const list=matchedUsers();
+  document.getElementById('u-count').textContent=
+    users.length?(list.length===users.length?`共 ${users.length} 人`:`筛选出 ${list.length} / ${users.length} 人`):'';
+  if(!users.length){g.innerHTML='<div style="color:var(--text3);text-align:center;padding:60px">暂无用户</div>';return;}
+  if(!list.length){g.innerHTML='<div style="color:var(--text3);text-align:center;padding:60px">没有符合筛选条件的用户</div>';return;}
+  if(groupMode==='none'){g.innerHTML=viewMode==='card'?list.map(card).join(''):`<div class="grp">${tableHtml(list)}</div>`;return;}
+  const byCollege=groupBy(list,collegeKey);
+  g.innerHTML=[...byCollege.keys()].sort(cmpKey).map(ck=>{
+    const rows=byCollege.get(ck);
+    let inner;
+    if(groupMode==='college'){inner=body(rows);}
+    else{
+      const byClass=groupBy(rows,classKey);
+      inner=[...byClass.keys()].sort(cmpKey).map(kk=>
+        section('grp-sub',`c:${ck}/${kk}`,classLabel(kk),byClass.get(kk),body(byClass.get(kk)))).join('');
+    }
+    return section('',`col:${ck}`,collegeLabel(ck),rows,inner);
+  }).join('');
+}
+function body(list){return viewMode==='card'?`<div class="user-grid" style="padding:12px">${list.map(card).join('')}</div>`:tableHtml(list)}
+function section(cls,key,name,rows,inner){
+  const on=rows.filter(u=>u.is_reserved==='True').length;
+  // 状态由后端 classify_result 判定：休息跳过、13:58 占位待换约都不是异常，
+  // 只有真正下单出错（❌）才算。别在这里拿 result 文本自己判。
+  const ok=rows.filter(u=>u.result_state==='success').length;
+  const wait=rows.filter(u=>u.result_state==='pending').length;
+  const bad=rows.filter(u=>u.result_state==='failed').length;
+  return `<div class="grp ${cls} ${collapsed.has(key)?'collapsed':''}">
+    <div class="grp-head" onclick="toggleGroup('${key}',this)">
+      <span class="grp-caret">▼</span>
+      <span class="grp-name"><span class="grp-code">${esc(name)}</span></span>
+      <span class="grp-stats"><span>${rows.length} 人</span><span>预约中 ${on}</span><span class="ok">成功 ${ok}</span>${wait?`<span class="wait">待换约 ${wait}</span>`:''}${bad?`<span class="bad">异常 ${bad}</span>`:''}</span>
+    </div>
+    <div class="grp-body">${inner}</div>
+  </div>`;
+}
+function toggleGroup(key,el){
+  const box=el.parentElement;
+  if(box.classList.toggle('collapsed'))collapsed.add(key);else collapsed.delete(key);
+}
+
+function tableHtml(list){
+  const active=COLS.filter(c=>cols.includes(c.key));
+  return `<div class="tbl-wrap"><table class="tbl">
+    <thead><tr>${active.map(c=>`<th>${c.label}</th>`).join('')}</tr></thead>
+    <tbody>${list.map(u=>`<tr>${active.map(c=>`<td>${cell(c.key,u)}</td>`).join('')}</tr>`).join('')}</tbody>
+  </table></div>`;
+}
+function cell(key,u){
+  const pid=u.pid||'?';
+  switch(key){
+    case'pid':return`<span class="td-pid">${esc(pid)}</span>${u.late_protection_blacklisted?' <span style="font-size:10px;padding:1px 5px;border-radius:4px;background:rgba(248,81,73,.15);color:var(--red)">黑</span>':''}`;
+    case'college':return u.id_recognized?`<span class="td-mono">${u.college_code}</span>`:'<span class="empty-note">未分类</span>';
+    case'class':return u.id_recognized?`<span class="td-mono">${u.class_code}</span>`:'<span class="empty-note">未分类</span>';
+    case'seats':return seatsHtml(u);
+    case'owned':return ownedHtml(u);
+    case'result':return u.result?`<div class="td-result ${resultClass(u)}">${esc(u.result)}</div>`:'<span class="empty-note">无</span>';
+    case'switch':return`<div class="td-actions">
+      <label class="toggle" title="预约"><input type="checkbox" ${u.is_reserved==='True'?'checked':''} onchange="tog('${pid}','is_reserved',this.checked)"><div class="toggle-track"></div><div class="toggle-thumb"></div></label>
+      <label class="toggle" title="迟到保护"><input type="checkbox" ${u.late_protection==='True'?'checked':''} onchange="tog('${pid}','late_protection',this.checked)"><div class="toggle-track"></div><div class="toggle-thumb"></div></label></div>`;
+    case'protect':return`${fmtProtect(u)} <span style="color:var(--text3)">/ ${u.late_protection_count||0}次</span>`;
+    case'priority':return`<span class="td-mono">${u.priority??0}</span>`;
+    case'mode':return u.mode==='week_time'?'按星期':(u.mode||'-');
+    case'time':return timeHtml(u);
+    case'web_uid':return`<span class="td-mono">${esc(u.web_uid||'-')}</span>`;
+    case'email':return u.notify_email?`<span class="td-mono">${esc(u.notify_email)}</span>`:'<span class="empty-note">未设置</span>';
+    case'updated':return`<span class="td-mono td-nowrap">${esc(u.updated_at||'-')}</span>`;
+    case'actions':return`<div class="td-actions">
+      <button class="btn btn-blue btn-sm" onclick="editPri('${pid}',${u.priority||0})">优先级</button>
+      <button class="btn btn-ghost btn-sm" style="color:var(--yellow)" onclick="openProtect('${pid}',${u.protection_max_minutes??60},${!!u.late_protection_blacklisted},${u.late_protection_count||0})">保护</button>
+      <button class="btn btn-red btn-sm" onclick="del('${pid}')">删除</button></div>`;
+    default:return'';
+  }
+}
+
+// 卡片和表格共用的几段渲染，改一处两边同时生效。
+function seatsHtml(u){
+  return (u.seat_list||[]).map(s=>`<span class="seat-tag">${esc(s)}</span>`).join('')||'<span class="uc-field-value empty">未设置</span>';
+}
+function timeHtml(u){
+  if(u.mode==='week_time'&&u.time&&u.time.week_time){
+    const d=['一','二','三','四','五','六','日'];
+    return'<div class="time-slots">'+[1,2,3,4,5,6,7].map(i=>`<div class="time-slot"><span class="day">周${d[i-1]}</span>${esc(String(u.time.week_time[i]||'-'))}</div>`).join('')+'</div>';
+  }
+  if(u.time&&u.time.tomorrow)return`<span class="uc-field-value">${esc(String(u.time.tomorrow))}</span>`;
+  return'<span class="uc-field-value empty">未设置</span>';
+}
+function ownedHtml(u){
+  if(!u.owned_seat||!Object.keys(u.owned_seat).length)return'<span class="uc-field-value empty">无</span>';
+  let h='<div class="owned-info">';
+  for(const[n,list]of Object.entries(u.owned_seat))for(const s of list||[])
+    h+=`<div class="owned-item"><span class="owned-dot"></span>${esc(n)} ${esc(s.target_time||'')}${s.by_protection?'<span style="font-size:10px;color:var(--yellow);margin-left:4px">[保护后]</span>':''}</div>`;
+  return h+'</div>';
+}
+function fmtProtect(u){
+  if(u.late_protection_blacklisted)return'<span style="color:var(--red);font-weight:600">黑名单</span>';
+  const m=u.protection_max_minutes;
+  if(m===undefined||m===null||m===60)return'1小时（默认）';
+  if(m===-1)return'永久';
+  if(m===0)return'0分钟（触发即取消）';
+  return m+'分钟';
+}
+// 和后端 classify_result 一一对应。以前是「不含"成功"就标红」，
+// 结果休息日和 13:58 占位待换约这两种正常状态被涂成了故障。
+const RESULT_CLASS={success:'success',failed:'fail',pending:'wait',skipped:'skip'};
+function resultClass(u){return RESULT_CLASS[u.result_state]||''}
+
+function card(u){
+  const pid=u.pid||'?',av=pid.slice(-2),isOn=u.is_reserved==='True',lpOn=u.late_protection==='True';
+  const res=u.result||'',rc=resultClass(u);
+  const lpCount=u.late_protection_count||0;
+  const blBadge=u.late_protection_blacklisted?'<span style="font-size:10px;padding:1px 6px;border-radius:4px;background:rgba(248,81,73,.15);color:var(--red);border:1px solid rgba(248,81,73,.2);margin-left:4px">黑名单</span>':'';
+  const clsBadge=u.id_recognized?`<span class="uc-field-value">${u.college_code} 院 ${u.class_code} 班</span>`:'<span class="uc-field-value empty">未分类</span>';
+  return `<div class="user-card">
+    <div class="uc-header"><div class="uc-header-left"><div class="uc-avatar">${av}</div><div><div class="uc-pid">${pid}${blBadge}</div><div class="uc-updated">更新于 ${u.updated_at||'-'}</div></div></div>
+    <div class="uc-header-right">
+      <div class="toggle-group"><span class="toggle-label">预约</span><label class="toggle"><input type="checkbox" ${isOn?'checked':''} onchange="tog('${pid}','is_reserved',this.checked)"><div class="toggle-track"></div><div class="toggle-thumb"></div></label></div>
+      <div class="toggle-group"><span class="toggle-label">保护</span><label class="toggle"><input type="checkbox" ${lpOn?'checked':''} onchange="tog('${pid}','late_protection',this.checked)"><div class="toggle-track"></div><div class="toggle-thumb"></div></label></div>
+      <button class="btn btn-blue btn-sm" onclick="editPri('${pid}',${u.priority||0})">优先级</button>
+      <button class="btn btn-ghost btn-sm" onclick="openProtect('${pid}',${u.protection_max_minutes??60},${!!u.late_protection_blacklisted},${lpCount})" style="color:var(--yellow)">保护管理</button>
+      <button class="btn btn-red btn-sm" onclick="del('${pid}')">删除</button>
+    </div></div>
+    <div class="uc-body">
+      <div class="uc-field"><div class="uc-field-label">学院 / 班级</div>${clsBadge}</div>
+      <div class="uc-field"><div class="uc-field-label">所属用户</div><div class="uc-field-value">${u.web_uid||'-'}</div></div>
+      <div class="uc-field"><div class="uc-field-label">模式</div><div class="uc-field-value">${u.mode==='week_time'?'按星期':(u.mode||'-')}</div></div>
+      <div class="uc-field"><div class="uc-field-label">优先级</div><div class="uc-field-value">${u.priority??0}</div></div>
+      <div class="uc-field"><div class="uc-field-label">保护设置</div><div class="uc-field-value">${fmtProtect(u)} <span style="color:var(--text3);font-size:11px">/ 触发${lpCount}次</span></div></div>
+      <div class="uc-field"><div class="uc-field-label">座位</div><div class="seat-tags">${seatsHtml(u)}</div></div>
+      <div class="uc-field"><div class="uc-field-label">时间</div>${timeHtml(u)}</div>
+      <div class="uc-field"><div class="uc-field-label">当前持有</div>${ownedHtml(u)}</div>
+    </div>
+    ${res?`<div class="uc-footer"><div class="uc-result ${rc}">结果: ${esc(res)}</div></div>`:''}
+  </div>`;}
+
+async function tog(pid,field,on){try{const r=await fetch(`/api/users/${pid}/toggle`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({field,value:on?'True':'False'})});if(!r.ok){const d=await r.json().catch(()=>({}));toast(d.error||'更新失败','error');loadUsers();return;}const u=users.find(x=>x.pid===pid);if(u){u[field]=on?'True':'False';renderAll();}const onc=users.filter(u=>u.is_reserved==='True').length;document.getElementById('s-on').textContent=onc;document.getElementById('s-off').textContent=users.length-onc;document.getElementById('s-lp').textContent=users.filter(u=>u.late_protection==='True').length;toast(`${pid} 已更新`,'success');}catch(e){toast('失败','error');loadUsers();}}
+
+function editPri(pid,cur){editPid=pid;document.getElementById('ed-title').textContent='优先级: '+pid;document.getElementById('ed-priority').value=cur;openM('m-edit');}
+async function savePriority(){if(!editPid)return;const p=parseInt(document.getElementById('ed-priority').value)||0;try{const r=await fetch(`/api/users/${editPid}/update`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({priority:p})});if(r.ok){toast('已更新','success');closeM('m-edit');loadUsers();}else toast('失败','error');}catch(e){toast('失败','error')}}
+
+let protectPid=null;
+function openProtect(pid,durMin,blacklisted,count){
+  protectPid=pid;
+  document.getElementById('protect-title').textContent='迟到保护设置 · '+pid;
+  document.getElementById('protect-count').textContent=count+' 次';
+  // 选中最接近的预设，若不在列表则选60
+  const sel=document.getElementById('protect-duration');
+  const opts=[0,30,60,90,120,-1];
+  sel.value=opts.includes(durMin)?String(durMin):'60';
+  document.getElementById('protect-blacklist').checked=blacklisted;
+  openM('m-protect');
+}
+async function saveProtect(){
+  if(!protectPid)return;
+  const dur=parseInt(document.getElementById('protect-duration').value);
+  const bl=document.getElementById('protect-blacklist').checked;
+  try{
+    const r=await fetch(`/api/users/${protectPid}/protection_settings`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({protection_max_minutes:dur,late_protection_blacklisted:bl})});
+    const d=await r.json();
+    if(r.ok){toast('保护设置已更新','success');closeM('m-protect');loadUsers();}
+    else toast(d.error||'更新失败','error');
+  }catch(e){toast('网络错误','error');}
+}
+
+function del(pid){document.getElementById('del-text').innerHTML=`删除 <span class="confirm-pid">${pid}</span> 的所有配置？<br>不可恢复。`;document.getElementById('btn-del').onclick=async()=>{try{const r=await fetch(`/api/users/${pid}`,{method:'DELETE'});if(r.ok){toast('已删除','success');closeM('m-del');loadUsers();}else toast('失败','error');}catch(e){toast('失败','error')}};openM('m-del');}
+
+// ===== Announcements =====
+function schoolStatus(r){
+  if(r.status==='cancelled'&&r.cancel_reason==='ai_irrelevant')return 'AI 三次判定无关';
+  return {pending_review:'待审核',confirmed_upcoming:'已确认·未生效',active:'拦截中',expired:'已过期',cancelled:'已取消',invalid:'时间无效'}[r.effective_status||r.status]||r.status;
+}
+function schoolStatusClass(r){
+  const s=r.effective_status||r.status;
+  return s==='active'?'danger':s==='pending_review'?'warning':s==='cancelled'||s==='expired'?'off':'info';
+}
+async function loadSchoolReviews(){
+  const g=document.getElementById('school-review-grid');
+  try{
+    g.innerHTML='<div style="color:var(--text3);text-align:center;padding:20px">加载中…</div>';
+    const r=await fetch('/api/admin/school_notice_reviews');
+    const d=await r.json().catch(()=>[]);
+    if(!r.ok||!Array.isArray(d)){g.innerHTML='<div style="color:var(--red);text-align:center;padding:20px">审核记录加载失败</div>';return;}
+    schoolReviews=d;renderSchoolReviews();
+    const hash=location.hash.replace('#school-notice-','');
+    if(hash&&schoolReviews.some(x=>x.id===hash))openSchoolReview(hash);
+  }catch(e){g.innerHTML=`<div style="color:var(--red);text-align:center;padding:20px">加载失败：${esc(e.message||e)}</div>`;}
+}
+function renderSchoolReviews(){
+  const g=document.getElementById('school-review-grid');
+  if(!schoolReviews.length){g.innerHTML='<div style="color:var(--text3);text-align:center;padding:24px">暂无学校公告审核记录</div>';return;}
+  g.innerHTML=schoolReviews.map(r=>{
+    const conflicts=(r.existing_reservation_conflicts||[]).length;
+    const checks=r.ai_checks||{};
+    return `<div class="ann-card" id="school-notice-${r.id}">
+      <div class="ann-main">
+        <div class="ann-head"><span class="ann-badge ${schoolStatusClass(r)}">${esc(schoolStatus(r))}</span><span class="ann-title">${esc(r.source_title||'未命名公告')}</span></div>
+        <div class="ann-content">${esc(r.ai_summary||'无 AI 摘要')}</div>
+        <div class="ann-meta">建议 ${esc(r.proposed_pause_from||'未确定')} → ${esc(r.proposed_pause_until||'未确定')}　·　A ${esc(checks.extractor_a||'-')} / B ${esc(checks.extractor_b||'-')} / C ${esc(checks.reviewer_c||'-')}　·　revision ${r.revision}${conflicts?`　·　冲突 ${conflicts} 条`:''}</div>
+      </div>
+      <div class="ann-actions"><button class="btn btn-blue btn-sm" onclick="openSchoolReview('${r.id}')">审核 / 查看</button></div>
+    </div>`;
+  }).join('');
+}
+function dtLocal(v){return(v||'').replace(' ','T').substring(0,16)}
+function openSchoolReview(id){
+  const r=schoolReviews.find(x=>x.id===id);if(!r)return;
+  editSchoolReviewId=id;
+  document.getElementById('school-review-title').textContent=`${schoolStatus(r)} · ${r.source_title||'学校公告'}`;
+  document.getElementById('school-review-content').value=r.source_content||'';
+  const link=document.getElementById('school-review-url');link.href=r.source_url||'#';link.textContent=r.source_url||'无链接';
+  document.getElementById('school-review-evidence').value=`证据：${(r.ai_evidence||[]).join('；')||'无'}\n不确定：${(r.ai_ambiguities||[]).join('；')||'无'}`;
+  document.getElementById('school-review-effect').value=['venue_closed','partial_closure'].includes(r.effect_type)?r.effect_type:'venue_closed';
+  document.getElementById('school-review-from').value=dtLocal(r.approved_pause_from||r.proposed_pause_from);
+  document.getElementById('school-review-until').value=dtLocal(r.approved_pause_until||r.proposed_pause_until);
+  document.getElementById('school-review-scope').value=r.affected_scope||'all_seats';
+  const conflicts=r.existing_reservation_conflicts||[];
+  document.getElementById('school-review-conflicts').textContent=conflicts.length?`⚠ 已发现 ${conflicts.length} 条已有预约冲突，系统不会自动取消。`:'';
+  document.getElementById('school-review-save').textContent=r.status==='confirmed'?'保存修改并重新通知':r.cancel_reason==='ai_irrelevant'?'人工改判并启用':'确认并启用';
+  document.getElementById('school-review-save').style.display=r.status==='cancelled'&&r.cancel_reason!=='ai_irrelevant'?'none':'';
+  document.getElementById('school-review-cancel').style.display=r.status==='cancelled'?'none':'';
+  openM('m-school-review');
+}
+async function saveSchoolReview(){
+  const r=schoolReviews.find(x=>x.id===editSchoolReviewId);if(!r)return;
+  const body={expected_revision:r.revision,effect_type:document.getElementById('school-review-effect').value,pause_from:document.getElementById('school-review-from').value,pause_until:document.getElementById('school-review-until').value,affected_scope:document.getElementById('school-review-scope').value};
+  if(!body.pause_from||!body.pause_until)return toast('请填写暂停和恢复时间','error');
+  const url=r.status==='confirmed'?`/api/admin/school_notice_reviews/${r.id}`:`/api/admin/school_notice_reviews/${r.id}/confirm`;
+  const method=r.status==='confirmed'?'PUT':'POST';
+  const resp=await fetch(url,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const d=await resp.json().catch(()=>({}));
+  if(!resp.ok){toast(d.error||'保存失败','error');if(resp.status===409)loadSchoolReviews();return;}
+  toast(r.status==='confirmed'?'规则已修改并重新通知':'闭馆拦截已启用','success');closeM('m-school-review');loadSchoolReviews();loadAnnouncements();
+}
+async function cancelSchoolReview(){
+  const r=schoolReviews.find(x=>x.id===editSchoolReviewId);if(!r)return;
+  if(!confirm('确认取消这条闭馆拦截规则？'))return;
+  const resp=await fetch(`/api/admin/school_notice_reviews/${r.id}/cancel`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({expected_revision:r.revision,reason:'管理员取消'})});
+  const d=await resp.json().catch(()=>({}));
+  if(!resp.ok){toast(d.error||'取消失败','error');if(resp.status===409)loadSchoolReviews();return;}
+  toast('闭馆规则已取消','success');closeM('m-school-review');loadSchoolReviews();loadAnnouncements();
+}
+
+async function loadAnnouncements(){
+  try{
+    document.getElementById('ann-grid').innerHTML='<div style="color:var(--text3);text-align:center;padding:20px">加载中…</div>';
+    const r=await fetch('/api/admin/announcements');
+    if(!r.ok){const d=await r.json().catch(()=>({}));document.getElementById('ann-grid').innerHTML=`<div style="color:var(--red);text-align:center;padding:20px">加载失败：${d.error||r.statusText}</div>`;return;}
+    announcements=await r.json();
+    if(!Array.isArray(announcements)){document.getElementById('ann-grid').innerHTML='<div style="color:var(--red);text-align:center;padding:20px">加载失败：数据格式异常</div>';return;}
+    renderAnnouncements();
+  }catch(e){document.getElementById('ann-grid').innerHTML=`<div style="color:var(--red);text-align:center;padding:20px">加载失败：${e.message||e}</div>`;}
+}
+function renderAnnouncements(){
+  const g=document.getElementById('ann-grid');
+  if(!announcements.length){g.innerHTML='<div style="color:var(--text3);text-align:center;padding:30px">暂无公告，点击右上角新建</div>';return;}
+  g.innerHTML=announcements.map(a=>{
+    const lvl=a.level||'info';
+    const pinned=a.pinned?'<span class="ann-badge pinned">置顶</span>':'';
+    const off=!a.active?'<span class="ann-badge off">已停用</span>':'';
+    const popup=a.popup_required?'<span class="ann-badge pinned">弹窗</span>':'';
+    return `<div class="ann-card">
+      <div class="ann-main">
+        <div class="ann-head"><span class="ann-badge ${lvl}">${lvl}</span>${pinned}${popup}${off}<span class="ann-title">${esc(a.title)}</span></div>
+        <div class="ann-content md">${renderMarkdown(a.content)}</div>
+        <div class="ann-meta">创建 ${a.created_at||'-'}${a.updated_at&&a.updated_at!==a.created_at?`　·　更新 ${a.updated_at}`:''}${annInteractionMeta(a)}</div>
+      </div>
+      <div class="ann-actions">
+        <button class="btn btn-blue btn-sm" onclick="openAnnForm('${a.id}')">编辑</button>
+        <button class="btn btn-red btn-sm" onclick="delAnn('${a.id}')">删除</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+function annInteractionMeta(a){
+  const parts=[];
+  if(Array.isArray(a.reactions)&&a.reactions.length)parts.push('表情 '+a.reactions.map(esc).join(' '));
+  if(a.cheer&&a.cheer.label)parts.push(`应援「${esc(a.cheer.label)}」${esc(a.cheer.emojis||'')}`);
+  return parts.length?'　·　'+parts.join('　·　'):'';
+}
+function openAnnForm(id){
+  editAnnId=id||null;
+  document.getElementById('ann-title').textContent=id?'编辑公告':'新建公告';
+  if(id){
+    const a=announcements.find(x=>x.id===id);
+    if(!a)return;
+    document.getElementById('ann-f-title').value=a.title||'';
+    document.getElementById('ann-f-content').value=a.content||'';
+    document.getElementById('ann-f-level').value=a.level||'info';
+    document.getElementById('ann-f-pinned').checked=!!a.pinned;
+    document.getElementById('ann-f-active').checked=a.active!==false;
+    document.getElementById('ann-f-popup').checked=!!a.popup_required;
+    document.getElementById('ann-f-reactions').value=(a.reactions||[]).join(' ');
+    document.getElementById('ann-f-cheer-label').value=(a.cheer&&a.cheer.label)||'';
+    document.getElementById('ann-f-cheer-emojis').value=(a.cheer&&a.cheer.emojis)||'';
+  }else{
+    document.getElementById('ann-f-title').value='';
+    document.getElementById('ann-f-content').value='';
+    document.getElementById('ann-f-level').value='info';
+    document.getElementById('ann-f-pinned').checked=false;
+    document.getElementById('ann-f-active').checked=true;
+    document.getElementById('ann-f-popup').checked=false;
+    document.getElementById('ann-f-reactions').value='';
+    document.getElementById('ann-f-cheer-label').value='';
+    document.getElementById('ann-f-cheer-emojis').value='';
+  }
+  openM('m-ann');
+}
+async function saveAnn(){
+  const body={
+    title:document.getElementById('ann-f-title').value.trim(),
+    content:document.getElementById('ann-f-content').value.trim(),
+    level:document.getElementById('ann-f-level').value,
+    pinned:document.getElementById('ann-f-pinned').checked,
+    active:document.getElementById('ann-f-active').checked,
+    popup_required:document.getElementById('ann-f-popup').checked,
+    reactions:document.getElementById('ann-f-reactions').value.split(/\s+/).filter(Boolean),
+  };
+  const cheerLabel=document.getElementById('ann-f-cheer-label').value.trim();
+  const cheerEmojis=document.getElementById('ann-f-cheer-emojis').value.replace(/\s+/g,'');
+  if((cheerLabel&&!cheerEmojis)||(!cheerLabel&&cheerEmojis))return toast('应援按钮要同时填文字和表情','error');
+  body.cheer=cheerLabel?{label:cheerLabel,emojis:cheerEmojis}:null;
+  if(!body.title||!body.content)return toast('请填写标题和内容','error');
+  try{
+    const url=editAnnId?`/api/admin/announcements/${editAnnId}`:'/api/admin/announcements';
+    const method=editAnnId?'PUT':'POST';
+    const r=await fetch(url,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d=await r.json();
+    if(r.ok){toast(editAnnId?'已更新':'已创建','success');closeM('m-ann');loadAnnouncements();}
+    else toast(d.error||'失败','error');
+  }catch(e){toast('网络错误','error')}
+}
+function delAnn(id){
+  const a=announcements.find(x=>x.id===id);
+  if(!a)return;
+  document.getElementById('ann-del-text').innerHTML=`删除公告 <span class="confirm-pid">${esc(a.title)}</span>？<br>不可恢复。`;
+  document.getElementById('btn-ann-del').onclick=async()=>{
+    try{
+      const r=await fetch(`/api/admin/announcements/${id}`,{method:'DELETE'});
+      if(r.ok){toast('已删除','success');closeM('m-ann-del');loadAnnouncements();}
+      else toast('失败','error');
+    }catch(e){toast('失败','error')}
+  };
+  openM('m-ann-del');
+}
+
+// ===== 安卓版本登记 =====
+// 网页端的下载卡片和 App 内的升级检查读的是同一条记录（/api/app/version）。
+// 以前这里没有界面，只能手敲 curl 去登记，前端那个写死的下载链接就是这么漏掉的。
+let appVersion = null;
+
+async function loadAppVersion(){
+  const box = document.getElementById('appver-box');
+  try{
+    const r = await fetch('/api/app/version');
+    const d = await r.json();
+    appVersion = (d && d.version_code) ? d : null;
+  }catch(e){
+    appVersion = null;
+  }
+  if(!appVersion){
+    box.innerHTML = '<div style="color:var(--text3);text-align:center;padding:30px">还没登记过版本，网页上的下载入口不会显示</div>';
+    return;
+  }
+  box.innerHTML = `<div class="ann-card">
+    <div class="ann-main">
+      <div class="ann-head"><span class="ann-badge info">v${esc(appVersion.version_name)}</span><span class="ann-title">versionCode ${appVersion.version_code}</span></div>
+      <div class="ann-content"><a href="${esc(appVersion.download_url)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);word-break:break-all">${esc(appVersion.download_url)}</a></div>
+      ${appVersion.notes ? `<div class="ann-content" style="white-space:pre-wrap">${esc(appVersion.notes)}</div>` : ''}
+      <div class="ann-meta">更新 ${appVersion.updated_at || '-'}</div>
+    </div>
+    <div class="ann-actions">
+      <button class="btn btn-blue btn-sm" onclick="openAppVerForm()">修改</button>
+    </div>
+  </div>`;
+}
+
+// 下载地址按版本名拼，省得手敲敲错——文件名规则和 downloads/ 里一直用的一致
+function apkUrlFor(name){ return location.origin + '/download/AutoLib-' + name + '.apk'; }
+
+// 版本名一改就跟着更新地址；用户自己动过地址栏就不再覆盖（oninput 里把 auto 标记清掉了）
+function onAppVerName(){
+  const url = document.getElementById('av-f-url');
+  if(url.dataset.auto !== '1' && url.value.trim()) return;
+  url.value = apkUrlFor(document.getElementById('av-f-name').value.trim());
+  url.dataset.auto = '1';
+}
+
+function openAppVerForm(){
+  const name = document.getElementById('av-f-name');
+  const code = document.getElementById('av-f-code');
+  const url = document.getElementById('av-f-url');
+  const notes = document.getElementById('av-f-notes');
+  name.value = appVersion ? appVersion.version_name : '';
+  code.value = appVersion ? appVersion.version_code : '';
+  url.value = appVersion ? appVersion.download_url : '';
+  notes.value = appVersion ? appVersion.notes : '';
+  url.dataset.auto = '0';
+  document.getElementById('av-hint').textContent = appVersion
+    ? `当前线上：v${appVersion.version_name}（versionCode ${appVersion.version_code}）。versionCode 只增不减，填小了客户端认不出新版本。`
+    : 'versionCode 要和 app/build.gradle.kts 里的一致。';
+  openM('m-appver');
+}
+
+async function saveAppVersion(){
+  const body = {
+    version_name: document.getElementById('av-f-name').value.trim(),
+    version_code: parseInt(document.getElementById('av-f-code').value, 10),
+    download_url: document.getElementById('av-f-url').value.trim(),
+    notes: document.getElementById('av-f-notes').value.trim(),
+  };
+  if(!body.version_name) return toast('请填版本名','error');
+  if(!body.version_code || body.version_code <= 0) return toast('versionCode 必须是正整数','error');
+  if(!/^https?:\/\//.test(body.download_url)) return toast('下载地址必须是 http(s) 链接','error');
+  // 后端不拦版本回退，这里问一句：填小了老客户端就检查不到更新
+  if(appVersion && body.version_code < appVersion.version_code
+     && !confirm(`versionCode 比线上的 ${appVersion.version_code} 还小，客户端将认不出新版本。确定要这么登记吗？`)) return;
+  try{
+    const r = await fetch('/api/admin/app_version',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d = await r.json();
+    if(r.ok){toast('已登记 v'+body.version_name,'success');closeM('m-appver');loadAppVersion();}
+    else toast(d.error||'登记失败','error');
+  }catch(e){toast('网络错误','error')}
+}
+
+buildColPick();
+checkAdmin();
+</script>
+</body>
+</html>

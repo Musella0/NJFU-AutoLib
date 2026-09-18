@@ -1,0 +1,15 @@
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+*.jks
+*.keystore
+
+# Gradle Wrapper JAR (binary, download via `gradle wrapper`)
+gradle/wrapper/gradle-wrapper.jar

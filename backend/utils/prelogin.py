@@ -1,0 +1,146 @@
+"""
+预登录会话池
+
+7:00 抢座的时间几乎全花在登录链路上：webvpn 登录 + CAS SSO 跳转链要 4~8 秒，
+真正的 reserve 请求往返只有 200~300 毫秒。图书馆 7:00 才开放**预约**，但**认证**
+接口全天可用（日志里 20:00、22:00 的任务同样能登录成功），所以把登录挪到 6:50
+提前跑完，7:00 直接发预约请求。
+
+安全底线：这里任何一步失败，都只能让抢座退回「7:00 现场登录」的老路径，
+绝不能让当天的预约失败。所以 take() 从不抛异常——拿不到就返回 None，
+调用方照旧自己 new 一个 LibrarySystem。
+"""
+
+import logging
+import os
+import threading
+import time
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+# 预登录总开关。关掉之后 take() 永远返回 None，行为与加这个功能之前完全一致。
+ENABLED = os.getenv("PRELOGIN_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+
+# 会话最长存活时间。正常流程里 6:50 存、7:00 取，只有 10 分钟；
+# 超过这个岁数说明调度出了意外（比如当天的抢座任务压根没跑），一律丢弃重登。
+MAX_AGE_SECONDS = float(os.getenv("PRELOGIN_MAX_AGE_SECONDS", "1800"))
+# 距上次校验/登录不到这么久的会话，take() 直接给，不再问一次服务端。
+# 6:59:30 的复查刚确认过，7:00:00 再校验一遍纯属多花一个来回；2026-09-11 那次
+# webvpn 恰好卡了 5 秒，两个账号就是被这次多余的校验拖到 11 秒后才开枪。
+# 真失效了也不怕：下单请求会认出「会话失效」并现场重登（见 LibrarySystem.reserve_seat）。
+VERIFY_FRESH_SECONDS = float(os.getenv("PRELOGIN_VERIFY_FRESH_SECONDS", "120"))
+
+# pid -> (library, 存入时刻, 最近一次确认有效的时刻)
+_pool: Dict[str, Tuple[Any, float, float]] = {}
+_lock = threading.Lock()
+
+
+def _log(level: str, user: str, operation: str, message: str) -> None:
+    getattr(logger, level)(message, extra={'user': user, 'operation': operation})
+
+
+def store(pid: str, library: Any) -> None:
+    """存入一个已完成登录（或刚刚成功用过）的 LibrarySystem。"""
+    now = time.monotonic()
+    with _lock:
+        _pool[pid] = (library, now, now)
+
+
+def discard(pid: str) -> None:
+    """丢弃某个账号的预登录会话。"""
+    with _lock:
+        _pool.pop(pid, None)
+
+
+def clear(keep: Optional[Iterable[str]] = None) -> None:
+    """
+    清空池子。抢座跑完必须调用，避免过期会话漏进后面的任务。
+
+    keep 里的账号留下——那是还有段在排队补约的人，会话留给补约 job 复用。
+    """
+    kept = set(keep or ())
+    with _lock:
+        dropped = [pid for pid in _pool if pid not in kept]
+        for pid in dropped:
+            _pool.pop(pid, None)
+    if dropped:
+        _log('info', '系统', '预登录',
+             f"已清空预登录会话池（{len(dropped)} 个" + (f"，留下 {len(kept)} 个给补约）" if kept else "）"))
+
+
+def pooled_pids() -> List[str]:
+    """当前池中的账号列表（快照）。"""
+    with _lock:
+        return list(_pool)
+
+
+def _pop_fresh(pid: str) -> Optional[Tuple[Any, float]]:
+    """取出会话并做岁数检查；过期的直接丢掉。返回 (会话, 最近确认有效的时刻)。"""
+    with _lock:
+        entry = _pool.pop(pid, None)
+    if entry is None:
+        return None
+    library, stored_at, verified_at = entry
+    age = time.monotonic() - stored_at
+    if age > MAX_AGE_SECONDS:
+        _log('warning', pid, '预登录',
+             f"预登录会话已存放 {age:.0f} 秒，超过上限 {MAX_AGE_SECONDS:.0f} 秒，丢弃重登")
+        return None
+    return library, verified_at
+
+
+def is_alive(pid: str) -> bool:
+    """
+    校验池中会话是否仍然有效，失效的顺手清出池子。
+
+    给 7:00 前 30 秒的复查任务用：这时候发现会话死了还来得及重登，
+    比等到 7:00:00 才发现要从容得多。
+    """
+    entry = _pop_fresh(pid)
+    if entry is None:
+        return False
+    library, _ = entry
+    if not _verify(pid, library):
+        return False
+    store(pid, library)
+    return True
+
+
+def take(pid: str) -> Optional[Any]:
+    """
+    取出可用的预登录会话；没有、过期或已失效都返回 None。
+
+    VERIFY_FRESH_SECONDS 内刚确认过有效的会话直接给，不再问服务端；
+    更久没确认的才发一次 userInfo 校验。
+
+    这个函数在 7:00:00 的关键路径上，任何异常都必须被吞掉——
+    宁可退回现场登录慢 8 秒，也不能让预约直接崩掉。
+    """
+    if not ENABLED:
+        return None
+    try:
+        entry = _pop_fresh(pid)
+        if entry is None:
+            return None
+        library, verified_at = entry
+        if time.monotonic() - verified_at <= VERIFY_FRESH_SECONDS:
+            return library
+        if not _verify(pid, library):
+            return None
+        return library
+    except Exception as exc:  # pragma: no cover - 兜底，理论上 _verify 已吞完异常
+        _log('warning', pid, '预登录', f"取用预登录会话异常，回退现场登录: {exc}")
+        return None
+
+
+def _verify(pid: str, library: Any) -> bool:
+    """一次轻量的 userInfo 请求（~200ms），确认会话没被服务端踢掉。"""
+    try:
+        if library.verify_session():
+            return True
+        _log('warning', pid, '预登录', "预登录会话已失效，回退到现场登录")
+        return False
+    except Exception as exc:
+        _log('warning', pid, '预登录', f"校验预登录会话异常，回退现场登录: {exc}")
+        return False

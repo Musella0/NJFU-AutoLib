@@ -1,0 +1,3861 @@
+// ============ AutoLib · 手绘风 UI · 前端逻辑 ============
+
+const state = {
+  page: 'home',
+  tmrOpen: false,
+  noticesCollapsed: false,
+  isGuest: true,
+  uid: '',
+  nickname: '',       // 可选显示名，覆盖 uid 显示
+  accounts: [],       // list of account summaries
+  currentPid: '',     // currently selected pid
+  currentCfg: null,   // full detail for currentPid
+  allSeats: {},       // { zone: [seatName, ...] }
+  todayResv: null,    // today's live reservation (if any)
+  tomorrowResv: null, // tomorrow's live reservation (if any)
+  cfgMode: 'week',    // UI: 'week' or 'simple'
+  napConfig: { start_time: '14:00', end_time: '', seat: '', auto_daily: false, trigger_time: '12:00' },
+  pendingAnnouncementPopup: null,
+};
+
+// 午休功能总开关。已入座的预约现在走「提前结束」接口释放，可以用了；
+// 上游接口再变就把这里改回 true，所有入口会自动拆掉，后端 NAP_ENABLED=0 兜底。
+const NAP_DISABLED = false;
+const NAP_WIP_TEXT = '施工中 🚧';
+
+// 首次使用的欢迎弹窗。key 带版本号：以后加了大功能把 v1 改成 v2，老用户会再看到一次。
+const WELCOME_KEY = 'autolib_welcome_ack_v1';
+
+const WEEK_LABELS = ['一','二','三','四','五','六','日']; // iso 1..7
+const WEEK_DEFAULTS = ['08:00-22:00','08:00-22:00','08:00-22:00','08:00-22:00','08:00-20:00','08:00-22:00','08:00-22:00'];
+// 抢座优先级最多 3 个：再往下排也轮不到，后端 MAX_SEAT_LIST 同值
+const MAX_SEATS = 3;
+
+const TIME_MIN = '08:00';
+const TIME_MAX_DEFAULT = '22:00';
+const TIME_MAX_FRIDAY = '20:00';
+
+function defaultWeekTime(){
+  const week_time = {};
+  WEEK_DEFAULTS.forEach((segment, index) => { week_time[String(index + 1)] = [segment]; });
+  return { week_time };
+}
+
+// iso weekday 1..7 (Fri=5). Pass null/undefined for generic 08-22 range.
+function timeBounds(isoDay){
+  const max = isoDay === 5 ? TIME_MAX_FRIDAY : TIME_MAX_DEFAULT;
+  return { min: TIME_MIN, max };
+}
+function clampTime(t, min, max){
+  if(!t) return min;
+  if(t < min) return min;
+  if(t > max) return max;
+  return t;
+}
+function clampRange(s, e, isoDay){
+  const { min, max } = timeBounds(isoDay);
+  let cs = clampTime(s, min, max);
+  let ce = clampTime(e, min, max);
+  if(cs >= ce){ cs = min; ce = max; }
+  return [cs, ce];
+}
+
+// 30 分钟档位，返回 [min, max] 闭区间内所有 "HH:MM"
+function buildTimeOptions(min, max){
+  const toMin = t => {
+    const [h, m] = t.split(':').map(Number);
+    return h * 60 + m;
+  };
+  const fmt = n => `${String(Math.floor(n/60)).padStart(2,'0')}:${String(n%60).padStart(2,'0')}`;
+  const lo = toMin(min), hi = toMin(max);
+  const opts = [];
+  for(let m = lo; m <= hi; m += 30) opts.push(fmt(m));
+  return opts;
+}
+
+// 生成 <option> HTML；selected 不在列表里时向下对齐到 ≤ selected 的最大档位
+function timeOptionsHtml(min, max, selected){
+  const opts = buildTimeOptions(min, max);
+  let pick = selected;
+  if(!opts.includes(pick)){
+    pick = opts[0];
+    for(const o of opts){ if(o <= selected) pick = o; else break; }
+  }
+  return opts.map(o => `<option value="${o}"${o===pick?' selected':''}>${o}</option>`).join('');
+}
+
+// 将 time 配置值规范为段字符串数组 ["HH:MM-HH:MM", ...]
+// - 字符串 "HH:MM-HH:MM" → 单段数组
+// - 数组 → 过滤掉无效/休息项
+// - "休息" / "off" / 空 → []
+function toSegments(raw){
+  if(!raw) return [];
+  if(Array.isArray(raw)){
+    return raw.filter(x => typeof x === 'string' && x !== '休息' && x !== 'off' && /^\d\d:\d\d-\d\d:\d\d$/.test(x));
+  }
+  if(typeof raw === 'string'){
+    if(raw === '休息' || raw === 'off') return [];
+    if(/^\d\d:\d\d-\d\d:\d\d$/.test(raw)) return [raw];
+  }
+  return [];
+}
+// 周五 20:00 关闭
+function friCap(seg){
+  const [s, e] = seg.split('-');
+  if(e && e > '20:00') return `${s}-20:00`;
+  return seg;
+}
+
+// ---------- helpers ----------
+function $(id){ return document.getElementById(id); }
+function escHtml(s){ return (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// 公告正文走 Markdown（markdown.js），渲染器没加载上就退回纯文本
+function mdHtml(s){
+  if(typeof renderMarkdown === 'function') return renderMarkdown(s);
+  return `<div style="white-space:pre-wrap">${escHtml(s)}</div>`;
+}
+
+function toast(msg, type='info'){
+  const box = $('toasts');
+  const el = document.createElement('div');
+  el.className = 'toast ' + (type==='success'?'ok':type==='error'?'err':'');
+  el.textContent = msg;
+  box.appendChild(el);
+  setTimeout(()=>{ el.style.opacity='0'; setTimeout(()=>el.remove(), 300); }, 2800);
+}
+
+// 非 https 下没有 clipboard API，退回老掉牙的 execCommand
+async function copyPlain(text){
+  if(navigator.clipboard && window.isSecureContext){
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  const ok = document.execCommand('copy');
+  ta.remove();
+  if(!ok) throw new Error('copy failed');
+}
+
+// 联系方式那几行。条目由后端按环境变量渲染，这里只认 data-kind
+async function onContact(row){
+  const el = row.querySelector('.contact-value');
+  const val = (el ? el.textContent : '').trim();
+  if(!val) return;
+  const kind = row.dataset.kind;
+  if(kind === 'github'){
+    window.open(row.dataset.href || ('https://' + val), '_blank', 'noopener');
+    return;
+  }
+  const label = kind === 'qq' ? 'QQ' : '邮箱';
+  try{
+    await copyPlain(val);
+    toast(label + '已复制：' + val, 'success');
+  }catch(e){
+    if(kind === 'email') location.href = 'mailto:' + val;
+    else toast('复制失败了，' + label + '：' + val, 'error');
+  }
+}
+
+// ---------- 登录令牌 ----------
+// Cookie 不是所有环境都存得下：Safari 在明文 HTTP 页面上会直接丢弃带 Secure 标记的
+// 会话 Cookie，无痕模式和部分 WebView 同理。验证接口除了种 Cookie 还会回一个令牌，
+// 存下来挂在 Authorization 头上，后端两条路都认。
+const TOKEN_KEY = 'autolib_token';
+function getToken(){
+  try{ return localStorage.getItem(TOKEN_KEY) || ''; }catch(e){ return ''; }
+}
+function setToken(t){
+  try{
+    if(t) localStorage.setItem(TOKEN_KEY, t);
+    else localStorage.removeItem(TOKEN_KEY);
+  }catch(e){}
+}
+
+async function api(path, opts={}){
+  const options = Object.assign({}, opts);
+  options.credentials = options.credentials || 'same-origin';
+  if(options.body && typeof options.body === 'object'){
+    options.headers = Object.assign({'Content-Type':'application/json'}, options.headers || {});
+    options.body = JSON.stringify(options.body);
+  }
+  const token = getToken();
+  if(token){
+    options.headers = Object.assign({}, options.headers || {}, { 'Authorization': 'Bearer ' + token });
+  }
+  const r = await fetch(path, options);
+  let data = null;
+  try { data = await r.json(); } catch(e){}
+  return { ok: r.ok, status: r.status, data: data || {} };
+}
+
+// ---------- navigation ----------
+function go(p){
+  state.page = p;
+  document.querySelectorAll('.page').forEach(x => x.classList.remove('show'));
+  $('page-'+p).classList.add('show');
+  document.querySelectorAll('.bnav > button').forEach(b => b.classList.toggle('on', b.dataset.tab === p));
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+// ---------- auth ----------
+async function checkAuth(){
+  try{
+    const { data } = await api('/api/auth/me');
+    if(data.logged_in){
+      state.isGuest = false;
+      state.uid = data.uid;
+      state.nickname = data.nickname || '';
+    }else{
+      // 服务端不认这个身份了（令牌过期或已吊销），留着只会每个请求都吃 401。
+      setToken('');
+      state.isGuest = true;
+      state.uid = data.uid || '';
+      state.nickname = '';
+    }
+  }catch(e){
+    state.isGuest = true;
+  }
+  updateAuthUI();
+}
+
+function updateAuthUI(){
+  const hello = $('hello');
+  const dt = new Date();
+  const wd = ['SUN','MON','TUE','WED','THU','FRI','SAT'][dt.getDay()];
+  const mo = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][dt.getMonth()];
+  $('date').textContent = `${wd} · ${mo} ${dt.getDate()} · ${dt.getFullYear()}`;
+
+  const profileBtn = $('settings-profile-btn');
+  if(state.isGuest){
+    hello.textContent = '您好，同学 ☕';
+    $('settings-uid').textContent = '游客';
+    $('settings-accounts-meta').textContent = '游客模式 · 仅可浏览，添加学号即登录';
+    if(profileBtn) profileBtn.style.display = 'none';
+    $('logout-card').style.display = 'none';
+  }else{
+    const name = state.nickname || state.uid;
+    hello.textContent = `您好，${name} ☕`;
+    $('settings-uid').textContent = name;
+    const subMeta = state.nickname
+      ? `已登录 · @${state.uid}`
+      : `已登录 · ${state.uid}`;
+    $('settings-accounts-meta').textContent = subMeta;
+    if(profileBtn) profileBtn.style.display = '';
+    $('logout-card').style.display = '';
+  }
+}
+
+async function saveProfile(){
+  const nick = $('pf-nick').value.trim();
+  const nickChanged = nick !== (state.nickname || '');
+  if(!nickChanged){
+    toast('没有要更新的内容','info');
+    return;
+  }
+  const body = { nickname: nick };
+  const { ok, data } = await api('/api/auth/profile', { method:'POST', body });
+  if(ok){
+    state.nickname = data.nickname || '';
+    toast(data.message || '已保存','success');
+    closeSheet();
+    updateAuthUI();
+  }else{
+    toast(data.error || '保存失败','error');
+  }
+}
+
+async function doLogout(){
+  await flushCfgAutosave();
+  await api('/api/auth/logout', { method:'POST' });
+  setToken('');
+  state.isGuest = true;
+  state.uid = '';
+  state.nickname = '';
+  state.accounts = [];
+  state.currentPid = '';
+  state.currentCfg = null;
+  state.todayResv = null;
+  updateAuthUI();
+  renderAllAccountViews();
+  renderHome();
+  toast('已退出','info');
+}
+
+// ---------- accounts ----------
+async function loadAccounts(){
+  try{
+    const { ok, data } = await api('/api/my/accounts');
+    if(ok){
+      state.accounts = Array.isArray(data) ? data : [];
+      if(!state.currentPid && state.accounts.length){
+        state.currentPid = state.accounts[0].pid;
+      }
+      if(state.currentPid && !state.accounts.find(a => a.pid === state.currentPid)){
+        state.currentPid = state.accounts.length ? state.accounts[0].pid : '';
+      }
+    }else{
+      state.accounts = [];
+    }
+  }catch(e){
+    state.accounts = [];
+  }
+  renderAllAccountViews();
+  if(state.currentPid){
+    await loadAccountDetail(state.currentPid);
+  }else{
+    state.currentCfg = null;
+    renderConfig();
+    renderHome();
+  }
+}
+
+function renderAllAccountViews(){
+  const chip = $('pid-text');
+  if(state.currentPid){
+    chip.textContent = state.currentPid;
+  }else{
+    chip.textContent = '未添加';
+  }
+  const dot = $('pid-dot');
+  if(dot){
+    const a = state.accounts.find(x => x.pid === state.currentPid);
+    const on = a && a.is_reserved === 'True';
+    dot.classList.toggle('off', !on);
+  }
+  updateAuthUI();
+}
+
+async function loadAccountDetail(pid){
+  // 今日/明日预约要现场登录图书馆，是首屏最慢的一步。配置详情、午休配置和它
+  // 互不依赖，三个请求一起发，不再一个等一个（分机部署时每个请求都要过一趟跨境隧道）。
+  prefetchReservations(pid);
+  const [detail] = await Promise.all([
+    api(`/api/my/accounts/${encodeURIComponent(pid)}`).catch(() => ({ ok:false, data:{} })),
+    loadNapConfig(),
+  ]);
+  if(detail.ok && detail.data && detail.data.pid){
+    state.currentCfg = detail.data;
+  }else{
+    state.currentCfg = null;
+  }
+  renderConfig();
+  renderHome();
+  loadReservations();
+}
+
+async function pickAcct(pid){
+  await flushCfgAutosave();
+  state.currentPid = pid;
+  toast('已切换到 ' + pid, 'success');
+  closeSheet();
+  renderAllAccountViews();
+  loadAccountDetail(pid);
+}
+
+async function deleteAcct(pid){
+  if(!confirm(`确定删除学号 ${pid}？`)) return;
+  const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(pid)}`, { method:'DELETE' });
+  if(ok){
+    toast('已删除','success');
+    if(state.currentPid === pid) state.currentPid = '';
+    await loadAccounts();
+    openSheet('accounts');
+  }else{
+    toast(data.error || '删除失败','error');
+  }
+}
+
+async function verifyAdd(){
+  const pidEl = $('new-pid'), vpnEl = $('new-vpn');
+  const pid = pidEl.value.trim(), vpn = vpnEl.value;
+  if(!pid){ toast('请输入学号','error'); return; }
+  if(!vpn){ toast('请填写统一身份认证密码','error'); return; }
+
+  const btn = $('btn-verify-add');
+  btn.disabled = true;
+  btn.textContent = '验证中...';
+
+  // Step 1: verify credentials before saving
+  const vres = await api(`/api/my/accounts/${encodeURIComponent(pid)}/verify`, {
+    method:'POST',
+    body:{ vpn_password: vpn }
+  });
+  if(!vres.ok || vres.data.verified !== true){
+    btn.disabled = false;
+    btn.textContent = '验证并保存';
+    // 学校服务异常时后端可能凭本地缓存放行：仍然进入登录态，只是未验证。
+    if(vres.data.offline && vres.data.logged_in && vres.data.uid){
+      setToken(vres.data.token || '');
+      state.isGuest = false;
+      state.uid = vres.data.uid;
+      state.currentPid = pid;
+      toast(vres.data.error || '已使用本地缓存登录','info');
+      closeSheet();
+      await loadAccounts();
+      return;
+    }
+    toast(vres.data.error || '验证失败','error');
+    return;
+  }
+
+  // 验证接口会原子地登录并创建/恢复配置。令牌先存下来，再复核一次登录态，
+  // 避免 Cookie 和令牌都没落地时继续发保存请求、制造游客数据。
+  setToken(vres.data.token || '');
+  const auth = await api('/api/auth/me');
+  if(!auth.ok || !auth.data.logged_in || auth.data.uid !== pid){
+    btn.disabled = false;
+    btn.textContent = '验证并保存';
+    toast('验证成功，但本机没能保存登录状态，请检查浏览器是否禁用了 Cookie 和本地存储','error');
+    return;
+  }
+  state.isGuest = false;
+  state.uid = auth.data.uid;
+  state.nickname = auth.data.nickname || '';
+  state.currentPid = pid;
+  await loadAccounts();
+  btn.disabled = false;
+  btn.textContent = '验证并保存';
+  if(state.accounts.some(a => a.pid === pid)){
+    toast('已登录并恢复学号 ' + pid + ' 的配置','success');
+    closeSheet();
+  }else{
+    toast('已登录，但配置恢复失败，请稍后刷新重试','error');
+  }
+}
+
+// ---------- config ----------
+function renderConfig(){
+  const cfg = state.currentCfg;
+  if(!cfg){
+    $('cfg-empty').style.display = '';
+    $('cfg-form').style.display = 'none';
+    return;
+  }
+  $('cfg-empty').style.display = 'none';
+  $('cfg-form').style.display = '';
+
+  const mode = cfg.mode || 'week_time';
+  state.cfgMode = (mode === 'week_time') ? 'week' : 'simple';
+  document.querySelectorAll('#page-config .seg > button').forEach(b => {
+    b.classList.toggle('on', b.dataset.mode === state.cfgMode);
+  });
+  $('week-mode').style.display = state.cfgMode === 'week' ? '' : 'none';
+  $('simple-mode').style.display = state.cfgMode === 'simple' ? '' : 'none';
+
+  // Week grid
+  buildWeekGrid(cfg.time && cfg.time.week_time);
+
+  // Simple mode (支持多段)
+  const simpleList = $('simple-seg-list');
+  if(simpleList){
+    let simpleSegs = toSegments(cfg.time && cfg.time.tomorrow);
+    if(!simpleSegs.length) simpleSegs = ['08:00-22:00'];
+    simpleList.innerHTML = simpleSegs.map(simpleSegRowHtml).join('');
+    simpleList.onchange = () => scheduleCfgAutosave();
+  }
+
+  // Seats
+  renderCfgSeats();
+
+  // Toggles
+  $('cfg-toggle-reserve').classList.toggle('on', cfg.is_reserved === 'True');
+  $('cfg-toggle-lp').classList.toggle('on', cfg.late_protection === 'True');
+  $('cfg-toggle-nap').classList.toggle('on', !NAP_DISABLED && !!(state.napConfig && state.napConfig.auto_daily));
+  $('cfg-toggle-study').classList.toggle('on', !!cfg.study_time_consent);
+  $('study-sync-row').style.display = cfg.study_time_consent ? '' : 'none';
+
+  $('cfg-lp-mode').value = cfg.late_protection_mode === 'cancel' ? 'cancel' : 'shift';
+  syncLPModeRow();
+
+  $('cfg-pid-label').textContent = cfg.pid;
+  $('cfg-verify-badge').textContent = cfg.verified ? '✓ 已验证' : '⚠ 未验证';
+  $('cfg-verify-badge').className = 'pill ' + (cfg.verified ? 'ok' : 'warn');
+  renderCredentialBanner('cred-banner-config', false);
+
+  $('email-label').textContent = emailLabelText(cfg.notify_email, cfg.notify_mode);
+}
+
+function segmentRowHtml(seg, isoDay, disabled){
+  const [rs, re] = seg.split('-');
+  const [s, e] = clampRange(rs, re, isoDay);
+  const { min, max } = timeBounds(isoDay);
+  return `
+    <div class="seg-row" data-seg>
+      <select class="time-input" data-field="start" ${disabled?'disabled':''} style="padding:4px 8px;font-size:13px">${timeOptionsHtml(min, max, s)}</select>
+      <span class="to">→</span>
+      <select class="time-input" data-field="end" ${disabled?'disabled':''} style="padding:4px 8px;font-size:13px">${timeOptionsHtml(min, max, e)}</select>
+      <button type="button" class="btn sm ghost seg-del" onclick="removeSeg(this)" ${disabled?'disabled':''}>×</button>
+    </div>`;
+}
+
+function buildWeekGrid(weekTime){
+  const grid = $('week-grid');
+  grid.innerHTML = '';
+  for(let i = 1; i <= 7; i++){
+    const key = String(i);
+    const rawVal = weekTime && weekTime[key];
+    const isOff = rawVal === '休息' || rawVal === 'off';
+    let segs = toSegments(rawVal);
+    if(!segs.length) segs = [WEEK_DEFAULTS[i-1]];
+    const row = document.createElement('div');
+    row.className = 'box tight';
+    row.dataset.day = i;
+    row.innerHTML = `
+      <div class="row-between">
+        <div class="row-flex" style="gap:8px">
+          <div class="toggle ${isOff?'':'on'}" data-field="day-on" onclick="tToggle(this, event)"></div>
+          <div class="sub" style="font-weight:700">周${WEEK_LABELS[i-1]}${i===5?' <span class="tiny" style="color:var(--ink3)">· 最晚 20:00</span>':''}</div>
+        </div>
+        <button type="button" class="btn sm ghost" data-field="seg-add" onclick="addSeg(this)" ${isOff?'disabled':''}>+ 加时段</button>
+      </div>
+      <div class="seg-list mt" data-field="seg-list">
+        ${segs.map(s => segmentRowHtml(s, i, isOff)).join('')}
+      </div>`;
+    grid.appendChild(row);
+  }
+  // 日 toggle 启用/停用时间输入与 + 按钮
+  grid.querySelectorAll('[data-field="day-on"]').forEach(tg => {
+    tg.addEventListener('click', () => {
+      const row = tg.closest('[data-day]');
+      const isOn = tg.classList.contains('on');
+      row.querySelectorAll('[data-field="start"], [data-field="end"]').forEach(inp => inp.disabled = !isOn);
+      row.querySelectorAll('[data-field="seg-add"], .seg-del').forEach(b => b.disabled = !isOn);
+      scheduleCfgAutosave();
+    });
+  });
+  grid.onchange = () => scheduleCfgAutosave();
+}
+
+function addSeg(btn){
+  const row = btn.closest('[data-day]');
+  if(!row) return;
+  const isoDay = parseInt(row.dataset.day, 10);
+  const list = row.querySelector('[data-field="seg-list"]');
+  // 新段默认用该天的默认时段
+  list.insertAdjacentHTML('beforeend', segmentRowHtml(WEEK_DEFAULTS[isoDay-1], isoDay, false));
+  scheduleCfgAutosave();
+}
+
+function removeSeg(btn){
+  const row = btn.closest('[data-day]');
+  if(!row) return;
+  const list = row.querySelector('[data-field="seg-list"]');
+  const segs = list.querySelectorAll('[data-seg]');
+  if(segs.length <= 1){
+    toast('至少保留一段，关闭当天请用左侧开关','info');
+    return;
+  }
+  btn.closest('[data-seg]').remove();
+  scheduleCfgAutosave();
+}
+
+function addSimpleSeg(){
+  const list = $('simple-seg-list');
+  if(!list) return;
+  list.insertAdjacentHTML('beforeend', simpleSegRowHtml('08:00-22:00'));
+  scheduleCfgAutosave();
+}
+
+function removeSimpleSeg(btn){
+  const list = $('simple-seg-list');
+  if(!list) return;
+  const segs = list.querySelectorAll('[data-seg]');
+  if(segs.length <= 1){
+    toast('至少保留一段','info');
+    return;
+  }
+  btn.closest('[data-seg]').remove();
+  scheduleCfgAutosave();
+}
+
+function simpleSegRowHtml(seg){
+  const [rs, re] = seg.split('-');
+  const [s, e] = clampRange(rs, re, null);
+  return `
+    <div class="seg-row" data-seg>
+      <select class="time-input" data-field="start">${timeOptionsHtml(TIME_MIN, TIME_MAX_DEFAULT, s)}</select>
+      <span class="to">→</span>
+      <select class="time-input" data-field="end">${timeOptionsHtml(TIME_MIN, TIME_MAX_DEFAULT, e)}</select>
+      <button type="button" class="btn sm ghost seg-del" onclick="removeSimpleSeg(this)">×</button>
+    </div>`;
+}
+
+function renderCfgSeats(){
+  const list = $('cfg-seats');
+  list.innerHTML = '';
+  const seats = (state.currentCfg && state.currentCfg.seat_list) || [];
+  seats.forEach((s, i) => {
+    const chip = document.createElement('span');
+    chip.className = 'chip draggable';
+    chip.dataset.idx = i;
+    chip.innerHTML = `<span class="grip">⋮⋮</span><span class="ord">${i+1}</span>${escHtml(s)}<span class="x" onclick="removeCfgSeat(${i})">×</span>`;
+    chip.addEventListener('pointerdown', onSeatPointerDown);
+    list.appendChild(chip);
+  });
+  const add = document.createElement('span');
+  if(seats.length >= MAX_SEATS){
+    add.className = 'chip add disabled';
+    add.textContent = `最多 ${MAX_SEATS} 个`;
+  }else{
+    add.className = 'chip add';
+    add.textContent = '+ 加座位';
+    add.onclick = () => openSheet('seat-picker');
+  }
+  list.appendChild(add);
+}
+
+function removeCfgSeat(i){
+  if(!state.currentCfg) return;
+  state.currentCfg.seat_list = (state.currentCfg.seat_list || []).filter((_, idx) => idx !== i);
+  renderCfgSeats();
+  persistSeatList();
+}
+
+// ---------- seat priority drag-to-reorder ----------
+let _seatDrag = null;
+
+function onSeatPointerDown(e){
+  if(e.target && e.target.classList && e.target.classList.contains('x')) return;
+  if(e.pointerType === 'mouse' && e.button !== 0) return;
+  const chip = e.currentTarget;
+  _seatDrag = {
+    startX: e.clientX, startY: e.clientY,
+    chip, list: chip.parentElement,
+    idx: parseInt(chip.dataset.idx, 10),
+    overIdx: null,
+    started: false,
+    pointerId: e.pointerId,
+  };
+  document.addEventListener('pointermove', onSeatPointerMove);
+  document.addEventListener('pointerup', onSeatPointerUp);
+  document.addEventListener('pointercancel', onSeatPointerUp);
+}
+
+function onSeatPointerMove(e){
+  if(!_seatDrag || e.pointerId !== _seatDrag.pointerId) return;
+  const dx = e.clientX - _seatDrag.startX;
+  const dy = e.clientY - _seatDrag.startY;
+  if(!_seatDrag.started){
+    if(Math.hypot(dx, dy) < 5) return;
+    _seatDrag.started = true;
+    _seatDrag.chip.classList.add('dragging');
+    try{ _seatDrag.chip.setPointerCapture(_seatDrag.pointerId); }catch(_){}
+  }
+  if(e.cancelable) e.preventDefault();
+  // chip 跟随指针，避免遮挡命中检测
+  _seatDrag.chip.style.transform = `translate(${dx}px, ${dy}px) scale(1.05)`;
+  _seatDrag.chip.style.pointerEvents = 'none';
+  const els = document.elementsFromPoint(e.clientX, e.clientY);
+  let over = null;
+  for(const el of els){
+    if(el.classList && el.classList.contains('chip') && el.parentElement === _seatDrag.list && el !== _seatDrag.chip && !el.classList.contains('add')){
+      over = el; break;
+    }
+  }
+  _seatDrag.list.querySelectorAll('.chip.drag-over').forEach(c => c.classList.remove('drag-over'));
+  if(over){
+    over.classList.add('drag-over');
+    _seatDrag.overIdx = parseInt(over.dataset.idx, 10);
+  }else{
+    _seatDrag.overIdx = null;
+  }
+}
+
+function onSeatPointerUp(e){
+  if(!_seatDrag || e.pointerId !== _seatDrag.pointerId) return;
+  document.removeEventListener('pointermove', onSeatPointerMove);
+  document.removeEventListener('pointerup', onSeatPointerUp);
+  document.removeEventListener('pointercancel', onSeatPointerUp);
+  const { chip, started, idx, overIdx, list } = _seatDrag;
+  chip.classList.remove('dragging');
+  chip.style.transform = '';
+  chip.style.pointerEvents = '';
+  list.querySelectorAll('.chip.drag-over').forEach(c => c.classList.remove('drag-over'));
+  _seatDrag = null;
+  if(!started || overIdx === null || overIdx === idx) return;
+  const arr = (state.currentCfg && state.currentCfg.seat_list) || [];
+  if(idx < 0 || idx >= arr.length || overIdx < 0 || overIdx >= arr.length) return;
+  const [moved] = arr.splice(idx, 1);
+  arr.splice(overIdx, 0, moved);
+  renderCfgSeats();
+  persistSeatList();
+}
+
+function setCfgMode(m){
+  state.cfgMode = m;
+  document.querySelectorAll('#page-config .seg > button').forEach(b => {
+    b.classList.toggle('on', b.dataset.mode === m);
+  });
+  $('week-mode').style.display = m === 'week' ? '' : 'none';
+  $('simple-mode').style.display = m === 'simple' ? '' : 'none';
+  scheduleCfgAutosave();
+}
+
+let cfgAutosaveTimer = null;
+let seatSaveChain = Promise.resolve();
+
+function scheduleCfgAutosave(){
+  if(!state.currentPid || !state.currentCfg) return;
+  clearTimeout(cfgAutosaveTimer);
+  cfgAutosaveTimer = setTimeout(() => saveCfg({ silent: true }), 700);
+}
+
+function persistSeatList(){
+  if(!state.currentPid || !state.currentCfg) return Promise.resolve(false);
+
+  // Capture both values now. Serialising requests prevents a quick sequence of
+  // add/remove/reorder operations from reaching MongoDB out of order.
+  const pid = state.currentPid;
+  const seats = [...(state.currentCfg.seat_list || [])];
+  seatSaveChain = seatSaveChain
+    .catch(() => false)
+    .then(async () => {
+      const { ok, data } = await api(
+        `/api/my/accounts/${encodeURIComponent(pid)}`,
+        { method:'POST', body:{ seat_list: seats } },
+      );
+      if(ok){
+        const summary = state.accounts.find(account => account.pid === pid);
+        if(summary) summary.seat_list = [...seats];
+        return true;
+      }
+      toast('座位保存失败：' + (data.error || '请稍后重试'), 'error');
+      return false;
+    });
+  return seatSaveChain;
+}
+
+async function flushCfgAutosave(){
+  if(cfgAutosaveTimer){
+    clearTimeout(cfgAutosaveTimer);
+    cfgAutosaveTimer = null;
+    await saveCfg({ silent: true });
+  }
+  await seatSaveChain.catch(() => false);
+}
+
+async function saveCfg(options = {}){
+  const silent = options && options.silent === true;
+  clearTimeout(cfgAutosaveTimer);
+  cfgAutosaveTimer = null;
+  if(!state.currentPid || !state.currentCfg){
+    if(!silent){
+      toast('请先添加学号','error');
+      openSheet('accounts');
+    }
+    return;
+  }
+
+  // 收集 week grid（每天为段数组，周五结束时间最晚 20:00）
+  const wt = {};
+  document.querySelectorAll('#week-grid [data-day]').forEach(row => {
+    const day = parseInt(row.dataset.day, 10);
+    const on = row.querySelector('[data-field="day-on"]').classList.contains('on');
+    if(!on){
+      wt[day] = '休息';
+      return;
+    }
+    const segs = [];
+    row.querySelectorAll('[data-seg]').forEach(seg => {
+      const s = seg.querySelector('[data-field="start"]').value;
+      const e = seg.querySelector('[data-field="end"]').value;
+      const [cs, ce] = clampRange(s, e, day);
+      segs.push(`${cs}-${ce}`);
+    });
+    wt[day] = segs.length ? segs : [WEEK_DEFAULTS[day-1]];
+  });
+
+  const mode = state.cfgMode === 'week' ? 'week_time' : 'tomorrow';
+  let simpleSegs = [];
+  if(mode === 'tomorrow'){
+    document.querySelectorAll('#simple-seg-list [data-seg]').forEach(seg => {
+      const s = seg.querySelector('[data-field="start"]').value;
+      const e = seg.querySelector('[data-field="end"]').value;
+      const [cs, ce] = clampRange(s, e, null);
+      simpleSegs.push(`${cs}-${ce}`);
+    });
+    if(!simpleSegs.length) simpleSegs = ['08:00-22:00'];
+  }
+  const timeCfg = mode === 'week_time'
+    ? { week_time: wt }
+    : { tomorrow: simpleSegs, week_time: wt };
+
+  const body = {
+    seat_list: state.currentCfg.seat_list || [],
+    mode,
+    time: timeCfg,
+    is_reserved: $('cfg-toggle-reserve').classList.contains('on') ? 'True' : 'False',
+    late_protection: $('cfg-toggle-lp').classList.contains('on') ? 'True' : 'False',
+    late_protection_mode: ($('cfg-lp-mode') || {}).value === 'cancel' ? 'cancel' : 'shift',
+  };
+  const btn = $('btn-save-cfg');
+  if(!silent){
+    btn.disabled = true;
+    btn.textContent = '保存中...';
+  }
+  const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}`, { method:'POST', body });
+  if(ok && !silent && !NAP_DISABLED){
+    const napAuto = $('cfg-toggle-nap').classList.contains('on');
+    if(!state.napConfig || state.napConfig.auto_daily !== napAuto){
+      const newNap = { ...(state.napConfig || {}), auto_daily: napAuto };
+      await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/nap_config`,
+        { method:'POST', body: newNap });
+      state.napConfig = newNap;
+    }
+  }
+  if(!silent){
+    btn.disabled = false;
+    btn.textContent = '保存配置';
+  }
+  if(ok){
+    Object.assign(state.currentCfg, body);
+    const summary = state.accounts.find(account => account.pid === state.currentPid);
+    if(summary) Object.assign(summary, body);
+    if(!silent){
+      toast(options.verified ? '验证并保存成功' : '配置已保存','success');
+      await loadAccounts();
+      setTimeout(() => go('home'), 400);
+    }
+  }else{
+    toast((silent ? '自动保存失败：' : '') + (data.error || '保存失败'),'error');
+  }
+}
+
+// 密码只通过学校验证接口更新；普通配置保存永远不接触凭据。
+// /verify 通过时后端自己把 verified 置回 true，这里不用再走 saveCfg。
+async function resetPwd(){
+  if(!state.currentPid || !state.currentCfg){ toast('请先添加学号','error'); return; }
+  const vpn = ($('reset-vpn') || {}).value;
+  if(!vpn){ toast('请填写统一身份认证密码','error'); return; }
+  const btn = $('btn-reset-pwd');
+  btn.disabled = true;
+  btn.textContent = '验证中...';
+  const { ok, data } = await api(
+    `/api/my/accounts/${encodeURIComponent(state.currentPid)}/verify`,
+    { method:'POST', body:{ vpn_password: vpn } },
+  );
+  btn.disabled = false;
+  btn.textContent = '验证并保存';
+  if(!ok || data.verified !== true){
+    toast(data.error || '验证失败','error');
+    return;
+  }
+  setToken(data.token || '');
+  const auth = await api('/api/auth/me');
+  if(!auth.ok || !auth.data.logged_in || auth.data.uid !== state.currentPid){
+    toast('验证成功，但本机没能保存登录状态，请检查浏览器是否禁用了 Cookie 和本地存储','error');
+    return;
+  }
+  closeSheet();
+  state.currentCfg.verified = true;
+  delete state.currentCfg.credential_invalid_at;
+  renderCredentialBanner('cred-banner-config', false);
+  renderCredentialBanner('cred-banner-home', true);
+  $('cfg-verify-badge').textContent = '✓ 已验证';
+  $('cfg-verify-badge').className = 'pill ok';
+  toast('密码已更新并验证通过','success');
+  await loadAccounts();
+}
+
+// ---------- reserve-now sheet ----------
+let _rnSeats = null;
+
+async function openReserveNow(defaultSeat, day){
+  if(!state.currentPid){ toast('请先添加学号','error'); return; }
+  if(!_rnSeats){
+    const { ok, data } = await api('/api/seats');
+    if(!ok || !data.seats){ toast('加载座位列表失败','error'); return; }
+    _rnSeats = data.seats;
+  }
+  // 弹层由模板重建，目标日期存在 state 里给 submitReserveNow 读
+  state.reserveDay = (day === 'tomorrow') ? 'tomorrow' : 'today';
+  openSheet('reserve-now');
+  state.rnTimes = null;   // 只用来接住「去看图再回来」这一趟，下次开弹层还是默认时段
+  const locSel = $('rn-location');
+  if(locSel){
+    locSel.innerHTML = '<option value="">选择区域</option>' +
+      Object.keys(_rnSeats).map(loc => `<option value="${escHtml(loc)}">${escHtml(loc)}</option>`).join('');
+  }
+  const seatList = (state.currentCfg && state.currentCfg.seat_list) || [];
+  const pick = defaultSeat || seatList[0];
+  if(pick) selectRnSeat(pick);
+}
+
+function openSeatMapForReserve(){
+  // 弹层是整块重建的，先把已经填好的时间记下来，选完座位回来照旧
+  const start = $('rn-start'), end = $('rn-end');
+  state.rnTimes = { start: start ? start.value : '', end: end ? end.value : '' };
+  const seat = $('rn-seat');
+  openSeatMap('reserve', seat ? seat.value : '');
+}
+
+function selectRnSeat(seatName){
+  if(!_rnSeats || !seatName) return;
+  let zone = '';
+  for(const [loc, seats] of Object.entries(_rnSeats)){
+    if(seats.includes(seatName)){ zone = loc; break; }
+  }
+  if(!zone){ toast(`未找到「${seatName}」所在区域`,'error'); return; }
+  const locSel = $('rn-location');
+  if(!locSel) return;
+  locSel.value = zone;
+  onRnLocationChange();
+  const seatSel = $('rn-seat');
+  if(seatSel) seatSel.value = seatName;
+}
+
+function onRnLocationChange(){
+  const loc = $('rn-location').value;
+  const seatSel = $('rn-seat');
+  if(!seatSel) return;
+  if(!loc || !_rnSeats || !_rnSeats[loc]){
+    seatSel.innerHTML = '<option value="">请先选区域</option>';
+    return;
+  }
+  seatSel.innerHTML = _rnSeats[loc].map(s => `<option value="${escHtml(s)}">${escHtml(s)}</option>`).join('');
+}
+
+function checkRnDuration(){
+  const start = $('rn-start').value;
+  const end   = $('rn-end').value;
+  const hint  = $('rn-duration-hint');
+  if(!start || !end){ hint.style.display='none'; return; }
+  const [sh,sm] = start.split(':').map(Number);
+  const [eh,em] = end.split(':').map(Number);
+  const dur = (eh*60+em) - (sh*60+sm);
+  if(dur < 120)       { hint.textContent='最短 2 小时'; hint.style.display=''; }
+  else if(dur > 900)  { hint.textContent='最长 15 小时'; hint.style.display=''; }
+  else                { hint.style.display='none'; }
+}
+
+function showReserveResult(msg, success){
+  let body;
+  if(success){
+    const time = (msg.match(/(\d{2}:\d{2})-(\d{2}:\d{2})/) || []);
+    const timeStr = time[1] ? `${time[1]} – ${time[2]}` : '';
+    // 新格式：✅ 08-08 · 08:30-22:00 · 3F-C109 · 预约成功；旧格式：… 新增成功 三层C区 3F-C109
+    const locMatch = msg.match(/(\d+F-[A-Z]\d+)/) || msg.match(/新增成功\s+(.+)$/);
+    const loc = locMatch ? locMatch[1].trim() : '';
+    body = `
+      <div style="text-align:center;font-size:36px;margin:4px 0 12px">✅</div>
+      <div class="h2" style="text-align:center;margin-bottom:16px">预约成功</div>
+      ${timeStr ? `<div class="row-between box tight ghost"><span class="sub">时段</span><span>${escHtml(timeStr)}</span></div>` : ''}
+      ${loc     ? `<div class="row-between box tight ghost mt"><span class="sub">位置</span><span>${escHtml(loc)}</span></div>` : ''}
+      <button class="btn accent mt-lg" style="width:100%" onclick="closeSheet()">好的</button>`;
+  } else {
+    const details = [];
+    msg.replace(/\n/g, ' ').split(/(?=\d+F-[A-Z]\d+)/).forEach(chunk => {
+      const seat   = (chunk.match(/^(\d+F-[A-Z]\d+)/) || [])[1];
+      const reason = (chunk.match(/预约失败[：:]\s*(.+?)(?:\s{2,}|$)/) || [])[1];
+      if(seat && reason) details.push({ seat, reason: reason.trim() });
+    });
+    body = `
+      <div style="text-align:center;font-size:36px;margin:4px 0 12px">❌</div>
+      <div class="h2" style="text-align:center;margin-bottom:16px">预约失败</div>
+      ${details.length ? details.map(d => `
+        <div class="box tight ghost mt">
+          <div class="row-between"><span class="sub">座位</span><span>${escHtml(d.seat)}</span></div>
+          <div class="row-between mt"><span class="sub">原因</span><span style="color:var(--danger);text-align:right;max-width:68%">${escHtml(d.reason)}</span></div>
+        </div>`).join('') :
+        `<div class="box tight ghost" style="color:var(--ink3);font-size:13px">${escHtml(msg)}</div>`}
+      <button class="btn ghost mt-lg" style="width:100%" onclick="closeSheet()">知道了</button>`;
+  }
+  $('sheet-content').innerHTML = `<div class="grab"></div>${body}`;
+  const sc = $('scrim');
+  sc.classList.remove('center');
+  sc.classList.add('show');
+}
+
+async function submitReserveNow(){
+  if(!state.currentPid){ toast('请先添加学号','error'); return; }
+  const seat  = $('rn-seat').value;
+  const start = $('rn-start').value;
+  const end   = $('rn-end').value;
+  if(!seat)         { toast('请选择座位','error'); return; }
+  if(!start||!end)  { toast('请填写时间','error'); return; }
+  if(start >= end)  { toast('结束时间必须晚于开始时间','error'); return; }
+
+  toast('正在预约…','info');
+  const { ok, data } = await api(
+    `/api/my/accounts/${encodeURIComponent(state.currentPid)}/reserve_custom`,
+    { method:'POST', body: { seat, start_time: start, end_time: end, day: state.reserveDay || 'today' } }
+  );
+  if(ok){
+    closeSheet();
+    loadReservations();
+    loadNotices();
+    showReserveResult(data.result || (data.success ? '预约成功' : '预约完成'), data.success);
+  }else{
+    toast(data.error || '预约失败','error');
+  }
+}
+
+// ---------- reservations (today + tomorrow) ----------
+function localDateStr(offsetDays){
+  const d = new Date(Date.now() + (offsetDays || 0) * 86400000);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+// 提前发出去的预约查询。未验证的账号后端直接 400，不会真去登录图书馆。
+let _resvPrefetch = null;
+function prefetchReservations(pid){
+  _resvPrefetch = {
+    pid,
+    promise: api(`/api/my/accounts/${encodeURIComponent(pid)}/reservations`)
+      .catch(() => ({ ok:false, data:{} })),
+  };
+}
+
+async function loadReservations(){
+  if(!state.currentPid || !state.currentCfg || !state.currentCfg.verified){
+    state.todayResv = null;
+    state.tomorrowResv = null;
+    _resvPrefetch = null;
+    renderHome();
+    return;
+  }
+  renderTodayCard({ loading: true });
+  renderTomorrowCard({ loading: true });
+  try{
+    let req;
+    if(_resvPrefetch && _resvPrefetch.pid === state.currentPid){
+      req = _resvPrefetch.promise;
+      _resvPrefetch = null;
+    }else{
+      req = api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/reservations`);
+    }
+    const { ok, data } = await req;
+    if(ok && Array.isArray(data.reservations)){
+      if(data.late_protect) state.lateProtect = data.late_protect;
+      const todayStr = localDateStr(0);
+      const tmrStr = localDateStr(1);
+      state.todayResv = data.reservations.find(r => (r.resvBeginTime || '').startsWith(todayStr)) || null;
+      state.tomorrowResv = data.reservations.find(r => (r.resvBeginTime || '').startsWith(tmrStr)) || null;
+    }else{
+      state.todayResv = null;
+      state.tomorrowResv = null;
+    }
+  }catch(e){
+    state.todayResv = null;
+    state.tomorrowResv = null;
+  }
+  renderHome();
+}
+
+
+async function doCancel(){
+  closeSheet();
+  if(!state.todayResv){ toast('没有可取消的预约','info'); return; }
+  const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/cancel`, {
+    method:'POST', body:{ uuid: state.todayResv.uuid, resv_status: state.todayResv.resvStatus }
+  });
+  toast(data.message || (ok ? '已取消' : '失败'), (ok && data.success) ? 'success' : 'error');
+  if(ok && data.success){
+    state.todayResv = null;
+    renderHome();
+  }
+}
+
+async function doCancelTomorrow(){
+  closeSheet();
+  if(!state.tomorrowResv){ toast('没有可取消的预约','info'); return; }
+  const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/cancel`, {
+    method:'POST', body:{ uuid: state.tomorrowResv.uuid, resv_status: state.tomorrowResv.resvStatus }
+  });
+  toast(data.message || (ok ? '已取消' : '失败'), (ok && data.success) ? 'success' : 'error');
+  if(ok && data.success){
+    state.tomorrowResv = null;
+    renderHome();
+  }
+}
+
+// ---------- home rendering ----------
+// 后端连续几次被学校 CAS 拒绝密码后会把 verified 翻成 false 并记下 credential_invalid_at；
+// 这时小徽章不够醒目，首页和配置页都挂一条红横幅，直到用户重新验证。
+function renderCredentialBanner(elId, withLink){
+  const el = $(elId);
+  if(!el) return;
+  const cfg = state.currentCfg;
+  const invalid = cfg && cfg.verified !== true && cfg.credential_invalid_at;
+  if(!invalid){ el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.style.display = '';
+  el.innerHTML = `
+    <div class="row-flex" style="gap:6px;flex-wrap:wrap">
+      <span class="pill accent">🔑 密码失效</span>
+      <div class="sub" style="font-weight:700">自动预约已暂停</div>
+    </div>
+    <div class="t">学校统一身份认证从 ${escHtml(cfg.credential_invalid_at)} 起连续拒绝了你的密码，多半是你改过密码。请到「设置 → 账号 → 重新校验」填新密码并验证，通过后自动恢复。</div>
+    <div class="row-flex mt"><button class="btn sm accent" onclick="go('settings');openSheet('reset-pwd')">去重新校验 →</button></div>`;
+}
+
+function renderHome(){
+  renderCredentialBanner('cred-banner-home', true);
+  const d = new Date();
+  $('today-date-label').textContent = `周${WEEK_LABELS[d.getDay()===0?6:d.getDay()-1]} · ${d.getMonth()+1}月${d.getDate()}日`;
+  const tmr = new Date(d.getTime() + 86400000);
+  const tmrLabelEl = $('tmr-date-label');
+  if(tmrLabelEl){
+    tmrLabelEl.textContent = `周${WEEK_LABELS[tmr.getDay()===0?6:tmr.getDay()-1]} · ${tmr.getMonth()+1}月${tmr.getDate()}日`;
+  }
+  $('tmr-n').textContent = tmr.getDate();
+  $('tmr-wd').textContent = ['SUN','MON','TUE','WED','THU','FRI','SAT'][tmr.getDay()];
+
+  renderTodayCard({});
+  renderTomorrowCard({});
+  renderTomorrowStrip();
+  renderWeekPreview();
+}
+
+function renderTodayCard(opt){
+  const card = $('today-card');
+  const empty = $('today-empty');
+  const cfg = state.currentCfg;
+
+  if(opt.loading){
+    card.style.display = '';
+    empty.style.display = 'none';
+    card.innerHTML = `<div class="label">今日座位</div><div class="sub" style="margin-top:8px">查询中，请稍等…</div>`;
+    return;
+  }
+
+  if(!cfg){
+    card.style.display = 'none';
+    empty.style.display = '';
+    empty.innerHTML = `
+      <div class="h2" style="color:var(--ink3)">还没有学号</div>
+      <div class="sub" style="margin-top:6px">添加学号后系统会自动抢座</div>
+      <div class="actions" style="justify-content:center">
+        <button class="btn accent" onclick="openSheet('add-pid')">+ 添加学号</button>
+      </div>`;
+    return;
+  }
+
+  const resv = state.todayResv;
+  if(!resv){
+    card.style.display = 'none';
+    empty.style.display = '';
+    const reserveOn = cfg.is_reserved === 'True';
+    const nc = state.napConfig || {};
+    const napHint = (!NAP_DISABLED && nc.auto_daily)
+      ? `<div class="meta-row" style="justify-content:center;margin-top:8px"><span class="pill accent">😴 自动午休已开启 · ${escHtml(nc.trigger_time || '12:00')} 触发</span></div>`
+      : '';
+    empty.innerHTML = `
+      <div class="h2" style="color:var(--ink3)">今日暂无预约</div>
+      <div class="sub" style="margin-top:6px">${reserveOn ? '按当前配置今日无座位，或抢座进行中' : '自动预约已暂停'}</div>
+      ${napHint}
+      <div class="actions" style="justify-content:center">
+        <button class="btn accent" onclick="openReserveNow()">⚡ 立即预约</button>
+      </div>`;
+    return;
+  }
+
+  const seat = (resv.devInfo && resv.devInfo.devName) || '未知';
+  const m = seat.match(/^(\d+F)[-·]?(.*)$/);
+  const zone = m ? m[1] : '';
+  const num = m ? m[2] : seat;
+  const bt = (resv.resvBeginTime || '').split(' ')[1] || '';
+  const et = (resv.resvEndTime || '').split(' ')[1] || '';
+  const bhm = bt.slice(0,5), ehm = et.slice(0,5);
+  const hours = (bhm && ehm) ? (parseInt(ehm,10) - parseInt(bhm,10)) : '';
+  const seatHtml = `${zone ? `<span class="zone">${escHtml(zone)}</span>` : ''}${escHtml(num)}`;
+  const timeHtml = `${bhm} — ${ehm}${hours ? ` · ${hours}小时` : ''}`;
+
+  if (resv.resvStatus === 3265 || resv.resvStatus === 1217) {
+    card.style.display = '';
+    empty.style.display = 'none';
+    card.innerHTML = `
+      <div class="stamp">TODAY</div>
+      <div class="label">今日座位</div>
+      <div class="seat">${seatHtml}</div>
+      <div class="time">${timeHtml}</div>
+      <div class="h2" style="margin-top:12px">任务完成，该休息了 ☕</div>
+      <div class="sub" style="margin-top:4px">今日学习已结束</div>
+      <div class="actions" style="justify-content:center;margin-top:12px">
+        <button class="btn accent" onclick="openSheet('reserve-today')">我还能学！</button>
+      </div>`;
+    return;
+  }
+
+  if (resv.resvStatus === 3281 || resv.resvStatus === 1169) {
+    card.style.display = '';
+    empty.style.display = 'none';
+    card.innerHTML = `
+      <div class="stamp">TODAY</div>
+      <div class="label">今日座位</div>
+      <div class="seat">${seatHtml}</div>
+      <div class="time">${timeHtml}</div>
+      <div class="meta-row"><span class="pill warn">⚠ 今日预约已违约</span></div>
+      <div class="actions" style="margin-top:10px;justify-content:center">
+        <button class="btn sm accent" onclick="openReserveNow('${escHtml(seat)}')">⚡ 再次预约</button>
+      </div>`;
+    return;
+  }
+
+  const ACTIVE_STATUSES = [1027, 1093, 3141];
+  const canCancel = ACTIVE_STATUSES.includes(resv.resvStatus);
+  const pills = resvStatePills(resv, cfg);
+
+  card.style.display = '';
+  empty.style.display = 'none';
+  card.innerHTML = `
+    <div class="stamp">TODAY</div>
+    <div class="label">今日座位</div>
+    <div class="seat">${zone ? `<span class="zone">${escHtml(zone)}</span>` : ''}${escHtml(num)}</div>
+    <div class="time">${bhm} — ${ehm}${hours ? ` · ${hours}小时` : ''}</div>
+    <div class="meta-row">
+      ${pills}
+      ${(!NAP_DISABLED && (state.napConfig || {}).auto_daily) ? `<span class="pill accent" style="cursor:pointer" onclick="openNap()">😴 午休 ${escHtml((state.napConfig||{}).trigger_time||'12:00')}</span>` : ''}
+    </div>
+    <div class="actions">
+      ${(canCancel && !NAP_DISABLED) ? `<button class="btn sm" onclick="openNap()">😴 午休</button>` : ''}
+      ${canCancel ? `<button class="btn sm" onclick="openSheet('cancel')">取消</button>` : ''}
+    </div>`;
+}
+
+function renderTomorrowCard(opt){
+  const card = $('tmr-card');
+  const empty = $('tmr-empty');
+  if(!card || !empty) return;
+  const cfg = state.currentCfg;
+
+  if(opt.loading){
+    card.style.display = '';
+    empty.style.display = 'none';
+    card.innerHTML = `<div class="label">明日座位</div><div class="sub" style="margin-top:8px">查询中，请稍等…</div>`;
+    return;
+  }
+
+  if(!cfg){
+    card.style.display = 'none';
+    empty.style.display = 'none';
+    return;
+  }
+
+  const resv = state.tomorrowResv;
+  if(!resv){
+    card.style.display = 'none';
+    empty.style.display = '';
+    const reserveOn = cfg.is_reserved === 'True';
+    const msg = reserveOn
+      ? '将按配置自动预约，结果会在抢座后可见'
+      : '自动预约已暂停，去配置页开启';
+    empty.innerHTML = `
+      <div class="h2" style="color:var(--ink3)">明日暂无预约</div>
+      <div class="sub" style="margin-top:6px">${msg}</div>
+      <div class="actions" style="justify-content:center">
+        <button class="btn accent" onclick="openReserveNow(null,'tomorrow')">⚡ 预约明日</button>
+      </div>`;
+    return;
+  }
+
+  const seat = (resv.devInfo && resv.devInfo.devName) || '未知';
+  const m = seat.match(/^(\d+F)[-·]?(.*)$/);
+  const zone = m ? m[1] : '';
+  const num = m ? m[2] : seat;
+  const bt = (resv.resvBeginTime || '').split(' ')[1] || '';
+  const et = (resv.resvEndTime || '').split(' ')[1] || '';
+  const bhm = bt.slice(0,5), ehm = et.slice(0,5);
+  const hours = (bhm && ehm) ? (parseInt(ehm,10) - parseInt(bhm,10)) : '';
+  const canCancel = [1027, 1093, 3141].includes(resv.resvStatus);
+  const pills = resvStatePills(resv, cfg, { tomorrow: true });
+
+  card.style.display = '';
+  empty.style.display = 'none';
+  card.innerHTML = `
+    <div class="stamp">TMR</div>
+    <div class="label">明日座位</div>
+    <div class="seat">${zone ? `<span class="zone">${escHtml(zone)}</span>` : ''}${escHtml(num)}</div>
+    <div class="time">${bhm} — ${ehm}${hours ? ` · ${hours}小时` : ''}</div>
+    <div class="meta-row">
+      ${pills}
+      ${canCancel ? `<span class="pill muted" style="cursor:pointer" onclick="openSheet('cancel-tomorrow')">取消</span>` : ''}
+    </div>
+`;
+}
+
+function fmtResvStatus(s){
+  return { 1027:'已预约', 1093:'使用中', 1169:'已违约', 1217:'已结束', 3141:'暂离', 3265:'已结束', 3281:'已违约' }[s] || `状态(${s})`;
+}
+
+// 图书馆规则：预约开始后 30 分钟内没刷卡签到就记违约（到馆复查也是按这个点算的）
+const CHECKIN_GRACE_MINUTES = 30;
+
+// 「已预约」这一个词盖住了好几种完全不同的处境，用户分不清：保护到底会不会管我、
+// 已经推过一次了吗、现在是不是该赶紧去刷卡。这里把待签到(1027)按时间和保护状态
+// 拆成一枚带时刻的状态徽章。使用中/暂离时人已经在馆，保护跟他没关系。
+function resvStatePills(resv, cfg, opt){
+  opt = opt || {};
+  const s = resv.resvStatus;
+  const pill = (cls, text) => `<span class="pill state ${cls}">${escHtml(text)}</span>`;
+  const hm = ms => { const d = new Date(ms); return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; };
+  if(s === 1093) return pill('ok', '● 使用中');
+  if(s === 3141) return pill('warn', '⏸ 暂离中');
+  if(s !== 1027) return pill('ok', fmtResvStatus(s));
+
+  const lp = state.lateProtect || { lead_minutes: 5, shift_minutes: 60 };
+  const lpOn = cfg && cfg.late_protection === 'True';
+  const cancelMode = cfg && cfg.late_protection_mode === 'cancel';
+  const begin = new Date((resv.resvBeginTime || '').replace(' ', 'T')).getTime();
+  const now = Date.now();
+  const probeAt = begin ? hm(begin - lp.lead_minutes * 60000) : '';
+
+  if(!opt.tomorrow && begin && now >= begin){
+    const deadline = begin + CHECKIN_GRACE_MINUTES * 60000;
+    return now < deadline
+      ? pill('warn', `⏰ 已开始 · ${hm(deadline)} 前签到`)
+      : pill('danger', '⚠ 签到已超时');
+  }
+  if(resv.by_protection){
+    return pill('accent', cancelMode ? `🛡 已顺延一次 · ${probeAt} 未到则取消` : `🛡 已顺延至 ${hm(begin)}`);
+  }
+  if(lpOn){
+    if(opt.tomorrow) return pill('ok', '✓ 已预约') + pill('accent', '🛡 迟到保护');
+    const action = lp.shift_minutes > 0 ? '顺延' : '取消';
+    return pill('accent', `🛡 保护中 · ${probeAt} 未到则${action}`);
+  }
+  return pill('ok', '✓ 已预约');
+}
+
+function renderTomorrowStrip(){
+  const cfg = state.currentCfg;
+  const tt = $('tmr-title');
+  const ss = $('tmr-sub');
+  if(!cfg){ tt.textContent = '添加学号后查看'; ss.textContent = state.isGuest ? '游客数据仅存本会话' : ''; return; }
+  if(cfg.is_reserved !== 'True'){ tt.textContent = '自动预约已暂停'; ss.textContent = '去配置页开启「自动预约」'; return; }
+
+  const seats = cfg.seat_list || [];
+  const seat = seats[0] || '—';
+  let segs = [];
+  const tmr = new Date(Date.now() + 86400000);
+  const isoNum = tmr.getDay() === 0 ? 7 : tmr.getDay();
+  if(cfg.mode === 'tomorrow' && cfg.time){
+    segs = toSegments(cfg.time.tomorrow);
+  }else if(cfg.time && cfg.time.week_time){
+    segs = toSegments(cfg.time.week_time[String(isoNum)]);
+  }
+  if(isoNum === 5) segs = segs.map(friCap);
+  // 明天配置为「休息」（或没配时段）就不会抢，别再显示「明早抢…」误导人
+  if(!segs.length){
+    tt.textContent = state.tomorrowResv ? '明日不自动抢座' : '明日无预约';
+    ss.textContent = state.tomorrowResv ? '明天配置为休息，下面是已有的预约' : '明天配置为休息，不会自动抢座';
+    return;
+  }
+  const timeLabel = segs.length > 1 ? `${segs.length}段: ${segs.join(' · ')}` : segs[0];
+  tt.textContent = '按配置自动预约';
+  ss.textContent = `明早抢 ${seat} · ${timeLabel}`;
+}
+
+function renderWeekPreview(){
+  const host = $('week-rows');
+  host.innerHTML = '';
+  const cfg = state.currentCfg;
+  const today = new Date().getDay() === 0 ? 7 : new Date().getDay();
+  const tmr = today === 7 ? 1 : today + 1;
+  const mode = (cfg && cfg.mode) || 'week_time';
+  const reserveOn = cfg && cfg.is_reserved === 'True';
+
+  // Update mode hint
+  const hint = $('week-mode-hint');
+  if(hint){
+    if(!cfg) hint.textContent = '06 — 22 时';
+    else if(!reserveOn) hint.textContent = '自动预约已暂停';
+    else hint.textContent = mode === 'tomorrow' ? '统一时段模式' : '按星期模式';
+  }
+  const footer = $('week-footer-hint');
+  if(footer){
+    if(!cfg) footer.textContent = '💡 添加学号后查看配置预览';
+    else if(!reserveOn) footer.textContent = '💡 开启自动预约后这里会亮起';
+    else if(mode === 'tomorrow') footer.textContent = '💡 每天都按同一时段预约';
+    else footer.textContent = '💡 每天按配置的时段预约';
+  }
+
+  for(let i = 1; i <= 7; i++){
+    // 计算当天段列表
+    let segs = [];
+    if(cfg && reserveOn){
+      if(mode === 'tomorrow'){
+        segs = toSegments(cfg.time && cfg.time.tomorrow);
+        if(!segs.length) segs = ['08:00-22:00'];
+      }else{
+        segs = toSegments(cfg.time && cfg.time.week_time && cfg.time.week_time[String(i)]);
+      }
+    }
+    if(i === 5) segs = segs.map(friCap);
+    const active = segs.length > 0;
+
+    const isToday = i === today;
+    const isTmr = i === tmr;
+    const tag = isToday
+      ? '<span class="tag">今</span>'
+      : (isTmr ? '<span class="tag dim">明</span>' : '');
+    const dayClass = isToday ? 'today' : (active ? '' : 'off');
+
+    if(!active){
+      host.innerHTML += `
+        <div class="row">
+          <span class="day ${dayClass}">${tag}周${WEEK_LABELS[i-1]}</span>
+          <div class="track">
+            <div class="bar empty" style="left:0%;width:100%"></div>
+          </div>
+        </div>`;
+      continue;
+    }
+
+    let barClass;
+    if(mode === 'tomorrow') barClass = 'today';
+    else if(isToday) barClass = 'today';
+    else if(isTmr) barClass = 'tomorrow-b';
+    else barClass = 'active';
+    const showLabel = (isToday || isTmr || mode === 'tomorrow');
+
+    const bars = segs.map(seg => {
+      const [s, e] = seg.split('-');
+      const sh = parseInt(s.split(':')[0], 10) + parseInt(s.split(':')[1], 10)/60;
+      const eh = parseInt(e.split(':')[0], 10) + parseInt(e.split(':')[1], 10)/60;
+      const left = Math.max(0, (sh - 8) / 14 * 100);
+      const width = Math.max(2, (eh - sh) / 14 * 100);
+      // 多段时标签可能挤不下，仅在单段时显示
+      const lbl = (showLabel && segs.length === 1)
+        ? `<span class="lbl">${s.slice(0,5)}-${e.slice(0,5)}</span>`
+        : '';
+      return `<div class="bar ${barClass}" style="left:${left}%;width:${width}%">${lbl}</div>`;
+    }).join('');
+    const segCountTip = segs.length > 1
+      ? `<span class="tiny" style="margin-left:4px;color:var(--ink3)">×${segs.length}</span>`
+      : '';
+    host.innerHTML += `
+      <div class="row">
+        <span class="day ${dayClass}">${tag}周${WEEK_LABELS[i-1]}${segCountTip}</span>
+        <div class="track">${bars}</div>
+      </div>`;
+  }
+}
+
+// ---------- tomorrow expander ----------
+function toggleTmr(){
+  state.tmrOpen = !state.tmrOpen;
+  $('tmr-strip').classList.toggle('open', state.tmrOpen);
+  $('tmr-body').classList.toggle('open', state.tmrOpen);
+  if(state.tmrOpen) renderTomorrowBody();
+}
+
+function renderTomorrowBody(){
+  const cfg = state.currentCfg;
+  const tmr = new Date(Date.now() + 86400000);
+  const isoNum = tmr.getDay() === 0 ? 7 : tmr.getDay();
+  const iso = String(isoNum);
+  let segs = [];
+  if(cfg && cfg.time){
+    if(cfg.mode === 'tomorrow') segs = toSegments(cfg.time.tomorrow);
+    else if(cfg.time.week_time) segs = toSegments(cfg.time.week_time[iso]);
+  }
+  if(!segs.length) segs = ['08:00-22:00'];
+  const [rs, re] = segs[0].split('-');
+  const [s, e] = clampRange(rs, re, isoNum);
+  const { min, max } = timeBounds(isoNum);
+  const startEl = $('tmr-start');
+  const endEl = $('tmr-end');
+  startEl.innerHTML = timeOptionsHtml(min, max, s);
+  endEl.innerHTML = timeOptionsHtml(min, max, e);
+
+  // 多段提示
+  const hint = $('tmr-multi-hint');
+  if(hint){
+    if(segs.length > 1){
+      hint.textContent = `⚠ 当前有 ${segs.length} 段，快速编辑仅保留首段。多段请在配置中调整`;
+      hint.style.display = '';
+    }else{
+      hint.style.display = 'none';
+    }
+  }
+
+  const list = $('tmr-seats');
+  list.innerHTML = '';
+  const seats = (cfg && cfg.seat_list) || [];
+  seats.forEach((name, i) => {
+    const chip = document.createElement('span');
+    chip.className = 'chip';
+    chip.innerHTML = `<span class="ord">${i+1}</span>${escHtml(name)}`;
+    list.appendChild(chip);
+  });
+  if(!seats.length){
+    const tip = document.createElement('span');
+    tip.className = 'tiny';
+    tip.style.color = 'var(--ink3)';
+    tip.textContent = '还没有配置座位';
+    list.appendChild(tip);
+  }
+}
+
+async function saveTmr(){
+  if(!state.currentPid || !state.currentCfg){
+    toast('请先添加学号','error'); return;
+  }
+  const rawS = $('tmr-start').value, rawE = $('tmr-end').value;
+  if(!rawS || !rawE){ toast('时间无效','error'); return; }
+  const tmr = new Date(Date.now() + 86400000);
+  const isoNum = tmr.getDay() === 0 ? 7 : tmr.getDay();
+  const [s, e] = clampRange(rawS, rawE, isoNum);
+  if(s >= e){ toast('时间无效','error'); return; }
+  const body = {
+    mode: 'tomorrow',
+    time: Object.assign({}, state.currentCfg.time || {}, { tomorrow: [`${s}-${e}`] }),
+    seat_list: state.currentCfg.seat_list || [],
+  };
+  const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}`, { method:'POST', body });
+  if(ok){
+    toast('明日已更新（已切换到统一时段模式）','success');
+    closeTmr();
+    await loadAccountDetail(state.currentPid);
+    await loadAccounts();
+  }else{
+    toast(data.error || '保存失败','error');
+  }
+}
+
+function closeTmr(){
+  state.tmrOpen = false;
+  $('tmr-strip').classList.remove('open');
+  $('tmr-body').classList.remove('open');
+}
+
+// ---------- notices ----------
+function toggleNotices(){
+  state.noticesCollapsed = !state.noticesCollapsed;
+  $('notice-list').style.display = state.noticesCollapsed ? 'none' : '';
+  $('notice-toggle').textContent = state.noticesCollapsed ? '展开' : '折叠';
+}
+
+async function loadNotices(){
+  try{
+    const promises = [fetch('/api/announcements').catch(() => null)];
+    promises.push(api('/api/my/reservation_results').catch(() => null));
+    const res = await Promise.all(promises);
+    const anns = (res[0] && res[0].ok) ? await res[0].json() : [];
+    const results = (res[1] && res[1].ok && Array.isArray(res[1].data)) ? res[1].data : [];
+    renderNotices(anns, results);
+    loadReactions();
+    queueSchoolNoticePopup(anns);
+  }catch(e){
+    $('notice-list').innerHTML = '<div class="empty">通知加载失败</div>';
+  }
+}
+
+function renderNotices(anns, results){
+  const list = $('notice-list');
+  const items = [];
+  const colorMap = { info:'accent', success:'ok', warning:'warn', danger:'var(--danger)' };
+
+  (anns || []).forEach((a, i) => {
+    const lv = a.level || 'info';
+    const border = { info:'var(--accent)', success:'var(--ok)', warning:'var(--warn)', danger:'var(--danger)' }[lv] || 'var(--accent)';
+    const pill = { info:'accent', success:'ok', warning:'warn', danger:'accent' }[lv] || 'accent';
+    const pin = a.pinned ? '<span class="pill" style="border-color:#a78bfa;color:#a78bfa">置顶</span>' : '';
+    items.push(`
+      <div class="box tight" style="border-left:5px solid ${border}">
+        <div class="row-flex" style="gap:6px;flex-wrap:wrap">
+          <span class="pill ${pill}">公告</span>${pin}
+          <div class="sub" style="font-weight:700">${escHtml(a.title)}</div>
+        </div>
+        <div class="t md" style="margin-top:4px">${mdHtml(a.content)}</div>
+        ${a.source_url ? `<div class="tiny" style="margin-top:6px"><a href="${escHtml(a.source_url)}" target="_blank" rel="noopener noreferrer">查看学校原公告</a></div>` : ''}
+        <div class="tiny" style="margin-top:6px">${escHtml(a.updated_at || a.created_at || '')}</div>
+        ${reactionBarHtml(a)}
+      </div>`);
+  });
+
+  (results || []).forEach(r => {
+    if(!r.result) return;
+    // 状态由后端 classify_result 统一判定，四档各走各的样式：
+    // 休息日/闭馆是按配置跳过的；⏳ 占位是超出图书馆 31 小时窗口、占着座等换约，
+    // 真正那一段还没到能约的时候——这两种都不是失败，不该标红吓人。
+    const state = r.state || (r.success ? 'success' : (r.skipped ? 'skipped' : 'failed'));
+    const style = {
+      success: ['var(--ok)', 'ok', '预约成功'],
+      skipped: ['var(--warn)', 'warn', '已跳过'],
+      pending: ['var(--warn)', 'warn', '占位待换约'],
+      failed: ['var(--danger)', 'accent', '预约失败'],
+    }[state] || ['var(--danger)', 'accent', '预约失败'];
+    const [border, pill, label] = style;
+    items.push(`
+      <div class="box tight" style="border-left:5px solid ${border}">
+        <div class="row-flex" style="gap:6px">
+          <span class="pill ${pill}">${label}</span>
+          <div class="sub" style="font-weight:700">学号 ${escHtml(r.pid)}</div>
+        </div>
+        <div class="t" style="margin-top:4px;white-space:pre-wrap">${escHtml(r.result)}</div>
+        <div class="tiny" style="margin-top:6px">${escHtml(r.updated_at || '')}</div>
+      </div>`);
+  });
+
+  list.innerHTML = items.length ? items.join('') : '<div class="empty">暂无通知</div>';
+  paintReactionCounts();
+}
+
+function schoolNoticeAckKey(a){
+  const sourceId = a.source_review_id || a.id || 'unknown';
+  return `autolib_school_notice_ack_${sourceId}_r${a.revision || 1}`;
+}
+
+function schoolNoticeDismissed(a){
+  try{ return localStorage.getItem(schoolNoticeAckKey(a)) === '1'; }
+  catch(e){ return false; }
+}
+
+function queueSchoolNoticePopup(announcements){
+  const notice = (announcements || []).find(a => a.popup_required && !schoolNoticeDismissed(a));
+  if(!notice) return;
+  state.pendingAnnouncementPopup = notice;
+  if(!$('scrim').classList.contains('show')) openSheet('school-notice');
+}
+
+function dismissSchoolNotice(){
+  const notice = state.pendingAnnouncementPopup;
+  if(notice){
+    try{ localStorage.setItem(schoolNoticeAckKey(notice), '1'); }catch(e){}
+  }
+  state.pendingAnnouncementPopup = null;
+  closeSheet();
+}
+
+// ---------- 公告栏小互动 ----------
+// 每条公告可以在后台配一排表情按钮和一个应援按钮。表情按钮点了 emoji 会飞向屏幕；
+// 应援按钮点了会飘出几个 emoji 淡入淡出。谁点的、点了几次记在后端（/api/reactions），
+// 前端只显示总数。计数按「公告 + 表情」分开。
+const RX_CHEER = 'cheer';
+const rxTotals = {};    // key = annId + '|' + kind
+const rxPending = {};   // 还没发给后端的连点
+let rxFlushTimer = null;
+const RX_MOTION = !(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
+function rxKey(annId, kind){ return annId + '|' + kind; }
+// 表情和按钮文字是后台填的，进属性前把引号也转掉
+function escAttr(v){ return escHtml(v).replace(/"/g, '&quot;'); }
+
+function reactionBarHtml(a){
+  const emojis = Array.isArray(a.reactions) ? a.reactions : [];
+  const cheer = a.cheer && a.cheer.label && a.cheer.emojis ? a.cheer : null;
+  if(!emojis.length && !cheer) return '';
+  const btn = (kind, inner, title, extra) => `
+    <button type="button" class="rx${extra ? ' rx-cheer' : ''}" title="${escAttr(title)}" aria-label="${escAttr(title)}"
+      data-ann="${escAttr(a.id)}" data-kind="${escAttr(kind)}" ${extra || ''} onclick="throwReaction(this)">
+      ${inner}<span class="rx-n" data-rx="${escAttr(rxKey(a.id, kind))}">${rxTotals[rxKey(a.id, kind)] || 0}</span>
+    </button>`;
+  const parts = emojis.map(e => btn(e, `<span class="rx-emoji">${escHtml(e)}</span>`, e));
+  if(cheer){
+    parts.push(btn(RX_CHEER, `<span class="rx-label">${escHtml(cheer.label)}</span>`, cheer.label,
+      `data-emojis="${escAttr(cheer.emojis)}"`));
+  }
+  return `<div class="reaction-bar">${parts.join('')}</div>`;
+}
+
+function paintReactionCounts(){
+  document.querySelectorAll('.rx-n[data-rx]').forEach(el => {
+    el.textContent = rxTotals[el.dataset.rx] || 0;
+  });
+}
+
+async function loadReactions(){
+  const { ok, data } = await api('/api/reactions');
+  if(!ok || !data.totals) return;   // 演示模式没有这个接口，静默跳过
+  mergeReactionTotals(data.totals);
+  paintReactionCounts();
+}
+
+// 后端是准的（别人也在点），但本地还没发出去的那几下要补回来
+function mergeReactionTotals(totals){
+  Object.keys(totals || {}).forEach(annId => {
+    Object.keys(totals[annId] || {}).forEach(kind => {
+      const key = rxKey(annId, kind);
+      rxTotals[key] = (totals[annId][kind] || 0) + (rxPending[key] || 0);
+    });
+  });
+}
+
+function throwReaction(btn){
+  const annId = btn.dataset.ann, kind = btn.dataset.kind;
+  if(!annId || !kind) return;
+  const key = rxKey(annId, kind);
+  // 先加本地数字再发请求：连点时数字得跟着手指走，等往返就卡住了
+  rxTotals[key] = (rxTotals[key] || 0) + 1;
+  rxPending[key] = (rxPending[key] || 0) + 1;
+  paintReactionCounts();
+  if(kind === RX_CHEER) cheerEmojis(btn, btn.dataset.emojis || '');
+  else flyEmoji(btn, kind);
+  clearTimeout(rxFlushTimer);
+  rxFlushTimer = setTimeout(flushReactions, 700);
+}
+
+async function flushReactions(){
+  for(const key of Object.keys(rxPending)){
+    const n = rxPending[key];
+    if(!n) continue;
+    rxPending[key] = 0;
+    const [annId, kind] = key.split('|');
+    const { ok, data } = await api('/api/reactions', { method:'POST', body:{ ann_id: annId, kind, n } });
+    if(ok && data.totals){
+      mergeReactionTotals(data.totals);
+      paintReactionCounts();
+    }
+  }
+}
+
+// 把一串 emoji 按字素拆开（🔥 一个码点，👨‍👩‍👧 一串码点，都算一个）
+function splitEmojis(text){
+  try{
+    if(typeof Intl !== 'undefined' && Intl.Segmenter){
+      return Array.from(new Intl.Segmenter(undefined, { granularity:'grapheme' }).segment(text), s => s.segment);
+    }
+  }catch(e){}
+  return Array.from(text);
+}
+
+// 应援：几个 emoji 从按钮上方一起冒出来，边升边放大，淡入再淡出
+function cheerEmojis(btn, emojis){
+  const layer = $('throw-layer');
+  const parts = splitEmojis(emojis).filter(e => e.trim());
+  if(!layer || !RX_MOTION || !parts.length) return;
+  const box = btn.getBoundingClientRect();
+  const x0 = box.left + box.width / 2;
+  const y0 = box.top;
+  parts.forEach((emoji, i) => {
+    const dx = (i - (parts.length - 1) / 2) * 44 + (Math.random() - .5) * 12;
+    const rise = 70 + Math.random() * 30;
+    const at = (y, s) => `translate(${x0 + dx}px,${y}px) translate(-50%,-50%) scale(${s})`;
+    const el = document.createElement('div');
+    el.className = 'thrown';
+    el.textContent = emoji;
+    layer.appendChild(el);
+    el.animate([
+      { transform: at(y0, .5), opacity: 0 },
+      { transform: at(y0 - rise * .45, 1.25), opacity: 1, offset: .35 },
+      { transform: at(y0 - rise, 1.5), opacity: 0 },
+    ], { duration: 1100, easing: 'ease-out' }).onfinish = () => el.remove();
+  });
+}
+
+// 从按钮飞向屏幕中间偏上：一路放大 + 乱转，落点砸一下再化开
+function flyEmoji(btn, emoji){
+  const layer = $('throw-layer');
+  if(!layer || !RX_MOTION) return;
+  const box = btn.getBoundingClientRect();
+  const x0 = box.left + box.width / 2;
+  const y0 = box.top + box.height / 2;
+  const x1 = innerWidth / 2 + (Math.random() - .5) * innerWidth * .5;
+  const y1 = innerHeight * .42 + (Math.random() - .5) * innerHeight * .24;
+  const spin = Math.round((Math.random() - .5) * 900);
+  const at = (x, y, s, deg) => `translate(${x}px,${y}px) translate(-50%,-50%) scale(${s}) rotate(${deg}deg)`;
+
+  const el = document.createElement('div');
+  el.className = 'thrown';
+  el.textContent = emoji;
+  layer.appendChild(el);
+  const fly = el.animate([
+    { transform: at(x0, y0, .35, 0), opacity: 1 },
+    { transform: at((x0 + x1) / 2, Math.min(y0, y1) - 40, 1.1, spin * .5), opacity: 1, offset: .55 },
+    { transform: at(x1, y1, 2.6, spin), opacity: 1 },
+  ], { duration: 460, easing: 'cubic-bezier(.3,.7,.4,1)' });
+  fly.onfinish = () => { el.remove(); splatEmoji(emoji, x1, y1); };
+}
+
+function splatEmoji(emoji, x, y){
+  const layer = $('throw-layer');
+  if(!layer) return;
+  const at = (sx, sy, deg) => `translate(${x}px,${y}px) translate(-50%,-50%) scale(${sx},${sy}) rotate(${deg}deg)`;
+
+  const ring = document.createElement('div');
+  ring.className = 'thrown-ring';
+  ring.style.transform = `translate(${x}px,${y}px) translate(-50%,-50%)`;
+  layer.appendChild(ring);
+  ring.animate([
+    { transform: ring.style.transform + ' scale(.3)', opacity: .55 },
+    { transform: ring.style.transform + ' scale(1.6)', opacity: 0 },
+  ], { duration: 420, easing: 'ease-out' }).onfinish = () => ring.remove();
+
+  const mark = document.createElement('div');
+  mark.className = 'thrown';
+  mark.textContent = emoji;
+  layer.appendChild(mark);
+  mark.animate([
+    { transform: at(3.4, 2.1, 0), opacity: 1 },          // 砸扁
+    { transform: at(2.8, 2.9, 6), opacity: .95, offset: .25 },
+    { transform: at(3.0, 2.8, -4), opacity: 0 },
+  ], { duration: 700, easing: 'ease-out' }).onfinish = () => mark.remove();
+}
+
+// ---------- seats ----------
+async function loadSeats(){
+  try{
+    const { ok, data } = await api('/api/seats');
+    state.allSeats = (ok && data.seats) ? data.seats : {};
+  }catch(e){
+    state.allSeats = {};
+  }
+}
+
+function frequentSeatChips(zoneId, seatId){
+  const list = (state.currentCfg && state.currentCfg.seat_list) || [];
+  const chips = list.slice(0, 3);
+  if(!chips.length) return '';
+  return `
+    <div class="box tight" style="background:#dbeafe;border:1px solid #93c5fd;margin-bottom:8px">
+      <div class="tiny" style="color:#1e40af;margin-bottom:6px;font-weight:600">常用座位 · 点击快速选择</div>
+      <div class="row-flex" style="flex-wrap:wrap;gap:6px">
+        ${chips.map(s => `<button type="button" class="btn sm" style="background:#bfdbfe;color:#1e3a8a;border:0" onclick="fillSeatPicker('${escHtml(s)}','${zoneId}','${seatId}')">${escHtml(s)}</button>`).join('')}
+      </div>
+    </div>`;
+}
+
+function fillSeatPicker(seatName, zoneId, seatId){
+  if(!seatName || !state.allSeats) return;
+  let zone = '';
+  for(const [z, seats] of Object.entries(state.allSeats)){
+    if(seats.includes(seatName)){ zone = z; break; }
+  }
+  if(!zone){ toast(`未找到「${seatName}」所在区域`,'error'); return; }
+  const zSel = $(zoneId);
+  if(!zSel) return;
+  zSel.value = zone;
+  onZone(zone, seatId);
+  const sSel = $(seatId);
+  if(sSel) sSel.value = seatName;
+}
+
+function sortedZones(){
+  const ORDER = ['二楼A区','二楼B区','六楼A区','七楼A区','七楼B区','三楼夹层','三楼A区','三楼B区','三楼C区','四楼夹层','四楼A区','五楼A区'];
+  const keys = Object.keys(state.allSeats);
+  return keys.sort((a, b) => {
+    const ia = ORDER.indexOf(a);
+    const ib = ORDER.indexOf(b);
+    if (ia !== -1 && ib !== -1) return ia - ib;
+    if (ia !== -1) return -1;
+    if (ib !== -1) return 1;
+    return a.localeCompare(b);
+  });
+}
+
+function onZone(v, targetId){
+  const sel = $(targetId || 'sp-seat');
+  const seats = state.allSeats[v] || [];
+  sel.innerHTML = seats.length ? seats.map(s => `<option value="${escHtml(s)}">${escHtml(s)}</option>`).join('') : '<option>无座位</option>';
+}
+
+function addSeat(){
+  const z = $('sp-zone').value;
+  const s = $('sp-seat').value;
+  if(!z || !s){ toast('请先选择','error'); return; }
+  if(!state.currentCfg){ toast('请先选择学号','error'); return; }
+  const seats = state.currentCfg.seat_list || [];
+  if(seats.includes(s)){ toast('座位已存在','error'); closeSheet(); return; }
+  if(seats.length >= MAX_SEATS){ toast(`最多 ${MAX_SEATS} 个座位，先删一个再加`,'error'); return; }
+  seats.push(s);
+  state.currentCfg.seat_list = seats;
+  renderCfgSeats();
+  persistSeatList().then(ok => {
+    if(ok) toast('已添加并保存 ' + s, 'success');
+  });
+  closeSheet();
+}
+
+// ---------- 平面图选座 ----------
+// 平面图和座位坐标是 utils/fetch_seat_layout.py 抓下来的静态数据（座位一年也不挪一次），
+// 抢座流程本身用不到，纯粹是让人挑座位时知道自己坐在哪、靠不靠窗。
+let _layout = null;
+// 点中某个座位时才查那一个，查过的留着，别重复请求。
+// 早先这里一次拉全库计数给整张图上色：真实数据里座位重合率是 0，那层颜色没挡下过
+// 任何一次冲突，却等于把每个人的意愿清单摊在图上——20 来个点一一对应到具体的人。
+let _seatHeat = {};   // 座位号 → 除我以外把它放进优先级的人数（只存查过的）
+
+// 圆点直径，和 styles.css 里的 --seat-dot 必须一致：
+// 坐标记的是圆点左上角（跟官方一致），判距离时要用它换算出圆心
+const SEAT_DOT_PX = 6;
+
+// 当前地图的状态：区域、选中的座位、平移缩放
+const _sm = { area:null, picked:null, scale:1, x:0, y:0, mode:'add', ratio:1 };
+
+// 别人的优先级里有没有这个座位。失败就当没有——这只是条提示，不该挡住选座
+async function fetchSeatHeat(seatName){
+  if(seatName in _seatHeat) return;
+  try{
+    const { ok, data } = await api('/api/seat_popularity?seat=' + encodeURIComponent(seatName));
+    _seatHeat[seatName] = (ok && data && typeof data.count === 'number') ? data.count : 0;
+  }catch(e){
+    _seatHeat[seatName] = 0;
+  }
+  // 回来得晚就只补这一行提示，别去重画图——用户可能已经点到别的座位了
+  if(_sm.picked === seatName) updateSeatMapBar();
+}
+
+async function loadSeatLayout(){
+  if(_layout) return _layout;
+  try{
+    const resp = await fetch('/static/floorplans/seat_layout.json');
+    _layout = resp.ok ? await resp.json() : { areas: [] };
+  }catch(e){
+    _layout = { areas: [] };
+  }
+  return _layout;
+}
+
+function hasSeatLayout(){
+  return !!(_layout && _layout.areas && _layout.areas.length);
+}
+
+function seatMapArea(roomId){
+  return (_layout.areas || []).find(a => String(a.roomId) === String(roomId)) || null;
+}
+
+// 座位号 → 所在区域，用来把已选的座位直接定位到图上
+function areaOfSeat(seatName){
+  if(!hasSeatLayout() || !seatName) return null;
+  return (_layout.areas || []).find(a => a.seats.some(s => s[0] === seatName)) || null;
+}
+
+// mode: 'add' 加进座位优先级；'reserve' 回填立即预约的表单
+async function openSeatMap(mode, seatName){
+  await loadSeatLayout();
+  if(!hasSeatLayout()){ toast('平面图数据缺失','error'); return; }
+  _sm.mode = (mode === 'reserve') ? 'reserve' : 'add';
+  const preset = seatName || (state.currentCfg && (state.currentCfg.seat_list || [])[0]);
+  const area = areaOfSeat(preset) || _layout.areas[0];
+  _sm.picked = areaOfSeat(preset) ? preset : null;
+  openSheet('seat-map');
+  renderSeatMapArea(area.roomId);
+}
+
+// 换区域：整块重建，图片 onload 之后再复位视图
+function renderSeatMapArea(roomId){
+  const area = seatMapArea(roomId);
+  const stage = $('sm-stage');
+  if(!area || !stage) return;
+  _sm.area = area;
+  const sel = $('sm-area');
+  if(sel) sel.value = String(area.roomId);
+  if(_sm.picked && !area.seats.some(s => s[0] === _sm.picked)) _sm.picked = null;
+  stage.innerHTML = `<img src="/static/floorplans/${escHtml(area.image)}" alt="${escHtml(area.name)}"
+      onload="onSeatMapImage()"><div class="dots" id="sm-dots"></div>`;
+  drawSeatMapDots();
+}
+
+// 选中变了只重画点，别动 <img>——重建图片会触发 onload，把用户的缩放和位置一起冲掉
+function drawSeatMapDots(){
+  const box = $('sm-dots');
+  if(!box || !_sm.area) return;
+  const chosen = (state.currentCfg && state.currentCfg.seat_list) || [];
+  const dots = _sm.area.seats.map(([name, x, y]) => {
+    const ord = chosen.indexOf(name);
+    let cls = 'dot';
+    if(name === _sm.picked) cls += ' here';
+    else if(ord >= 0) cls += ' picked';
+    const num = (ord >= 0 && name !== _sm.picked) ? `<span class="num">${ord + 1}</span>` : '';
+    return `<i class="${cls}" style="left:${x}%;top:${y}%">${num}</i>`;
+  }).join('');
+  const pick = _sm.area.seats.find(s => s[0] === _sm.picked);
+  box.innerHTML = dots + (pick
+    ? `<span class="tag" style="left:${pick[1]}%;top:${pick[2]}%">${escHtml(pick[0])}</span>`
+    : '');
+  updateSeatMapBar();
+}
+
+function onSeatMapImage(){
+  const map = $('sm-map'), img = $('sm-stage').querySelector('img');
+  if(!map || !img) return;
+  _sm.ratio = img.naturalHeight / img.naturalWidth || 0.5625;
+  resetSeatMapView();
+}
+
+// 图宽等于容器宽时算 scale=1；竖屏下整张图缩得太小，所以按容器高度补一档
+function resetSeatMapView(){
+  const map = $('sm-map');
+  if(!map) return;
+  const fitH = map.clientHeight / (map.clientWidth * _sm.ratio);
+  _sm.scale = Math.max(1, Math.min(fitH, 2.4));
+  _sm.x = 0; _sm.y = 0;
+  if(_sm.picked) centerSeatMapOn(_sm.picked);
+  else applySeatMapTransform();
+}
+
+function centerSeatMapOn(seatName){
+  const map = $('sm-map');
+  const seat = _sm.area && _sm.area.seats.find(s => s[0] === seatName);
+  if(!map || !seat) return;
+  const w = map.clientWidth * _sm.scale;
+  _sm.x = map.clientWidth / 2 - w * seat[1] / 100 - SEAT_DOT_PX * _sm.scale / 2;
+  _sm.y = map.clientHeight / 2 - w * _sm.ratio * seat[2] / 100 - SEAT_DOT_PX * _sm.scale / 2;
+  applySeatMapTransform();
+}
+
+// 把屏幕坐标换成容器内容盒里的坐标。rect 含边框，clientLeft/Top 正好是边框宽度
+function seatMapPoint(clientX, clientY){
+  const map = $('sm-map');
+  const rect = map.getBoundingClientRect();
+  return { x: clientX - rect.left - map.clientLeft, y: clientY - rect.top - map.clientTop };
+}
+
+function applySeatMapTransform(){
+  const map = $('sm-map'), stage = $('sm-stage');
+  if(!map || !stage) return;
+  const mw = map.clientWidth, mh = map.clientHeight;
+  const w = mw * _sm.scale, h = mw * _sm.ratio * _sm.scale;
+  _sm.x = (w <= mw) ? (mw - w) / 2 : Math.min(0, Math.max(mw - w, _sm.x));
+  _sm.y = (h <= mh) ? (mh - h) / 2 : Math.min(0, Math.max(mh - h, _sm.y));
+  stage.style.transform = `translate(${_sm.x}px, ${_sm.y}px) scale(${_sm.scale})`;
+}
+
+// 触摸点太密，与其让人去点 5px 的圆点，不如点哪儿就选最近的那个座位
+function pickNearestSeat(clientX, clientY){
+  const map = $('sm-map');
+  if(!map || !_sm.area) return;
+  const mw = map.clientWidth;
+  const pt = seatMapPoint(clientX, clientY);
+  const w = mw * _sm.scale;
+  const px = (pt.x - _sm.x) / w * 100;
+  const py = (pt.y - _sm.y) / (w * _sm.ratio) * 100;
+  // 坐标是圆点左上角，补半个点才是学生眼里那个座位的位置
+  const offX = SEAT_DOT_PX / 2 / mw * 100;
+  const offY = SEAT_DOT_PX / 2 / (mw * _sm.ratio) * 100;
+
+  let best = null, bestD = Infinity;
+  for(const [name, x, y] of _sm.area.seats){
+    // y 按图片长宽比折算回等比距离，否则横向的座位总是显得更近
+    const dy = (y + offY - py) * _sm.ratio;
+    const dx = x + offX - px;
+    const d = dx * dx + dy * dy;
+    if(d < bestD){ bestD = d; best = name; }
+  }
+  if(!best || Math.sqrt(bestD) > 8) return;   // 离所有座位都太远，当成误触
+  _sm.picked = best;
+  // 立即预约是当场的事，跟别人明早的优先级撞不上，不必去查
+  if(_sm.mode === 'add') fetchSeatHeat(best);
+  drawSeatMapDots();
+}
+
+function updateSeatMapBar(){
+  const name = $('sm-name'), ok = $('sm-ok');
+  if(!name || !ok) return;
+  const chosen = (state.currentCfg && state.currentCfg.seat_list) || [];
+  if(_sm.picked){
+    const ord = chosen.indexOf(_sm.picked);
+    const full = _sm.mode === 'add' && ord < 0 && chosen.length >= MAX_SEATS;
+    const heat = _seatHeat[_sm.picked] || 0;
+    const note = ord >= 0 ? `  （已在第 ${ord + 1} 位）`
+               : full ? `  · 最多 ${MAX_SEATS} 个座位`
+               : heat > 0 ? `  · AutoLib 中另有 ${heat} 人也选了` : '';
+    name.className = 'picked-name';
+    name.textContent = _sm.picked + note;
+    ok.disabled = (_sm.mode === 'add' && (ord >= 0 || full));
+  }else{
+    name.className = 'picked-name empty';
+    name.textContent = '点图上任意位置选座';
+    ok.disabled = true;
+  }
+}
+
+function confirmSeatMap(){
+  if(!_sm.picked) return;
+  if(_sm.mode === 'reserve'){
+    const seat = _sm.picked;
+    closeSheet();
+    openReserveNow(seat, state.reserveDay);
+    return;
+  }
+  if(!state.currentCfg){ toast('请先选择学号','error'); return; }
+  const seats = state.currentCfg.seat_list || [];
+  if(seats.includes(_sm.picked)){ toast('座位已存在','error'); return; }
+  if(seats.length >= MAX_SEATS){ toast(`最多 ${MAX_SEATS} 个座位，先删一个再加`,'error'); return; }
+  seats.push(_sm.picked);
+  state.currentCfg.seat_list = seats;
+  renderCfgSeats();
+  const added = _sm.picked;
+  persistSeatList().then(ok => {
+    if(ok) toast('已添加并保存 ' + added, 'success');
+  });
+  closeSheet();
+}
+
+// ---- 手势：单指拖动平移，双指捏合缩放，轻点选座 ----
+const _smTouch = { pointers: new Map(), start: null, pinch: null };
+
+function onSeatMapDown(e){
+  const map = $('sm-map');
+  map.setPointerCapture(e.pointerId);
+  _smTouch.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if(_smTouch.pointers.size === 1){
+    _smTouch.start = { x: e.clientX, y: e.clientY, mx: _sm.x, my: _sm.y, t: Date.now(), moved: 0 };
+    map.classList.add('panning');
+  }else if(_smTouch.pointers.size === 2){
+    _smTouch.pinch = pinchState();
+  }
+}
+
+function pinchState(){
+  const [a, b] = [..._smTouch.pointers.values()];
+  const mid = seatMapPoint((a.x + b.x) / 2, (a.y + b.y) / 2);
+  return {
+    dist: Math.hypot(a.x - b.x, a.y - b.y) || 1,
+    scale: _sm.scale,
+    // 捏合中心在图上的相对位置，缩放过程中要一直粘在手指中间
+    ox: (mid.x - _sm.x) / _sm.scale, oy: (mid.y - _sm.y) / _sm.scale,
+  };
+}
+
+function onSeatMapMove(e){
+  if(!_smTouch.pointers.has(e.pointerId)) return;
+  _smTouch.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+  if(_smTouch.pointers.size >= 2 && _smTouch.pinch){
+    const [a, b] = [..._smTouch.pointers.values()];
+    const p = _smTouch.pinch;
+    const scale = Math.max(1, Math.min(6, p.scale * Math.hypot(a.x - b.x, a.y - b.y) / p.dist));
+    const mid = seatMapPoint((a.x + b.x) / 2, (a.y + b.y) / 2);
+    _sm.scale = scale;
+    _sm.x = mid.x - p.ox * scale;
+    _sm.y = mid.y - p.oy * scale;
+    applySeatMapTransform();
+    return;
+  }
+  const s = _smTouch.start;
+  if(!s) return;
+  const dx = e.clientX - s.x, dy = e.clientY - s.y;
+  s.moved = Math.max(s.moved, Math.hypot(dx, dy));
+  _sm.x = s.mx + dx;
+  _sm.y = s.my + dy;
+  applySeatMapTransform();
+}
+
+function onSeatMapUp(e){
+  const map = $('sm-map');
+  _smTouch.pointers.delete(e.pointerId);
+  if(_smTouch.pointers.size < 2) _smTouch.pinch = null;
+  if(_smTouch.pointers.size > 0) return;
+  map.classList.remove('panning');
+  const s = _smTouch.start;
+  _smTouch.start = null;
+  if(s && s.moved < 6 && Date.now() - s.t < 500) pickNearestSeat(e.clientX, e.clientY);
+}
+
+function onSeatMapWheel(e){
+  e.preventDefault();
+  const pt = seatMapPoint(e.clientX, e.clientY);
+  const ox = (pt.x - _sm.x) / _sm.scale, oy = (pt.y - _sm.y) / _sm.scale;
+  _sm.scale = Math.max(1, Math.min(6, _sm.scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+  _sm.x = pt.x - ox * _sm.scale;
+  _sm.y = pt.y - oy * _sm.scale;
+  applySeatMapTransform();
+}
+
+// ---------- notify ----------
+function notifyMode(cfg){
+  return (cfg && cfg.notify_mode === 'full') ? 'full' : 'simple';
+}
+
+function emailLabelText(email, mode){
+  if(!email) return '未设置';
+  return `${email} · ${mode === 'full' ? '全部通知' : '仅异常'}`;
+}
+
+async function saveEmail(){
+  if(!state.currentPid || !state.currentCfg){ toast('请先添加学号','error'); return; }
+  const v = $('em-input').value.trim();
+  const mode = $('em-mode').value === 'full' ? 'full' : 'simple';
+  const body = { notify_email: v, notify_mode: mode };
+  const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}`, { method:'POST', body });
+  if(ok){
+    toast('邮箱已保存','success');
+    state.currentCfg.notify_email = v;
+    state.currentCfg.notify_mode = mode;
+    $('email-label').textContent = emailLabelText(v, mode);
+    closeSheet();
+  }else{
+    toast(data.error || '保存失败','error');
+  }
+}
+
+// ---------- toggles ----------
+function tToggle(el, e){
+  if(e) e.stopPropagation();
+  el.classList.toggle('on');
+}
+
+function toggleLP(el, e){
+  if(e) e.stopPropagation();
+  const isOn = el.classList.contains('on');
+  // Turning OFF is always direct
+  if(isOn){
+    el.classList.remove('on');
+    syncLPModeRow();
+    return;
+  }
+  // Turning ON: show warning on first use
+  const ACK_KEY = 'autolib_lp_warning_ack';
+  if(localStorage.getItem(ACK_KEY) === '1'){
+    el.classList.add('on');
+    syncLPModeRow();
+    return;
+  }
+  state.pendingLPToggle = el;
+  openSheet('lp-warning');
+}
+
+function acknowledgeLP(){
+  localStorage.setItem('autolib_lp_warning_ack', '1');
+  const el = state.pendingLPToggle;
+  if(el) el.classList.add('on');
+  state.pendingLPToggle = null;
+  syncLPModeRow();
+  closeSheet();
+}
+
+// 迟到保护关着时没必要露出「之后怎么办」的选项
+function syncLPModeRow(){
+  const row = $('cfg-lp-mode-row');
+  const tg = $('cfg-toggle-lp');
+  if(row && tg) row.style.display = tg.classList.contains('on') ? '' : 'none';
+}
+
+function cancelLP(){
+  state.pendingLPToggle = null;
+  closeSheet();
+}
+
+// ---------- 真实在馆时长（需要用户同意） ----------
+// 开：先弹说明，用户点「同意并开启」才写；关：直接关，服务端顺手删掉已采集的明细。
+// 不走 saveCfg 的自动保存——这是一个独立的同意动作，不该被别的配置改动顺带提交。
+function toggleStudyTime(el, e){
+  if(e) e.stopPropagation();
+  if(!state.currentPid || !state.currentCfg){ toast('请先添加学号','error'); return; }
+  // 关要二次确认：已采集的记录删、留、还是模糊保留由用户选，删之前可以先导出
+  openSheet(el.classList.contains('on') ? 'study-time-off' : 'study-time-consent');
+}
+
+async function setStudyTimeConsent(enabled, keep){
+  const body = enabled ? { enabled: true } : { enabled: false, keep: keep || 'keep' };
+  const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/study_time_consent`,
+    { method:'POST', body });
+  if(!ok){ toast(data.error || '保存失败','error'); return; }
+  state.currentCfg.study_time_consent = enabled;
+  $('cfg-toggle-study').classList.toggle('on', enabled);
+  $('study-sync-row').style.display = enabled ? '' : 'none';
+  toast(data.message || (enabled ? '已开启' : '已关闭'), 'success');
+  closeSheet();
+  loadVisitStats();
+}
+
+function confirmStudyTimeOff(){
+  const picked = document.querySelector('input[name="study-keep"]:checked');
+  const keep = picked ? picked.value : 'keep';
+  if(keep === 'delete' && !confirm('确定永久删除已采集的在馆明细？删除后无法恢复。')) return;
+  setStudyTimeConsent(false, keep);
+}
+
+// 手动同步：只补还没折算的记录，服务端每条只写一次，点多少次都不会把时长累加
+async function syncStudyTimeNow(){
+  if(!state.currentPid){ toast('请先添加学号','error'); return; }
+  const label = $('study-sync-label');
+  label.textContent = '正在查询…';
+  const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/study_time_sync`, { method:'POST' });
+  if(!ok){
+    label.textContent = data.error || '同步失败';
+    toast(data.error || '同步失败','error');
+    return;
+  }
+  label.textContent = data.message || '已同步';
+  toast(data.message || '已同步','success');
+  if(data.synced) loadVisitStats();
+}
+
+// 导出走 fetch 再落成文件：Authorization 头只有 api() 会带，直接 location.href 在令牌登录下拿不到
+async function exportStudyTime(){
+  try{
+    const token = getToken();
+    const r = await fetch('/api/my/study_time/export', {
+      credentials: 'same-origin',
+      headers: token ? { 'Authorization': 'Bearer ' + token } : {},
+    });
+    if(!r.ok){ toast('导出失败','error'); return; }
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `autolib-study-time-${localDateKey(new Date()).replace(/-/g,'')}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    toast('已导出 CSV，Excel / WPS 可直接打开','success');
+  }catch(e){
+    toast('导出失败','error');
+  }
+}
+
+// ---------- 信用分（只在用户点的时候查） ----------
+// 结果直接展开在按钮下面：先「查询中…」，回来了换成分数 + 扣分记录；再点一次收起。
+async function queryCredit(){
+  if(!state.currentPid || !state.currentCfg){ toast('请先添加学号','error'); return; }
+  const box = $('credit-box'), btn = $('credit-btn');
+  if(box.style.display !== 'none' && box.dataset.loaded === '1'){
+    box.style.display = 'none';
+    btn.textContent = '查询';
+    return;
+  }
+  box.style.display = '';
+  box.dataset.loaded = '';
+  btn.disabled = true;
+  btn.textContent = '查询中…';
+  box.innerHTML = '<div class="tiny" style="color:var(--ink3);text-align:center;padding:10px 0">正在查询…</div>';
+  const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/credit`);
+  btn.disabled = false;
+  if(!ok){
+    btn.textContent = '重试';
+    box.innerHTML = `<div class="sub" style="color:var(--danger);text-align:center;padding:6px 0">${escHtml(data.error || '查询失败')}</div>`;
+    return;
+  }
+  btn.textContent = '收起';
+  box.dataset.loaded = '1';
+  const score = data.score == null ? '—' : data.score;
+  const total = data.total == null ? '' : ` / ${data.total}`;
+  $('credit-label').textContent = `${score}${total} 分 · ${data.queried_at || ''} 查询`;
+  // status 文字照图书馆网页：1「已记录」、2「已取消，已违约」
+  const rows = (data.records || []).map(r => `<div class="toggle-row">
+      <div class="info">
+        <div class="t1">${escHtml(r.kind_name || '扣分')} <span class="tiny" style="color:var(--ink3)">${escHtml(r.dev_name || '')}</span></div>
+        <div class="t2">${escHtml(r.created_at || '')}${r.status_name ? ' · ' + escHtml(r.status_name) : ''}${r.memo ? ' · ' + escHtml(r.memo) : ''}</div>
+      </div>
+      <div class="sub" style="color:var(--danger);white-space:nowrap">-${r.score == null ? '?' : r.score}</div>
+    </div>`).join('');
+  const shown = (data.records || []).length;
+  box.innerHTML = `
+    <div style="text-align:center;margin:4px 0 10px">
+      <div class="h1" style="color:var(--accent)">${score}<span class="sub" style="color:var(--ink3)">${total}</span></div>
+      <div class="tiny" style="color:var(--ink3)">座位信用分 · ${escHtml(data.queried_at || '')} 查询</div>
+    </div>
+    ${rows ? `<div class="label" style="margin-bottom:4px">扣分记录${data.count ? `（共 ${data.count} 条${data.count > shown ? '，只显示最近 ' + shown + ' 条' : ''}）` : ''}</div>${rows}`
+          : '<div class="sub" style="color:var(--ink3);text-align:center">没有扣分记录</div>'}
+    <div class="tiny mt" style="color:var(--ink3)">「预约不来」是预约后没到馆签到；「预约结束后未操作离开」是走的时候没在系统里结束。</div>`;
+}
+
+// ---------- sheets ----------
+const SHEETS = {
+  profile: () => `
+    <div class="grab"></div>
+    <h3>账号资料</h3>
+    <div class="desc">昵称会替代学号 <strong>${escHtml(state.uid)}</strong> 显示。密码即统一身份认证密码，需在学校的系统里修改。</div>
+    <div class="col gap-sm">
+      <div class="field"><label>昵称（可选）</label><input type="text" id="pf-nick" maxlength="30" placeholder="清空 = 恢复用 ${escHtml(state.uid)}" value="${escHtml(state.nickname || '')}"></div>
+    </div>
+    <div class="row-flex mt-lg">
+      <button class="btn ghost grow" onclick="closeSheet()">取消</button>
+      <button class="btn accent grow" onclick="saveProfile()">保存</button>
+    </div>
+  `,
+  accounts: () => `
+    <div class="grab"></div>
+    <h3>当前学号</h3>
+    <div class="desc">每个学号的数据独立保存；验证其他学号会切换登录身份。</div>
+    <div class="col gap-sm">
+      ${state.accounts.map(a => {
+        const active = a.pid === state.currentPid;
+        const on = a.is_reserved === 'True';
+        const v = a.verified === true;
+        return `
+        <div class="box tight clickable ${active?'accent':''}" onclick="pickAcct('${escHtml(a.pid)}')">
+          <div class="row-between">
+            <div>
+              <div class="mono" style="font-size:15px;font-weight:600">${escHtml(a.pid)}</div>
+              <div class="tiny" style="margin-top:2px">${a.mode==='week_time'?'按星期':'统一时段'} · ${on?'运行中':'已暂停'} · ${v?'已验证':'未验证'}</div>
+            </div>
+            <div class="row-flex" style="gap:6px">
+              ${active?'<span class="pill accent">当前</span>':'<span class="sub" style="color:var(--ink3)">›</span>'}
+              <button class="btn sm danger" onclick="event.stopPropagation();deleteAcct('${escHtml(a.pid)}')">删除</button>
+            </div>
+          </div>
+        </div>`;
+      }).join('')}
+      <div class="box tight ghost clickable" style="text-align:center" onclick="openSheet('add-pid')">
+        <div class="sub" style="color:var(--ink3)">切换登录学号</div>
+      </div>
+    </div>
+  `,
+  'add-pid': () => `
+    <div class="grab"></div>
+    <h3>验证学号</h3>
+    <div class="desc">填写学号和统一身份认证（网上办事大厅）密码，验证通过后即完成登录并绑定。</div>
+    <div class="box tight" style="margin-top:4px">
+      <div class="t">🔒 你的学号和密码会<strong>加密保存在服务器上</strong>，仅用于每天自动预约时登录学校系统，管理员也无法看到明文。</div>
+      <div class="t" style="margin-top:8px">数据跟随学号保存：换手机、换浏览器后，重新验证一次学号密码即可找回所有配置。</div>
+    </div>
+    <div class="col gap-sm" style="margin-top:12px">
+      <div class="field"><label>学号</label><input type="text" id="new-pid" placeholder="18210xxxxx"></div>
+      <div class="field"><label>统一身份认证密码（网上办事大厅）</label><input type="password" id="new-vpn"></div>
+    </div>
+    <div class="row-flex mt-lg">
+      <button class="btn ghost grow" onclick="closeSheet()">取消</button>
+      <button class="btn accent grow" id="btn-verify-add" onclick="verifyAdd()">验证并保存</button>
+    </div>
+  `,
+  'reset-pwd': () => `
+    <div class="grab"></div>
+    <h3>重置统一身份认证密码</h3>
+    <div class="desc">在学校改过密码后填新密码，验证通过即更新，所有配置原样保留。已保存的密码不会回显。</div>
+    <div class="col gap-sm" style="margin-top:12px">
+      <div class="field"><label>学号</label><input type="text" value="${escHtml(state.currentPid || '')}" disabled></div>
+      <div class="field"><label>新的统一身份认证密码（网上办事大厅）</label><input type="password" id="reset-vpn" autocomplete="new-password"></div>
+    </div>
+    <div class="row-flex mt-lg">
+      <button class="btn ghost grow" onclick="closeSheet()">取消</button>
+      <button class="btn accent grow" id="btn-reset-pwd" onclick="resetPwd()">验证并保存</button>
+    </div>
+  `,
+  cancel: () => `
+    <div class="grab"></div>
+    <h3>取消今日预约？</h3>
+    <div class="desc">取消后座位会释放。如果只是临时外出，可以不用取消。</div>
+    <div class="row-flex mt">
+      <button class="btn ghost grow" onclick="closeSheet()">再想想</button>
+      <button class="btn danger grow" onclick="doCancel()">确认取消</button>
+    </div>
+  `,
+  'cancel-tomorrow': () => `
+    <div class="grab"></div>
+    <h3>取消明日预约？</h3>
+    <div class="desc">取消后座位立即释放，可能被他人抢走。取消完可以在原位置重新预约明天。</div>
+    <div class="row-flex mt">
+      <button class="btn ghost grow" onclick="closeSheet()">再想想</button>
+      <button class="btn danger grow" onclick="doCancelTomorrow()">确认取消</button>
+    </div>
+  `,
+  'seat-map': () => {
+    const areas = (_layout && _layout.areas) || [];
+    return `
+    <div class="grab"></div>
+    <h3>按图选座</h3>
+    <div class="desc">拖动看图，双指缩放。点图上任意位置，会选中离它最近的那个座位。</div>
+    <div class="field">
+      <label>楼层 / 区域</label>
+      <select id="sm-area" onchange="renderSeatMapArea(this.value)">
+        ${areas.map(a => `<option value="${a.roomId}">${escHtml(a.floor)} · ${escHtml(a.name)}（${a.seats.length} 座）</option>`).join('')}
+      </select>
+    </div>
+    <div class="seatmap mt" id="sm-map"
+         onpointerdown="onSeatMapDown(event)" onpointermove="onSeatMapMove(event)"
+         onpointerup="onSeatMapUp(event)" onpointercancel="onSeatMapUp(event)"
+         onwheel="onSeatMapWheel(event)">
+      <div class="stage" id="sm-stage"></div>
+    </div>
+    <div class="seatmap-legend">
+      <span><i class="here"></i>当前选中</span>
+      <span><i class="picked"></i>我的优先级</span>
+      <span><i></i>其他座位</span>
+      <span style="margin-left:auto;cursor:pointer" onclick="resetSeatMapView()">复位 ⟲</span>
+    </div>
+    <div class="seatmap-bar">
+      <div class="picked-name empty" id="sm-name">点图上任意位置选座</div>
+      <button class="btn sm ghost" onclick="closeSheet()">取消</button>
+      <button class="btn sm accent" id="sm-ok" onclick="confirmSeatMap()" disabled>${_sm.mode === 'reserve' ? '用这个座位' : '添加'}</button>
+    </div>`;
+  },
+
+  'seat-picker': () => {
+    const zones = sortedZones();
+    return `
+    <div class="grab"></div>
+    <h3>添加座位</h3>
+    <div class="desc">先选楼层，再选座位号；不确定坐哪就翻平面图。</div>
+    ${hasSeatLayout() ? `
+      <button class="btn sm" style="width:100%;margin-bottom:12px" onclick="openSeatMap('add')">🗺️ 按图选座</button>
+    ` : ''}
+    <div class="col gap-sm">
+      <div class="field"><label>楼层 / 区域</label>
+        <select id="sp-zone" onchange="onZone(this.value)">
+          <option value="">选择...</option>
+          ${zones.map(z => `<option value="${escHtml(z)}">${escHtml(z)} (${state.allSeats[z].length}个)</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label>座位号</label>
+        <select id="sp-seat"><option>先选楼层</option></select>
+      </div>
+    </div>
+    <div class="row-flex mt-lg">
+      <button class="btn ghost grow" onclick="closeSheet()">取消</button>
+      <button class="btn accent grow" onclick="addSeat()">添加</button>
+    </div>`;
+  },
+  email: () => {
+    const mode = notifyMode(state.currentCfg);
+    return `
+    <div class="grab"></div>
+    <h3>邮箱通知</h3>
+    <div class="desc">预约结果通过邮件推送。留空即不发送。</div>
+    <div class="field"><label>邮箱地址</label><input type="email" id="em-input" value="${escHtml((state.currentCfg && state.currentCfg.notify_email) || '')}"></div>
+    <div class="field"><label>通知范围</label>
+      <select id="em-mode">
+        <option value="simple"${mode === 'simple' ? ' selected' : ''}>仅异常 — 预约失败、午休失败时才发</option>
+        <option value="full"${mode === 'full' ? ' selected' : ''}>全部 — 每天成功也发，含座位号和时段</option>
+      </select>
+    </div>
+    <div class="desc">图书馆闭馆公告、预约冲突提醒两种模式都会发送。</div>
+    <div class="row-flex mt-lg">
+      <button class="btn ghost grow" onclick="closeSheet()">取消</button>
+      <button class="btn accent grow" onclick="saveEmail()">保存</button>
+    </div>
+  `;
+  },
+  'school-notice': () => {
+    const a = state.pendingAnnouncementPopup || {};
+    return `
+      <div class="grab"></div>
+      <h3>⚠️ ${escHtml(a.title || '图书馆闭馆公告')}</h3>
+      <div class="desc md">${mdHtml(a.content)}</div>
+      ${a.display_from && a.display_until ? `<div class="box tight" style="border-left:4px solid var(--danger)"><div class="sub" style="font-weight:700">预约暂停时段</div><div class="t">${escHtml(a.display_from)} 至 ${escHtml(a.display_until)}</div></div>` : ''}
+      <div class="row-flex mt-lg">
+        ${a.source_url ? `<a class="btn ghost grow" href="${escHtml(a.source_url)}" target="_blank" rel="noopener noreferrer">查看学校原文</a>` : ''}
+        <button class="btn accent grow" onclick="dismissSchoolNotice()">我知道了</button>
+      </div>`;
+  },
+  'welcome': () => `
+    <div class="grab"></div>
+    <h3>👋 欢迎使用 AutoLib</h3>
+    <div class="desc">每天抢座太麻烦？配置一次，之后每天到点自动帮你抢好。</div>
+    <div class="col gap-sm">
+      <div class="box tight" style="border-left:4px solid var(--accent)">
+        <div class="sub" style="font-weight:700">📅 自动预约</div>
+        <div class="t">填好学号、想坐哪、几点到几点，剩下的交给我。可以按星期分别排，也可以每天固定时段。抢完发通知告诉你结果。(｡･∀･)ﾉﾞ</div>
+      </div>
+      <div class="box tight" style="border-left:4px solid var(--ok)">
+        <div class="sub" style="font-weight:700">🛡 迟到保护</div>
+        <div class="t">没按时到馆？系统自动把预约推迟 1 小时，座位先给你留着。人在不在馆由服务器自动判断，刷卡进馆就行，不用手动点。推迟后再不来，就按学校规则算违约。( ‵▽′)ψ</div>
+      </div>
+      <div class="box tight" style="border-left:4px solid var(--warn)">
+        <div class="sub" style="font-weight:700">😴 自动午休</div>
+        <div class="t">出门吃饭前点一下，系统立刻退掉当前预约、用同一个座位重新约下午时段，回来座位还在。也可以设成每天自动执行。🍚(*´∀\`)~♪</div>
+      </div>
+      <div class="box tight" style="border-left:4px solid var(--ink3)">
+        <div class="sub" style="font-weight:700">📱 安卓客户端</div>
+        <div class="t">桌面小组件不打开 App 就能看今天坐哪，还有学习时长热力图。</div>
+        <button type="button" class="btn sm accent" style="margin-top:8px" onclick="downloadApk()">⬇ 下载 APK</button>
+      </div>
+    </div>
+    <button class="btn primary mt-lg" style="width:100%" onclick="acknowledgeWelcome()">我知道啦</button>
+  `,
+  'lp-info': () => `
+    <div class="grab"></div>
+    <h3>🛡 关于迟到保护</h3>
+    <div class="desc">开启后，系统会在你预约开始前检查是否到馆。</div>
+    <div class="col gap-sm">
+      <div class="box tight" style="border-left:4px solid var(--accent)">
+        <div class="sub" style="font-weight:700">✓ 最多保护 1 小时</div>
+        <div class="t">未按时到馆则自动把预约推迟 1 小时为你保留座位</div>
+      </div>
+      <div class="box tight" style="border-left:4px solid var(--ok)">
+        <div class="sub" style="font-weight:700">✓ 到馆自动识别</div>
+        <div class="t">刷卡进馆后服务器会自动识别，已在馆的人不会被推迟</div>
+      </div>
+      <div class="box tight" style="border-left:4px solid var(--danger)">
+        <div class="sub" style="font-weight:700">⚠ 1 小时后仍未到</div>
+        <div class="t">默认不再干预，由图书馆按规则处理（可能记违约）；也可以在开关下面改成「再探一次，仍未到馆就取消预约」</div>
+      </div>
+    </div>
+    <button class="btn primary mt-lg" style="width:100%" onclick="closeSheet()">我知道了</button>
+  `,
+  'lp-warning': () => `
+    <div class="grab"></div>
+    <h3>🛡 关于迟到保护</h3>
+    <div class="desc">开启后，系统会在你预约开始前检查是否到馆。</div>
+    <div class="col gap-sm">
+      <div class="box tight" style="border-left:4px solid var(--accent)">
+        <div class="sub" style="font-weight:700">✓ 最多保护 1 小时</div>
+        <div class="t">未按时到馆则自动把预约推迟 1 小时为你保留座位</div>
+      </div>
+      <div class="box tight" style="border-left:4px solid var(--ok)">
+        <div class="sub" style="font-weight:700">✓ 到馆自动识别</div>
+        <div class="t">刷卡进馆后服务器会自动识别，已在馆的人不会被推迟</div>
+      </div>
+      <div class="box tight" style="border-left:4px solid var(--danger)">
+        <div class="sub" style="font-weight:700">⚠ 1 小时后仍未到</div>
+        <div class="t">默认不再干预，由图书馆按规则处理（可能记违约）；也可以在开关下面改成「再探一次，仍未到馆就取消预约」</div>
+      </div>
+    </div>
+    <div class="row-flex mt-lg">
+      <button class="btn ghost grow" onclick="cancelLP()">取消</button>
+      <button class="btn accent grow" onclick="acknowledgeLP()">我已知晓，永久关闭</button>
+    </div>
+  `,
+  'reserve-today': () => {
+    const zones = sortedZones();
+    const isoDay = new Date().getDay() || 7;
+    const { min, max } = timeBounds(isoDay);
+    return `
+    <div class="grab"></div>
+    <h3>再约一场 📚</h3>
+    <div class="desc">选好座位和时间，直接预约今天。</div>
+    <div class="col gap-sm">
+      <div class="field"><label>楼层 / 区域</label>
+        <select id="rt-zone" onchange="onZone(this.value,'rt-seat')">
+          <option value="">选择...</option>
+          ${zones.map(z => `<option value="${escHtml(z)}">${escHtml(z)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label>座位号</label>
+        <select id="rt-seat"><option>先选楼层</option></select>
+      </div>
+      <div class="time-pair" style="display:flex;gap:8px">
+        <div class="field" style="flex:1"><label>开始时间</label>
+          <select id="rt-start" class="time-input" data-field="start">${timeOptionsHtml(min, max, min)}</select>
+        </div>
+        <div class="field" style="flex:1"><label>结束时间</label>
+          <select id="rt-end" class="time-input" data-field="end">${timeOptionsHtml(min, max, max)}</select>
+        </div>
+      </div>
+    </div>
+    <div class="row-flex mt-lg">
+      <button class="btn ghost grow" onclick="closeSheet()">取消</button>
+      <button class="btn accent grow" id="btn-rt-confirm" onclick="doReserveToday()">确认预约</button>
+    </div>`;
+  },
+
+  'nap-info': () => `
+    <div class="grab"></div>
+    <h3>😴 一键午休</h3>
+    <div class="desc">专为 2 小时午休设计的快捷功能。</div>
+    <div class="col gap-sm">
+      <div class="box tight" style="border-left:4px solid var(--accent)">
+        <div class="sub" style="font-weight:700">✓ 自动续约下午</div>
+        <div class="t">点击后系统立即取消当前预约，并以相同座位重新预约下午时段（默认 14:00 起）</div>
+      </div>
+      <div class="box tight" style="border-left:4px solid var(--ok)">
+        <div class="sub" style="font-weight:700">✓ 可自由配置</div>
+        <div class="t">在设置页可修改默认下午时间、座位，以及开启每日自动触发</div>
+      </div>
+      <div class="box tight" style="border-left:4px solid var(--danger)">
+        <div class="sub" style="font-weight:700">⚠ 极小占座风险</div>
+        <div class="t">取消到重新预约约需 1 秒，极低概率被他人抢占。请知悉后再使用</div>
+      </div>
+    </div>
+    <div class="row-flex mt-lg">
+      <button class="btn ghost grow" onclick="closeSheet()">取消</button>
+      <button class="btn accent grow" onclick="acknowledgeNap()">我知道了，继续</button>
+    </div>
+  `,
+
+  'reserve-now': () => {
+    const seatList = (state.currentCfg && state.currentCfg.seat_list) || [];
+    const chips = seatList.slice(0, 3);
+    const forTomorrow = state.reserveDay === 'tomorrow';
+    return `
+    <div class="grab"></div>
+    <h3>⚡ ${forTomorrow ? '预约明日' : '立即预约'}</h3>
+    ${forTomorrow ? '<div class="desc">为明天预约座位，成功后会覆盖自动抢座的结果。</div>' : ''}
+    ${chips.length ? `
+      <div class="box tight mt" style="background:#dbeafe;border:1px solid #93c5fd">
+        <div class="tiny" style="color:#1e40af;margin-bottom:6px;font-weight:600">常用座位 · 点击快速选择</div>
+        <div class="row-flex" style="flex-wrap:wrap;gap:6px">
+          ${chips.map(s => `<button class="btn sm" style="background:#bfdbfe;color:#1e3a8a;border:0" onclick="selectRnSeat('${escHtml(s)}')">${escHtml(s)}</button>`).join('')}
+        </div>
+      </div>
+    ` : ''}
+    <div class="col gap-sm mt">
+      <div class="field">
+        <label>区域</label>
+        <select id="rn-location" onchange="onRnLocationChange()">
+          <option value="">加载中…</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>座位</label>
+        <div class="row-flex" style="gap:6px">
+          <select id="rn-seat" style="flex:1;min-width:0">
+            <option value="">请先选区域</option>
+          </select>
+          ${hasSeatLayout() ? `<button class="btn sm ghost" onclick="openSeatMapForReserve()">看图</button>` : ''}
+        </div>
+      </div>
+      <div class="row-flex mt">
+        <div class="field">
+          <label>开始</label>
+          <input type="time" id="rn-start" value="${(state.rnTimes && state.rnTimes.start) || '08:00'}" oninput="checkRnDuration()">
+        </div>
+        <div class="field">
+          <label>结束</label>
+          <input type="time" id="rn-end" value="${(state.rnTimes && state.rnTimes.end) || '22:00'}" oninput="checkRnDuration()">
+        </div>
+      </div>
+      <div class="tiny" id="rn-duration-hint" style="color:var(--warn);display:none"></div>
+    </div>
+    <div class="row-flex mt-lg">
+      <button class="btn ghost grow" onclick="closeSheet()">取消</button>
+      <button class="btn accent grow" onclick="submitReserveNow()">确认预约</button>
+    </div>`;
+  },
+
+  // 全馆预约概况：数据在 loadOccupancy() 里已经拉好，这里只是画
+  'lib-occupancy': () => occupancySheetHtml(),
+
+  'study-time-info': () => studyTimeSheetHtml(false),
+  'study-time-consent': () => studyTimeSheetHtml(true),
+  'study-time-off': () => `
+    <div class="grab"></div>
+    <h3>关闭真实在馆时长</h3>
+    <div class="desc">关闭后不再采集新的记录。已经采集到的明细怎么处理？</div>
+    <div class="col gap-sm">
+      <label class="box tight" style="display:flex;gap:10px;align-items:flex-start;cursor:pointer">
+        <input type="radio" name="study-keep" value="keep" checked style="margin-top:3px">
+        <div><div class="sub" style="font-weight:700">保留</div>
+        <div class="t">已有的精确记录原样留着，学习记录继续按它们统计。</div></div>
+      </label>
+      <label class="box tight" style="display:flex;gap:10px;align-items:flex-start;cursor:pointer">
+        <input type="radio" name="study-keep" value="blur" style="margin-top:3px">
+        <div><div class="sub" style="font-weight:700">模糊保留</div>
+        <div class="t">只留每次从签到到结束的时长，起止时间按半小时取整；中间的暂离、返回明细删掉。</div></div>
+      </label>
+      <label class="box tight" style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;border-left:4px solid var(--danger)">
+        <input type="radio" name="study-keep" value="delete" style="margin-top:3px">
+        <div><div class="sub" style="font-weight:700">删除</div>
+        <div class="t">永久删除全部采集明细，无法恢复；学习记录退回按预约时段统计。删之前可以先导出一份。</div></div>
+      </label>
+    </div>
+    <button class="btn ghost mt" style="width:100%" onclick="exportStudyTime()">⬇ 导出明细（CSV，Excel 可打开）</button>
+    <div class="row-flex mt">
+      <button class="btn ghost grow" onclick="closeSheet()">取消</button>
+      <button class="btn accent grow" onclick="confirmStudyTimeOff()">确认关闭</button>
+    </div>
+  `,
+
+  'nap-about': () => `
+    <div class="grab"></div>
+    <h3>😴 一键午休</h3>
+    <div class="desc">专为午休设计的快捷功能，出门吃饭前点一下，回来时座位还在。</div>
+    <div class="col gap-sm">
+      <div class="box tight" style="border-left:4px solid var(--accent)">
+        <div class="sub" style="font-weight:700">✓ 自动续约下午</div>
+        <div class="t">系统立即取消当前预约，并以相同座位重新预约下午时段（默认 14:00 起）</div>
+      </div>
+      <div class="box tight" style="border-left:4px solid var(--ok)">
+        <div class="sub" style="font-weight:700">✓ 每日自动触发</div>
+        <div class="t">在设置页开启后，每天到触发时刻（默认 12:00）自动执行，无需手动操作。上午没约或已结束也会直接把下午约上（座位按午休设置，没设就用抢座座位；结束时间没设就到闭馆）</div>
+      </div>
+      <div class="box tight" style="border-left:4px solid var(--danger)">
+        <div class="sub" style="font-weight:700">⚠ 极小占座风险</div>
+        <div class="t">取消到重新预约约需 1 秒，极低概率被他人抢占</div>
+      </div>
+    </div>
+    <button class="btn primary mt-lg" style="width:100%" onclick="closeSheet()">好的</button>
+  `,
+
+  'nap-confirm': () => {
+    const resv = state.todayResv;
+    const currentSeat = (resv && resv.devInfo && resv.devInfo.devName) || '';
+    const nc = state.napConfig || {};
+    const defStart = nc.start_time || '14:00';
+    const defSeat = nc.seat || '';
+    const isoDay = new Date().getDay() || 7;
+    const { max } = timeBounds(isoDay);
+    const zones = sortedZones();
+    return `
+    <div class="grab"></div>
+    <h3>😴 午休设置</h3>
+    <div class="desc">当前座位：<strong>${escHtml(currentSeat || '未知')}</strong></div>
+    <div class="col gap-sm">
+      <div class="field"><label>午休结束（回来时间）</label>
+        <select id="nap-start" class="time-input">${timeOptionsHtml('08:00', max, defStart)}</select>
+      </div>
+      <div class="field">
+        <label>座位</label>
+        <select id="nap-seat-mode" onchange="onNapSeatMode(this.value)">
+          <option value="same"${!defSeat ? ' selected' : ''}>当前座位（${escHtml(currentSeat || '自动')}）</option>
+          <option value="custom"${defSeat ? ' selected' : ''}>自定义座位</option>
+        </select>
+      </div>
+      <div id="nap-custom-seat" style="display:${defSeat ? 'block' : 'none'}">
+        ${frequentSeatChips('nap-zone','nap-seat-pick')}
+        <div class="col gap-sm">
+          <div class="field"><label>楼层 / 区域</label>
+            <select id="nap-zone" onchange="onZone(this.value,'nap-seat-pick')">
+              <option value="">选择...</option>
+              ${zones.map(z => `<option value="${escHtml(z)}">${escHtml(z)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field"><label>座位号</label>
+            <select id="nap-seat-pick"><option value="">先选楼层</option></select>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="row-flex mt-lg" style="gap:8px">
+      <button class="btn ghost grow" onclick="closeSheet()">取消</button>
+      <button class="btn primary grow" onclick="saveNapConfig(false)">仅保存</button>
+      <button class="btn accent grow" id="btn-nap-confirm" onclick="doNap()">确认午休</button>
+    </div>`;
+  },
+
+  'nap-settings': () => {
+    const nc = state.napConfig || {};
+    const defStart = nc.start_time || '14:00';
+    const defSeat = nc.seat || '';
+    const autoDaily = nc.auto_daily || false;
+    const triggerTime = nc.trigger_time || '12:00';
+    const isoDay = new Date().getDay() || 7;
+    const { max } = timeBounds(isoDay);
+    const zones = sortedZones();
+    return `
+    <div class="grab"></div>
+    <h3>😴 午休配置</h3>
+    <div class="desc">默认 12:00 出门，14:00 回来。下午时段自动续约到原预约结束。</div>
+    <div class="col gap-sm">
+      <div class="time-pair" style="display:flex;gap:8px">
+        <div class="field" style="flex:1"><label>午休开始</label>
+          <select id="ns-trigger" class="time-input">${timeOptionsHtml('08:00', '22:00', triggerTime)}</select>
+        </div>
+        <div class="field" style="flex:1"><label>午休结束</label>
+          <select id="ns-start" class="time-input">${timeOptionsHtml('08:00', max, defStart)}</select>
+        </div>
+      </div>
+      <div class="field">
+        <label>默认座位</label>
+        <select id="ns-seat-mode" onchange="onNapSettingsSeatMode(this.value)">
+          <option value="same"${!defSeat ? ' selected' : ''}>当前预约的座位（自动）</option>
+          <option value="custom"${defSeat ? ' selected' : ''}>固定自定义座位</option>
+        </select>
+      </div>
+      <div id="ns-custom-seat" style="display:${defSeat ? 'block' : 'none'}">
+        ${frequentSeatChips('ns-zone','ns-seat-pick')}
+        <div class="col gap-sm">
+          <div class="field"><label>楼层 / 区域</label>
+            <select id="ns-zone" onchange="onZone(this.value,'ns-seat-pick')">
+              <option value="">选择...</option>
+              ${zones.map(z => `<option value="${escHtml(z)}">${escHtml(z)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field"><label>座位号</label>
+            <select id="ns-seat-pick"><option value="">先选楼层</option></select>
+          </div>
+        </div>
+      </div>
+      <div class="toggle-row" style="border:0;padding:4px 0">
+        <div class="info">
+          <div class="t1">每日自动午休</div>
+          <div class="t2">每天到「午休开始」时刻自动执行</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="ns-auto-daily" ${autoDaily ? 'checked' : ''}><span class="slider"></span></label>
+      </div>
+    </div>
+    <div class="row-flex mt-lg">
+      <button class="btn ghost grow" onclick="closeSheet()">取消</button>
+      <button class="btn accent grow" onclick="saveNapSettings()">保存</button>
+    </div>`;
+  },
+};
+
+// ========== 一键午休 ==========
+
+// 把标了 data-nap-wip 的入口拆掉点击行为，并在说明下面补一行小字。
+// 只认 DOM 上的标记，所以以后恢复功能时改 NAP_DISABLED 一个常量就够。
+function applyNapWip(){
+  if(!NAP_DISABLED) return;
+  document.querySelectorAll('[data-nap-wip]').forEach(row => {
+    if(row.dataset.napWipDone) return;
+    row.dataset.napWipDone = '1';
+    row.removeAttribute('onclick');
+    row.onclick = null;
+    row.classList.add('wip-row');
+    row.style.cursor = 'not-allowed';   // 行上有内联 cursor:pointer，class 盖不住
+    const tg = row.querySelector('.toggle');
+    if(tg){
+      tg.classList.remove('on');
+      tg.removeAttribute('onclick');
+      tg.onclick = null;
+    }
+    const info = row.querySelector('.info');
+    if(info && !info.querySelector('.wip-note')){
+      const note = document.createElement('div');
+      note.className = 't2 wip-note';
+      note.textContent = NAP_WIP_TEXT;
+      info.appendChild(note);
+    }
+  });
+}
+
+// 入口都拆了，这里只兜住老客户端和手搓请求
+function napBlocked(){
+  if(!NAP_DISABLED) return false;
+  toast('午休功能维护中 🚧','info');
+  return true;
+}
+
+async function loadNapConfig(){
+  if(!state.currentPid) return;
+  try{
+    const { ok, data } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/nap_config`);
+    if(ok) state.napConfig = data;
+  }catch(e){}
+  updateNapSettingsLabel();
+}
+
+function updateNapSettingsLabel(){
+  const el = $('nap-settings-label');
+  if(!el) return;
+  const nc = state.napConfig || {};
+  const seat = nc.seat ? nc.seat : '同座位';
+  const trigger = nc.trigger_time || '12:00';
+  const start = nc.start_time || '14:00';
+  const auto = nc.auto_daily ? '，每日自动' : '';
+  el.textContent = `午休 ${trigger}–${start}，${seat}${auto}`;
+}
+
+function openNap(){
+  if(napBlocked()) return;
+  if(!state.todayResv){ toast('今日无预约','info'); return; }
+  if(!localStorage.getItem('autolib_nap_ack')){
+    openSheet('nap-info');
+  }else{
+    openSheet('nap-confirm');
+  }
+}
+
+function acknowledgeNap(){
+  localStorage.setItem('autolib_nap_ack','1');
+  closeSheet();
+  setTimeout(() => openSheet('nap-confirm'), 100);
+}
+
+function onNapSeatMode(val){
+  const el = $('nap-custom-seat');
+  if(el) el.style.display = val === 'custom' ? 'block' : 'none';
+}
+
+function onNapSettingsSeatMode(val){
+  const el = $('ns-custom-seat');
+  if(el) el.style.display = val === 'custom' ? 'block' : 'none';
+}
+
+async function saveNapConfig(closeAfter=true){
+  if(napBlocked()) return;
+  const start = ($('nap-start') || {}).value;
+  const seatMode = ($('nap-seat-mode') || {}).value;
+  let seat = '';
+  if(seatMode === 'custom'){
+    const seatEl = $('nap-seat-pick');
+    seat = seatEl ? (seatEl.options[seatEl.selectedIndex]?.value || '') : '';
+    if(!seat || seat === '先选楼层'){ toast('请先选择自定义座位','error'); return; }
+  }
+  const cfg = { ...state.napConfig, start_time: start, end_time: '', seat };
+  const { ok } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/nap_config`,
+    { method:'POST', body: cfg });
+  if(ok){
+    state.napConfig = cfg;
+    updateNapSettingsLabel();
+    toast('午休配置已保存','success');
+    if(closeAfter) closeSheet();
+  }else{
+    toast('保存失败','error');
+  }
+}
+
+async function saveNapSettings(){
+  if(napBlocked()) return;
+  const start = ($('ns-start') || {}).value || '14:00';
+  const triggerTime = ($('ns-trigger') || {}).value || '12:00';
+  if(triggerTime >= start){ toast('午休结束必须晚于开始','error'); return; }
+  const seatMode = ($('ns-seat-mode') || {}).value;
+  let seat = '';
+  if(seatMode === 'custom'){
+    const seatEl = $('ns-seat-pick');
+    seat = seatEl ? (seatEl.options[seatEl.selectedIndex]?.value || '') : '';
+    if(!seat || seat === '先选楼层'){ toast('请先选择自定义座位','error'); return; }
+  }
+  const autoDaily = ($('ns-auto-daily') || {}).checked || false;
+  const cfg = { start_time: start, end_time: '', seat, auto_daily: autoDaily, trigger_time: triggerTime };
+  const { ok } = await api(`/api/my/accounts/${encodeURIComponent(state.currentPid)}/nap_config`,
+    { method:'POST', body: cfg });
+  if(ok){
+    state.napConfig = cfg;
+    updateNapSettingsLabel();
+    toast('午休配置已保存','success');
+    closeSheet();
+  }else{
+    toast('保存失败','error');
+  }
+}
+
+async function doNap(){
+  if(napBlocked()) return;
+  if(!state.todayResv){ toast('今日无预约','info'); return; }
+  const start = ($('nap-start') || {}).value;
+  // end 继承当前预约结束时间
+  const end = ((state.todayResv.resvEndTime || '').split(' ')[1] || '').slice(0,5);
+  if(!start || !end){ toast('请检查时间','error'); return; }
+  if(start >= end){ toast('回来时间晚于原预约结束','error'); return; }
+
+  const seatMode = ($('nap-seat-mode') || {}).value;
+  let seat = '';
+  if(seatMode === 'custom'){
+    const seatEl = $('nap-seat-pick');
+    seat = seatEl ? (seatEl.options[seatEl.selectedIndex]?.value || '') : '';
+    if(!seat || seat === '先选楼层'){ toast('请先选择自定义座位','error'); return; }
+  }else{
+    seat = (state.todayResv.devInfo && state.todayResv.devInfo.devName) || '';
+  }
+  if(!seat){ toast('无法获取座位信息','error'); return; }
+
+  const btn = $('btn-nap-confirm');
+  if(btn) btn.disabled = true;
+  closeSheet();
+
+  toast('取消中…','info');
+  const { ok, data } = await api(
+    `/api/my/accounts/${encodeURIComponent(state.currentPid)}/nap`,
+    { method:'POST', body: { uuid: state.todayResv.uuid, resv_status: state.todayResv.resvStatus, seat, start_time: start, end_time: end } }
+  );
+  if(btn) btn.disabled = false;
+
+  if(!ok){
+    toast(data.error || '午休失败','error');
+    return;
+  }
+  if(!data.cancel_success){
+    toast(data.error || '取消失败','error');
+    return;
+  }
+  if(data.success){
+    toast('午休成功 😴 下午见！','success');
+  }else{
+    toast('取消成功，但重新预约失败，请手动预约下午时段','error');
+    if(data.result) alert('重新预约结果：\n\n' + data.result);
+  }
+  state.todayResv = null;
+  loadReservations();
+}
+
+// ========== end 一键午休 ==========
+
+async function doReserveToday(){
+  const zone = ($('rt-zone') || {}).value;
+  const seatEl = $('rt-seat');
+  const seat = seatEl ? seatEl.options[seatEl.selectedIndex]?.value : '';
+  const start = ($('rt-start') || {}).value;
+  const end = ($('rt-end') || {}).value;
+
+  if(!zone || !seat || seat === '先选楼层') { toast('请先选择座位','error'); return; }
+  if(!start || !end || start >= end) { toast('请检查时间段','error'); return; }
+
+  const fullSeat = seat;
+  const btn = $('btn-rt-confirm');
+  if(btn) btn.disabled = true;
+
+  const { ok, data } = await api(
+    `/api/my/accounts/${encodeURIComponent(state.currentPid)}/reserve_custom`,
+    { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ seat: fullSeat, start_time: start, end_time: end }) }
+  );
+
+  if(btn) btn.disabled = false;
+
+  if(ok){
+    closeSheet();
+    toast(data.success ? '预约成功 🎉' : (data.result || '预约完成'), data.success ? 'success' : 'info');
+    loadReservations();
+    if(data.result && !data.success) alert('预约结果：\n\n' + data.result);
+  } else {
+    toast(data.error || '预约失败','error');
+  }
+}
+
+// 说明和同意用同一份文案：用户点「说明」看的和点开关时看的必须是同一段话
+function studyTimeSheetHtml(asking){
+  return `
+    <div class="grab"></div>
+    <h3>真实在馆时长</h3>
+    <div class="desc">默认的学习时长按预约时段算，中午出去吃饭、提前离开都算在里面。开启后改用图书馆记录的实际在座时间。</div>
+    <div class="col gap-sm">
+      <div class="box tight" style="border-left:4px solid var(--accent)">
+        <div class="sub" style="font-weight:700">会查询什么</div>
+        <div class="t">每晚 22:10（也可以随时手动点「立即同步」），用你的账号向图书馆查询当天每条预约的操作记录：具体的签到、暂离、返回、结束时刻。</div>
+      </div>
+      <div class="box tight" style="border-left:4px solid var(--warn)">
+        <div class="sub" style="font-weight:700">保存在哪、谁能看</div>
+        <div class="t">这些时刻会保存在本站服务器上，只有你自己能看到。管理员仅在排查故障等技术原因时可能接触到，不会用于其他用途。</div>
+      </div>
+      <div class="box tight" style="border-left:4px solid var(--ok)">
+        <div class="sub" style="font-weight:700">随时可以关</div>
+        <div class="t">关闭时由你选：已采集的明细删除、原样保留、或只留半小时粒度的起止时长；删除前可以先导出成表格。</div>
+      </div>
+    </div>
+    ${asking
+      ? `<div class="row-flex mt-lg">
+          <button class="btn ghost grow" onclick="closeSheet()">暂不开启</button>
+          <button class="btn accent grow" onclick="setStudyTimeConsent(true)">同意并开启</button>
+        </div>`
+      : `<button class="btn primary mt-lg" style="width:100%" onclick="closeSheet()">我知道了</button>`}
+  `;
+}
+
+function openSheet(name){
+  const sc = $('scrim');
+  const content = $('sheet-content');
+  const tpl = SHEETS[name];
+  content.innerHTML = tpl ? tpl() : '<div class="grab"></div><h3>未实现</h3>';
+  sc.classList.add('show');
+  if(name === 'welcome' || name === 'school-notice' || name === 'lp-info' || name === 'lp-warning' || name === 'cancel' || name === 'cancel-tomorrow' || name === 'nap-info' || name === 'nap-about' || name === 'study-time-info' || name === 'study-time-consent' || name === 'study-time-off') sc.classList.add('center');
+  else sc.classList.remove('center');
+  if(name === 'lib-occupancy') renderOccupancySheet();
+}
+function closeSheet(){
+  $('scrim').classList.remove('show');
+  if(state.pendingAnnouncementPopup && !schoolNoticeDismissed(state.pendingAnnouncementPopup)){
+    setTimeout(() => openSheet('school-notice'), 0);
+  }
+}
+
+// ---------- welcome ----------
+// 演示模式默认跳过，免得挡住截图（?demo=1&welcome=1 可以强制显示）
+function shouldShowWelcome(){
+  if(window.__autolibSkipWelcome) return false;
+  try{ return localStorage.getItem(WELCOME_KEY) !== '1'; }
+  catch(e){ return false; }   // 隐私模式下读不到 storage，就别反复弹
+}
+
+function acknowledgeWelcome(){
+  try{ localStorage.setItem(WELCOME_KEY, '1'); }catch(e){}
+  closeSheet();
+}
+
+// ---------- visit stats ----------
+async function loadVisitStats(){
+  const box = $('visit-stats-box');
+  if(!box) return;
+  try{
+    const { ok, data } = await api('/api/my/visit_stats');
+    if(ok) renderVisitStats(data);
+    else box.innerHTML = '<div class="tiny" style="color:var(--ink3);text-align:center">暂无道馆数据</div>';
+  }catch(e){
+    box.innerHTML = '<div class="tiny" style="color:var(--ink3);text-align:center">暂无道馆数据</div>';
+  }
+}
+
+// 每天的学习时长分 5 档，配色对应 --heat0..4
+function heatLevel(minutes){
+  if(!minutes) return 0;
+  if(minutes <= 120) return 1;
+  if(minutes <= 240) return 2;
+  if(minutes <= 360) return 3;
+  return 4;
+}
+
+function localDateKey(d){
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+// 老版本后端没有 daily 字段，用 recent 兜底才不至于画出一张空图。
+// recent 只有最近 10 条，热力图会不全——服务端更新后就走 daily。
+function dailyFromRecent(recent){
+  const byDate = new Map();
+  (recent || []).forEach(r => {
+    if(!r.date) return;
+    const cur = byDate.get(r.date) || { date: r.date, visits: 0, minutes: 0 };
+    cur.visits += 1;
+    cur.minutes += (r.duration_minutes || 0);
+    byDate.set(r.date, cur);
+  });
+  return [...byDate.values()];
+}
+
+/**
+ * GitHub 贡献图式的热力图：每列一周（周一在最上），从左到右由远及近。
+ * 从这个用户有记录的第一天画到今天（后端最多给最近 53 周），
+ * 不按学期、也不铺满整年——前面一大段空格没有信息量。
+ */
+function heatmapHtml(daily){
+  const byDate = new Map((daily || []).map(x => [x.date, x]));
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const firstKey = (daily || []).map(x => x.date).filter(Boolean).sort()[0];
+  const start = firstKey ? new Date(firstKey + 'T00:00:00') : new Date(today);
+  if(isNaN(start) || start > today) start.setTime(today.getTime());
+  const rangeLabel = `自 ${start.getFullYear() === today.getFullYear() ? '' : start.getFullYear() + '年'}${start.getMonth() + 1}月${start.getDate()}日起`;
+  // 对齐到周一，保证每一列都是完整的一周
+  const startIso = start.getDay() === 0 ? 7 : start.getDay();
+  start.setDate(start.getDate() - (startIso - 1));
+
+  const cells = [];
+  const months = [];
+  let lastMonth = -1;
+  for(let d = new Date(start); d <= today; d.setDate(d.getDate() + 1)){
+    const key = localDateKey(d);
+    const hit = byDate.get(key);
+    const minutes = hit ? hit.minutes : 0;
+    const visits = hit ? hit.visits : 0;
+    const isToday = key === localDateKey(today);
+    const title = visits
+      ? `${key} · ${visits} 次 · ${Math.floor(minutes/60)}h${minutes%60}m`
+      : `${key} · 没有记录`;
+    cells.push(
+      `<div class="cell l${heatLevel(minutes)}${isToday ? ' today' : ''}" title="${title}"></div>`
+    );
+    // 每周一记一次列首，用于标月份
+    if((d.getDay() === 1 || cells.length === 1)){
+      const m = d.getMonth();
+      months.push(m !== lastMonth ? `<span>${m + 1}月</span>` : '<span></span>');
+      lastMonth = m;
+    }
+  }
+  // 末尾补满一列，避免最后一周残缺导致列错位
+  while(cells.length % 7 !== 0) cells.push('<div class="cell void"></div>');
+
+  const columns = cells.length / 7;
+  return `
+    <div class="heatmap-wrap">
+      <div class="heatmap-inner">
+        <div class="heatmap-months" style="grid-template-columns:repeat(${columns},11px)">${months.join('')}</div>
+        <div class="heatmap" style="grid-template-columns:repeat(${columns},11px)">${cells.join('')}</div>
+      </div>
+    </div>
+    <div class="heatmap-legend">
+      <span>少</span>
+      <span class="cell"></span><span class="cell l1"></span><span class="cell l2"></span>
+      <span class="cell l3"></span><span class="cell l4"></span>
+      <span>多</span>
+      <span style="margin-left:auto">${rangeLabel}</span>
+    </div>`;
+}
+
+function renderVisitStats(d){
+  const box = $('visit-stats-box');
+  if(!box) return;
+  state.visitStats = d;   // 翻月时要用同一份数据重画
+  const fmtH = m => {
+    const h = Math.floor(m / 60), min = m % 60;
+    return h > 0 ? (min > 0 ? `${h}h${min}m` : `${h}h`) : `${min}m`;
+  };
+  if(!d || d.total_visits === 0){
+    box.innerHTML = `<div class="sub" style="color:var(--ink3);text-align:center">还没有学习记录</div>
+      <div class="tiny mt" style="color:var(--ink3);text-align:center">系统检测到签到后自动记录</div>`;
+    return;
+  }
+  box.innerHTML = `
+    <div class="row-between" style="margin-bottom:10px">
+      <div style="text-align:center;flex:1">
+        <div class="h2" style="color:var(--accent)">${d.this_week_visits}</div>
+        <div class="tiny">本周次数</div>
+      </div>
+      <div style="text-align:center;flex:1">
+        <div class="h2" style="color:var(--accent)">${fmtH(d.this_week_minutes)}</div>
+        <div class="tiny">本周时长</div>
+      </div>
+      <div style="text-align:center;flex:1">
+        <div class="h2">${d.total_visits}</div>
+        <div class="tiny">累计次数</div>
+      </div>
+      <div style="text-align:center;flex:1">
+        <div class="h2">${fmtH(d.total_minutes)}</div>
+        <div class="tiny">累计时长</div>
+      </div>
+    </div>
+    ${heatmapHtml((d.daily && d.daily.length) ? d.daily : dailyFromRecent(d.recent))}
+    ${d.real_time ? '<div class="tiny mt" style="color:var(--ink3);text-align:center">按真实在馆时长统计，每晚 22:10 更新；还没结束的预约暂按预约时段计</div>' : ''}`;
+}
+
+// ---------- 全馆预约概况 ----------
+// 每天 07:10 调度器把早上三张占用快照压成一条（seat_occupancy_daily），
+// 这里读 /api/library/occupancy 画折线：横轴是日子，纵轴是 07:05 时全馆被约走的比例。
+// 只有区域级的数字，不带座位号也不带人。
+const OCC = { days: [], range: 90, selected: -1 };
+const WEEKDAY_CN = ['', '周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+
+function occPct(day, tag){
+  const n = day && day.booked ? day.booked[tag] : null;
+  if(n == null || !day.seats_total) return null;
+  return n / day.seats_total * 100;
+}
+function occDateLabel(day, withWeekday){
+  const md = day.date.slice(5).replace('-', '/');
+  return withWeekday ? `${md} ${WEEKDAY_CN[day.weekday] || ''}` : md;
+}
+function occMinuteLabel(m){
+  return `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}`;
+}
+// 探针采样点：开闸后的秒数 → 「7:00前 / +1s / +5m / 8:30」这样的短标签
+function occFillLabel(offset){
+  if(offset < 0) return '7:00前';
+  if(offset < 60) return `+${offset}s`;
+  if(offset < 1800) return `+${Math.round(offset / 60)}m`;
+  return occMinuteLabel(7 * 60 + Math.round(offset / 60));
+}
+
+async function loadOccupancy(){
+  const card = $('occupancy-card');
+  if(!card) return;
+  try{
+    const { ok, data } = await api('/api/library/occupancy?days=366');
+    if(!ok || !data || !Array.isArray(data.days) || !data.days.length) return;   // 还没汇总过就不显示入口
+    OCC.days = data.days;
+    OCC.selected = OCC.days.length - 1;
+    renderOccupancyCard();
+  }catch(e){ /* 概况只是锦上添花，拉不到就不显示 */ }
+}
+
+function renderOccupancyCard(){
+  const card = $('occupancy-card');
+  const last = OCC.days[OCC.days.length - 1];
+  if(!card || !last) return;
+  const pct = occPct(last, 'post');
+  const prev = OCC.days.length > 1 ? occPct(OCC.days[OCC.days.length - 2], 'post') : null;
+  const delta = (pct != null && prev != null) ? pct - prev : null;
+  const updated = $('occupancy-updated');
+  if(updated) updated.textContent = last.generated_at ? `${last.generated_at} 更新` : '';
+  $('occupancy-preview').innerHTML = `
+    <div class="row-between" style="align-items:flex-end;gap:14px">
+      <div style="flex:0 0 auto">
+        <div class="h2" style="color:var(--accent)">${pct == null ? '--' : pct.toFixed(1) + '%'}</div>
+        <div class="tiny">${escHtml(occDateLabel(last, true))} 开抢 5 分钟后全馆已约</div>
+        ${delta == null ? '' : `<div class="tiny" style="margin-top:2px">较前一天 ${delta >= 0 ? '+' : ''}${delta.toFixed(1)} 个百分点</div>`}
+      </div>
+      <div style="flex:1;min-width:0">${occSparklineSvg(OCC.days.slice(-30))}</div>
+    </div>
+    <div class="tiny mt" style="color:var(--ink3)">点开看逐日折线、一天里从早到晚的曲线和各区域 ›</div>`;
+  card.style.display = '';
+}
+
+// 设置页卡片上的迷你折线，只画 07:05 那条，不带轴
+function occSparklineSvg(days){
+  const pts = days.map(d => occPct(d, 'post')).filter(v => v != null);
+  if(pts.length < 2) return '';
+  const W = 120, H = 40, max = Math.max(...pts, 1);
+  const x = i => (i / (pts.length - 1)) * (W - 8) + 4;
+  const y = v => H - 4 - (v / max) * (H - 8);
+  const path = pts.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  const lastX = x(pts.length - 1), lastY = y(pts[pts.length - 1]);
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:${W}px;height:${H}px;display:block;margin-left:auto" aria-hidden="true">
+    <path d="${path} L${lastX.toFixed(1)},${H} L4,${H} Z" fill="var(--accent)" opacity=".1"/>
+    <path d="${path}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+    <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="4" fill="var(--accent)" stroke="var(--surface)" stroke-width="2"/>
+  </svg>`;
+}
+
+function occVisibleDays(){
+  return OCC.range > 0 ? OCC.days.slice(-OCC.range) : OCC.days;
+}
+
+function occupancySheetHtml(){
+  if(!OCC.days.length){
+    return `<div class="grab"></div><h3>📈 图书馆预约情况</h3>
+      <div class="desc">还没有汇总数据，每天早上 7:10 统计一次。</div>
+      <button class="btn primary mt-lg" style="width:100%" onclick="closeSheet()">我知道了</button>`;
+  }
+  const ranges = [[30, '30 天'], [90, '90 天'], [0, '全部']];
+  return `
+    <div class="grab"></div>
+    <h3>📈 图书馆预约情况</h3>
+    <div class="seg" id="occ-range">
+      ${ranges.map(([n, label]) => `<button type="button" class="${n === OCC.range ? 'on' : ''}" onclick="setOccRange(${n})">${label}</button>`).join('')}
+    </div>
+    <div class="occ-legend">
+      <span><i class="occ-key" style="background:var(--accent)"></i>07:05 开抢五分钟后</span>
+      <span><i class="occ-key" style="background:var(--tmr)"></i>07:01 开抢一分钟后</span>
+    </div>
+    <div class="occ-chart" id="occ-trend"></div>
+    <div class="tiny" style="color:var(--ink3);text-align:center">点一下折线上的某一天，下面看那天的详情</div>
+    <div class="box tight mt" id="occ-day"></div>
+    <details class="occ-table mt">
+      <summary class="tiny">查看数据表</summary>
+      <div id="occ-table-body"></div>
+    </details>
+    <button class="btn primary mt-lg" style="width:100%" onclick="closeSheet()">我知道了</button>`;
+}
+
+function setOccRange(n){
+  OCC.range = n;
+  document.querySelectorAll('#occ-range > button').forEach((b, i) => b.classList.toggle('on', [30, 90, 0][i] === n));
+  const visible = occVisibleDays();
+  if(!visible.includes(OCC.days[OCC.selected])) OCC.selected = OCC.days.length - 1;
+  renderOccupancySheet();
+}
+
+function selectOccDay(index){
+  OCC.selected = index;
+  renderOccupancySheet();
+}
+
+function renderOccupancySheet(){
+  const trend = $('occ-trend');
+  if(!trend) return;
+  const visible = occVisibleDays();
+  const selected = OCC.days[OCC.selected];
+  drawLineChart(trend, {
+    labels: visible.map(d => occDateLabel(d)),
+    series: [
+      { name: '07:05', color: 'var(--accent)', area: true, values: visible.map(d => occPct(d, 'post')) },
+      { name: '07:01', color: 'var(--tmr)', values: visible.map(d => occPct(d, 'rush')) },
+    ],
+    selected: visible.indexOf(selected),
+    height: 180,
+    tooltipTitle: i => occDateLabel(visible[i], true),
+    onSelect: i => selectOccDay(OCC.days.indexOf(visible[i])),
+  });
+  renderOccupancyDay(selected);
+  renderOccupancyTable(visible);
+}
+
+function renderOccupancyDay(day){
+  const box = $('occ-day');
+  if(!box || !day) return;
+  const post = day.booked.post, rush = day.booked.rush, pre = day.booked.pre;
+  const pct = occPct(day, 'post');
+  const rooms = (day.rooms || []).slice().sort((a, b) => (b.booked / (b.seats || 1)) - (a.booked / (a.seats || 1)));
+  const curve = day.curve || {};
+  const occupied = curve.occupied || [];
+  // 探针的填充曲线：横轴是查询时刻，不是使用时段。开闸那一刻钟按秒/分钟，
+  // 点与点之间不等距，和白天每半小时那段分开画，免得前 15 分钟被压成一条竖线。
+  const fill = Array.isArray(day.fill) ? day.fill : [];
+  const rushFill = fill.filter(f => f.offset <= 900);
+  const dayFill = fill.filter(f => f.offset >= 1800);
+  const fillPct = f => day.seats_total ? f.booked / day.seats_total * 100 : 0;
+  const slotLabels = occupied.map((_, i) => occMinuteLabel((curve.from || 420) + i * (curve.step || 30)));
+  box.innerHTML = `
+    <div class="row-between">
+      <div class="sub" style="font-weight:700">${escHtml(occDateLabel(day, true))}</div>
+      <div class="tiny">07:05 已约 <b>${post}</b> / ${day.seats_total}（${pct == null ? '--' : pct.toFixed(1) + '%'}）</div>
+    </div>
+    <div class="tiny" style="color:var(--ink3);margin-top:2px">
+      7:00 前 ${pre == null ? '未拍' : pre + ' 张'} · 07:01 已约 ${rush == null ? '未拍' : rush + ' 张'} · 07:05 已约 ${post} 张
+    </div>
+    <div class="tiny" style="margin-top:10px">这天从早到晚每个时段有多少座位被约（按 07:05 那批预约算）</div>
+    <div class="occ-chart sm" id="occ-curve"></div>
+    ${rushFill.length ? `
+    <div class="tiny" style="margin-top:10px">开闸那一刻钟：第几秒被抢走多少</div>
+    <div class="occ-chart sm" id="occ-fill-rush"></div>` : ''}
+    ${dayFill.length ? `
+    <div class="tiny" style="margin-top:10px">前一天从早到晚每半小时查一次，这块板子是几点被填满的</div>
+    <div class="occ-chart sm" id="occ-fill-day"></div>` : ''}
+    <div class="tiny" style="margin-top:8px">各区域 07:05 已约占比</div>
+    <div class="occ-rooms">
+      ${rooms.map(r => {
+        const p = r.seats ? r.booked / r.seats * 100 : 0;
+        return `<div class="occ-room">
+          <div class="occ-room-name">${escHtml(r.name || '')}</div>
+          <div class="occ-room-bar"><i style="width:${p.toFixed(1)}%"></i></div>
+          <div class="occ-room-val">${r.booked}/${r.seats} · ${p.toFixed(0)}%</div>
+        </div>`;
+      }).join('')}
+    </div>`;
+  drawLineChart($('occ-curve'), {
+    labels: slotLabels,
+    series: [{ name: '在约座位', color: 'var(--accent)', area: true,
+               values: occupied.map(n => day.seats_total ? n / day.seats_total * 100 : 0) }],
+    height: 120,
+    xEvery: 4,   // 每两小时标一个
+    tooltipTitle: i => `${slotLabels[i]} 起半小时`,
+    tooltipExtra: i => `${occupied[i]} 张`,
+  });
+  if(rushFill.length){
+    drawLineChart($('occ-fill-rush'), {
+      labels: rushFill.map(f => occFillLabel(f.offset)),
+      series: [{ name: '已约', color: 'var(--tmr)', area: true, values: rushFill.map(fillPct) }],
+      height: 120,
+      xEvery: 1,
+      tooltipTitle: i => `${occFillLabel(rushFill[i].offset)}${rushFill[i].at ? ' · ' + rushFill[i].at : ''}`,
+      tooltipExtra: i => `${rushFill[i].booked} 张${rushFill[i].rooms < 12 ? '（区域没拍全）' : ''}`,
+    });
+  }
+  if(dayFill.length){
+    // 区域没拍全的那一次数值偏低，画出来是一个个坑。图上把这种点换成左右最近
+    // 两个拍全的点的平均（只有一侧就照抄那一侧），提示框里的数字仍是原始值。
+    const complete = dayFill.map(f => f.rooms >= 12);
+    const raw = dayFill.map(fillPct);
+    const smoothed = raw.map((v, i) => {
+      if(complete[i]) return v;
+      let l = i - 1; while(l >= 0 && !complete[l]) l--;
+      let r = i + 1; while(r < raw.length && !complete[r]) r++;
+      const lv = l >= 0 ? raw[l] : null, rv = r < raw.length ? raw[r] : null;
+      if(lv != null && rv != null) return (lv + rv) / 2;
+      return lv != null ? lv : (rv != null ? rv : v);
+    });
+    drawLineChart($('occ-fill-day'), {
+      labels: dayFill.map(f => occFillLabel(f.offset)),
+      series: [{ name: '已约', color: 'var(--tmr)', area: true, values: smoothed }],
+      height: 120,
+      xEvery: 4,
+      tooltipTitle: i => `${occFillLabel(dayFill[i].offset)} 查到`,
+      tooltipExtra: i => `${dayFill[i].booked} 张${dayFill[i].rooms < 12 ? '（区域没拍全，图上取两侧平均）' : ''}`,
+    });
+  }
+}
+
+function renderOccupancyTable(days){
+  const body = $('occ-table-body');
+  if(!body) return;
+  body.innerHTML = `<table>
+    <tr><th>日期</th><th>07:01</th><th>07:05</th><th>占比</th></tr>
+    ${days.slice().reverse().map(d => {
+      const p = occPct(d, 'post');
+      return `<tr><td>${escHtml(occDateLabel(d, true))}</td><td>${d.booked.rush ?? '--'}</td><td>${d.booked.post}</td><td>${p == null ? '--' : p.toFixed(1) + '%'}</td></tr>`;
+    }).join('')}
+  </table>`;
+}
+
+// 通用的小折线图：inline SVG，十字线 + 提示框，点一下选中某个 x。
+// series 里的 values 允许 null（那天没拍到），线在那一段断开。
+function drawLineChart(el, opts){
+  if(!el) return;
+  const { labels, series, height = 160, selected = -1, xEvery = 0,
+          tooltipTitle, tooltipExtra, onSelect } = opts;
+  const n = labels.length;
+  const W = 400, H = height, padL = 34, padR = 12, padT = 12, padB = 22;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const all = series.flatMap(s => s.values).filter(v => v != null);
+  const rawMax = all.length ? Math.max(...all) : 0;
+  // 纵轴顶到刻度的整数倍，至少 10%，别让一条 18% 的线贴着天花板
+  const yStep = rawMax <= 30 ? 5 : (rawMax <= 60 ? 10 : 20);
+  const yMax = Math.max(10, Math.ceil(rawMax / yStep) * yStep);
+  const x = i => n > 1 ? padL + (i / (n - 1)) * plotW : padL + plotW / 2;
+  const y = v => padT + plotH - (v / yMax) * plotH;
+
+  let grid = '';
+  for(let v = 0; v <= yMax; v += yStep){
+    grid += `<line x1="${padL}" x2="${W - padR}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}" stroke="var(--ink4)" stroke-width="1"/>
+             <text x="${padL - 6}" y="${(y(v) + 3).toFixed(1)}" text-anchor="end" class="occ-tick">${v}%</text>`;
+  }
+  // 横轴标签：最多 6 个，或者按 xEvery 固定间隔
+  const every = xEvery || Math.max(1, Math.ceil(n / 6));
+  let xLabels = '';
+  for(let i = 0; i < n; i += every){
+    xLabels += `<text x="${x(i).toFixed(1)}" y="${H - 6}" text-anchor="${i === 0 ? 'start' : (i >= n - every ? 'end' : 'middle')}" class="occ-tick">${escHtml(labels[i])}</text>`;
+  }
+
+  let marks = '';
+  series.forEach(s => {
+    let d = '', open = false, segs = [];
+    s.values.forEach((v, i) => {
+      if(v == null){ open = false; return; }
+      d += `${open ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)} `;
+      if(!open) segs.push([i]);
+      segs[segs.length - 1][1] = i;
+      open = true;
+    });
+    if(s.area){
+      segs.forEach(([a, b]) => {
+        let ad = '';
+        for(let i = a; i <= b; i++) if(s.values[i] != null) ad += `${ad ? 'L' : 'M'}${x(i).toFixed(1)},${y(s.values[i]).toFixed(1)} `;
+        marks += `<path d="${ad} L${x(b).toFixed(1)},${(padT + plotH).toFixed(1)} L${x(a).toFixed(1)},${(padT + plotH).toFixed(1)} Z" fill="${s.color}" opacity=".1"/>`;
+      });
+    }
+    marks += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+    // 只给最后一个点画圆点 + 直接标值，别每个点都写数字
+    const lastIdx = s.values.length - 1 - s.values.slice().reverse().findIndex(v => v != null);
+    if(lastIdx >= 0 && s.values[lastIdx] != null){
+      marks += `<circle cx="${x(lastIdx).toFixed(1)}" cy="${y(s.values[lastIdx]).toFixed(1)}" r="4" fill="${s.color}" stroke="var(--paper)" stroke-width="2"/>`;
+    }
+  });
+  const first = series[0];
+  const lastIdx = first.values.length - 1 - first.values.slice().reverse().findIndex(v => v != null);
+  if(lastIdx >= 0 && first.values[lastIdx] != null && series.length > 1){
+    marks += `<text id="occ-endlabel" x="${(x(lastIdx) - 8).toFixed(1)}" y="${(y(first.values[lastIdx]) - 8).toFixed(1)}" text-anchor="end" class="occ-endlabel">${first.values[lastIdx].toFixed(1)}%</text>`;
+  }
+
+  el.innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;touch-action:pan-y">
+      ${grid}${xLabels}${marks}
+      <line id="occ-cross" x1="0" x2="0" y1="${padT}" y2="${padT + plotH}" stroke="var(--ink3)" stroke-width="1" style="display:none"/>
+      <g id="occ-dots"></g>
+      <rect x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" fill="transparent"/>
+    </svg>
+    <div class="occ-tip" style="display:none"></div>`;
+
+  const svg = el.querySelector('svg');
+  const cross = el.querySelector('#occ-cross');
+  const dots = el.querySelector('#occ-dots');
+  const tip = el.querySelector('.occ-tip');
+  const endLabel = el.querySelector('#occ-endlabel');
+  const showAt = (i, pinned) => {
+    if(i < 0 || i >= n) return;
+    // 提示框停在最后一天时会压住末端的数字，那会儿提示框里有同一个数，直接藏掉
+    if(endLabel) endLabel.style.display = (i === n - 1) ? 'none' : '';
+    cross.setAttribute('x1', x(i)); cross.setAttribute('x2', x(i));
+    cross.style.display = '';
+    dots.innerHTML = series.map(s => s.values[i] == null ? '' :
+      `<circle cx="${x(i).toFixed(1)}" cy="${y(s.values[i]).toFixed(1)}" r="${pinned ? 5 : 4}" fill="${s.color}" stroke="var(--paper)" stroke-width="2"/>`).join('');
+    tip.innerHTML = '';
+    const title = document.createElement('div'); title.className = 'occ-tip-title';
+    title.textContent = tooltipTitle ? tooltipTitle(i) : labels[i];
+    tip.appendChild(title);
+    series.forEach(s => {
+      const row = document.createElement('div'); row.className = 'occ-tip-row';
+      const key = document.createElement('i'); key.className = 'occ-key'; key.style.background = s.color;
+      const val = document.createElement('b'); val.textContent = s.values[i] == null ? '未拍' : s.values[i].toFixed(1) + '%';
+      const name = document.createElement('span'); name.textContent = s.name + (tooltipExtra && s.values[i] != null ? ' · ' + tooltipExtra(i) : '');
+      row.append(key, val, name); tip.appendChild(row);
+    });
+    tip.style.display = '';
+    // 提示框贴着十字线放，靠右时翻到左边
+    const rect = el.getBoundingClientRect();
+    const px = (x(i) / W) * rect.width;
+    tip.style.left = ''; tip.style.right = '';
+    if(px > rect.width * 0.6) tip.style.right = (rect.width - px + 8) + 'px';
+    else tip.style.left = (px + 8) + 'px';
+  };
+  const indexAt = evt => {
+    const rect = svg.getBoundingClientRect();
+    const px = (evt.clientX - rect.left) / rect.width * W;
+    return n > 1 ? Math.round((px - padL) / plotW * (n - 1)) : 0;
+  };
+  svg.addEventListener('pointermove', evt => showAt(Math.max(0, Math.min(n - 1, indexAt(evt))), false));
+  svg.addEventListener('pointerleave', () => {
+    if(selected >= 0) showAt(selected, true);
+    else { cross.style.display = 'none'; tip.style.display = 'none'; dots.innerHTML = ''; if(endLabel) endLabel.style.display = ''; }
+  });
+  if(onSelect) svg.addEventListener('pointerdown', evt => onSelect(Math.max(0, Math.min(n - 1, indexAt(evt)))));
+  if(selected >= 0) showAt(selected, true);
+}
+
+// ---------- 安卓客户端下载 ----------
+// 版本号和下载地址都跟着后台登记的那条走（/api/app/version，在管理页里设）。
+// 早先是写死成常量的，发版得改代码，结果页面上的链接一直停在 0.2.1——
+// 而 App 内的升级检查走的是同一个接口，早就是新的了，两边对不上。
+let apkInfo = null;
+
+async function loadApkInfo(){
+  try{
+    const { ok, data } = await api('/api/app/version');
+    if(!ok || !data || !data.download_url) return null;   // 没登记过就不显示入口
+    apkInfo = data;
+    renderApkCard();
+    return apkInfo;
+  }catch(e){
+    return null;
+  }
+}
+
+function renderApkCard(){
+  const card = $('apk-card');
+  if(!card || !apkInfo) return;
+  const version = $('apk-version');
+  if(version) version.textContent = apkInfo.version_name ? 'v' + apkInfo.version_name : '';
+  const notes = $('apk-notes');
+  if(notes) notes.textContent = apkInfo.notes || '';
+  card.style.display = '';
+}
+
+// 欢迎弹层可能比这份数据先到，所以没拿到就现拉一次再说
+async function downloadApk(){
+  const info = apkInfo || await loadApkInfo();
+  if(!info || !info.download_url){ toast('下载信息还没加载好，稍后再试','error'); return; }
+  location.href = info.download_url;
+}
+
+// ---------- home loader ----------
+async function loadHome(){
+  renderHome();
+  loadNotices();
+}
+
+// 起止联动：开始时间变化时，重建结束下拉，只保留 > 开始 的档位
+document.addEventListener('change', (e) => {
+  const el = e.target;
+  if(!el || !el.matches) return;
+  const isStart = el.matches('select.time-input[data-field="start"]') || el.id === 'tmr-start';
+  if(!isStart) return;
+  const container = el.closest('.seg-row, .time-pair');
+  if(!container) return;
+  const endEl = container.querySelector('select.time-input[data-field="end"], #tmr-end');
+  if(!endEl) return;
+  const startVal = el.value;
+  const allOpts = Array.from(el.options).map(o => o.value);
+  const endOpts = allOpts.filter(v => v > startVal);
+  if(!endOpts.length) return;
+  const currentEnd = endEl.value;
+  const newEnd = endOpts.includes(currentEnd) && currentEnd > startVal ? currentEnd : endOpts[0];
+  endEl.innerHTML = endOpts.map(o => `<option value="${o}"${o===newEnd?' selected':''}>${o}</option>`).join('');
+});
+
+// ---------- theme ----------
+const THEME_KEY = 'autolib_theme';
+const THEME_ORDER = ['system', 'light', 'dark'];
+const THEME_LABEL = { system: '跟随系统', light: '亮色', dark: '暗色' };
+const THEME_ICON = {
+  system: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M9 21h6M12 17v4"/></svg>',
+  light:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>',
+  dark:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>'
+};
+function getTheme(){
+  const t = localStorage.getItem(THEME_KEY);
+  return (t === 'light' || t === 'dark') ? t : 'system';
+}
+function setTheme(t){
+  if(t !== 'light' && t !== 'dark') t = 'system';
+  localStorage.setItem(THEME_KEY, t);
+  document.documentElement.setAttribute('data-theme', t);
+  syncThemeUI();
+}
+function cycleTheme(){
+  const cur = getTheme();
+  const next = THEME_ORDER[(THEME_ORDER.indexOf(cur) + 1) % THEME_ORDER.length];
+  setTheme(next);
+}
+function syncThemeUI(){
+  const btn = $('theme-btn');
+  if(!btn) return;
+  const cur = getTheme();
+  btn.innerHTML = THEME_ICON[cur];
+  btn.title = THEME_LABEL[cur] + '（点击切换）';
+  btn.setAttribute('aria-label', '主题：' + THEME_LABEL[cur]);
+}
+
+// ---------- demo mode ----------
+// 截图预览专用：URL 带 ?demo=1 时进入演示模式，全部数据为前端随机生成的
+// 假数据（学号 1234567），不发验证请求、不写数据库，正常访问不受影响。
+const DEMO_MODE = new URLSearchParams(location.search).has('demo');
+const DEMO_PID = '1234567';
+
+function demoRand(arr){ return arr[Math.floor(Math.random() * arr.length)]; }
+
+function demoRandomSeat(){
+  const zones = Object.values(state.allSeats || {}).flat();
+  if(zones.length) return demoRand(zones);
+  return demoRand(['2F-A101', '3F-B208', '5F-A315', '7F-A066']);
+}
+
+// 随机一个学习时段：08:00-10:30 开始，17:00-22:00 结束
+function demoRandomRange(){
+  const fmt = n => `${String(Math.floor(n / 60)).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`;
+  const start = (8 + Math.floor(Math.random() * 3)) * 60 + (Math.random() < 0.5 ? 0 : 30);
+  const end = (17 + Math.floor(Math.random() * 5)) * 60 + (Math.random() < 0.5 ? 0 : 30);
+  return [fmt(start), fmt(end)];
+}
+
+function demoReservation(offsetDays, status){
+  const [b, e] = demoRandomRange();
+  const d = localDateStr(offsetDays);
+  return {
+    uuid: 'demo-' + offsetDays,
+    resvBeginTime: `${d} ${b}:00`,
+    resvEndTime: `${d} ${e}:00`,
+    resvStatus: status,
+    devInfo: { devName: demoRandomSeat(), roomName: '图书馆' },
+  };
+}
+
+function demoVisitStats(){
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const daily = [];
+  let totalVisits = 0, totalMinutes = 0;
+  // 演示数据从 10 周前开始，看得出「有记录以来」的起点
+  const demoStart = new Date(today); demoStart.setDate(demoStart.getDate() - 70);
+  for(let d = demoStart; d <= today; d.setDate(d.getDate() + 1)){
+    const dow = d.getDay();
+    const p = (dow === 0 || dow === 6) ? 0.35 : 0.75; // 工作日常来，周末偶尔
+    if(Math.random() > p) continue;
+    const minutes = (2 + Math.floor(Math.random() * 9)) * 60 + (Math.random() < 0.5 ? 30 : 0);
+    daily.push({ date: localDateKey(d), visits: 1, minutes });
+    totalVisits += 1;
+    totalMinutes += minutes;
+  }
+  const weekStart = new Date(today);
+  weekStart.setDate(weekStart.getDate() - ((today.getDay() + 6) % 7));
+  let weekVisits = 0, weekMinutes = 0;
+  daily.forEach(x => {
+    if(new Date(x.date + 'T00:00:00') >= weekStart){ weekVisits += x.visits; weekMinutes += x.minutes; }
+  });
+  const recent = daily.slice(-10).reverse().map(x => ({
+    date: x.date,
+    seat_name: demoRandomSeat(),
+    location: '图书馆',
+    duration_minutes: x.minutes,
+  }));
+  return {
+    total_visits: totalVisits,
+    total_minutes: totalMinutes,
+    this_week_visits: weekVisits,
+    this_week_minutes: weekMinutes,
+    recent,
+    daily,
+    heatmap_days: 371,
+  };
+}
+
+async function enterDemoMode(){
+  state.isGuest = false;
+  state.uid = DEMO_PID;
+  state.nickname = '';
+  await loadSeats();
+  const seats = [...new Set([demoRandomSeat(), demoRandomSeat(), demoRandomSeat()])];
+  state.accounts = [{ pid: DEMO_PID, is_reserved: 'True', verified: true, seat_list: seats }];
+  state.currentPid = DEMO_PID;
+  state.currentCfg = {
+    pid: DEMO_PID,
+    verified: true,
+    is_reserved: 'True',
+    mode: 'week_time',
+    time: defaultWeekTime(),
+    seat_list: seats,
+    late_protection: 'True',
+    result: '',
+  };
+  state.napConfig = { start_time: '14:00', end_time: '', seat: '', auto_daily: true, trigger_time: '12:00' };
+  state.todayResv = demoReservation(0, 1093);   // 使用中
+  state.tomorrowResv = demoReservation(1, 1027); // 已预约
+  state.lateProtect = { lead_minutes: 5, shift_minutes: 60 };
+  // ?demo=1&scene=xxx 看今日卡片的各种状态：
+  //   reserved  待签到、保护中          protected 保护已顺延一次
+  //   started   预约已开始、等签到       overdue   签到已超时
+  //   lpoff     没开迟到保护            cancel    保护已顺延一次、cancel 模式
+  const scene = new URLSearchParams(location.search).get('scene');
+  if(scene){
+    const at = (offsetMin, len) => {
+      const b = new Date(Date.now() + offsetMin * 60000); b.setSeconds(0, 0);
+      const e = new Date(b.getTime() + len * 3600000);
+      if(e.getDate() !== b.getDate() || e.getHours() >= 22) e.setHours(22, 0, 0, 0);   // 别跨天，22:00 闭馆
+      const f = d => `${localDateStr(0)} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:00`;
+      state.todayResv = { ...demoReservation(0, 1027), resvBeginTime: f(b), resvEndTime: f(e) };
+    };
+    if(scene === 'reserved') at(90, 8);
+    if(scene === 'protected'){ at(45, 7); state.todayResv.by_protection = true; }
+    if(scene === 'cancel'){ at(45, 7); state.todayResv.by_protection = true; state.currentCfg.late_protection_mode = 'cancel'; }
+    if(scene === 'started') at(-8, 8);
+    if(scene === 'overdue') at(-40, 8);
+    if(scene === 'lpoff'){ at(90, 8); state.currentCfg.late_protection = 'False'; }
+  }
+  // ?demo=rest：明天配置为休息、也没预约，看「明日无预约」那条
+  if(new URLSearchParams(location.search).get('demo') === 'rest'){
+    const tmr = new Date(Date.now() + 86400000);
+    state.currentCfg.time.week_time[String(tmr.getDay() === 0 ? 7 : tmr.getDay())] = '休息';
+    state.tomorrowResv = null;
+  }
+  renderAllAccountViews();
+  renderConfig();
+  renderHome();
+  loadNotices();
+  renderVisitStats(demoVisitStats());
+  loadOccupancy();   // demo.js 会拦下接口给一份假数据
+}
+
+// ---------- init ----------
+// 「保护中 → 预约已开始 → 签到超时」是按时间翻的，页面开着不动也得跟着变
+setInterval(() => {
+  if(state.currentCfg && state.todayResv && !$('scrim').classList.contains('show')) renderTodayCard({});
+}, 30000);
+
+async function init(){
+  applyNapWip();
+  // Wire scrim click-outside
+  $('scrim').addEventListener('click', e => { if(e.target.id === 'scrim') closeSheet(); });
+
+  syncThemeUI();
+  // 平面图数据决定弹层里显不显示「按图选座」，弹层是现渲染的，所以先在后台捞好
+  loadSeatLayout();
+  if(DEMO_MODE){ await enterDemoMode(); return; }
+  // 先讲清楚这工具干什么，再去加载数据——新访客第一眼不该是一个空主页
+  if(shouldShowWelcome()) openSheet('welcome');
+  await checkAuth();
+  // Account configuration comes from MongoDB and must remain visible even if
+  // loading the seat catalogue is slow or temporarily unavailable.
+  await Promise.all([loadSeats(), loadAccounts()]);
+  loadNotices();
+  loadVisitStats();
+  loadApkInfo();
+  loadOccupancy();
+}
+
+init();

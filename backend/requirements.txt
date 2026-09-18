@@ -1,0 +1,17 @@
+flask
+# API 进程的 WSGI 服务器。Werkzeug 自带的开发服务器每个响应都 Connection: close，
+# 分机部署时 Caddy 穿隧道过来的每个请求都得重新握手（见 docker-compose.yml flask-api.command）
+gunicorn
+pycryptodome
+cryptography
+flask-limiter
+requests
+beautifulsoup4
+flask-cors
+python-dotenv
+pymongo
+apscheduler
+# 手机中继服务（relay_server.py）：WebSocket + 内部 HTTP 接口
+aiohttp
+# 仅 utils/fetch_seat_layout.py 用：把抓下来的平面图压到合适大小
+pillow

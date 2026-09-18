@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AutoLib · 自动预约暂停通知</title>
+<link href="https://fonts.googleapis.com/css2?family=Caveat:wght@600;700&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#1d1d1f; --ink2:#4a4a4f; --ink3:#8a8a90;
+    --paper:#fafaf7; --surface:#fff; --line:#2a2a2c;
+    --accent:#ff5c3a; --accent-soft:rgba(255,92,58,.08);
+    --ok:#10b981; --warn:#f59e0b; --warn-bg:rgba(245,158,11,.10);
+    --shadow:4px 4px 0 rgba(0,0,0,.14);
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --ink:#F0E8D6; --ink2:#C9BFA8; --ink3:#7E7361;
+      --paper:#16130F; --surface:#211B15; --line:#3A3128;
+      --accent:#FFD06B; --accent-soft:rgba(255,208,107,.14);
+      --ok:#7BD4A8; --warn:#FFA94D; --warn-bg:rgba(255,169,77,.12);
+      --shadow:4px 4px 0 rgba(0,0,0,.5);
+    }
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--paper); color:var(--ink);
+    font-family:"Noto Sans SC",system-ui,sans-serif;
+    line-height:1.75; -webkit-font-smoothing:antialiased;
+    padding:24px 16px 64px;
+    overflow-y:scroll; /* 滚动条常驻，避免出现/消失导致横向弹动 */
+  }
+  .wrap{max-width:560px;margin:0 auto}
+
+  .brand{
+    display:flex;align-items:center;gap:9px;
+    font-family:"Caveat",cursive;font-weight:700;font-size:26px;
+    color:var(--accent);margin:8px 2px 26px;
+  }
+  .brand .dot{width:11px;height:11px;border-radius:50%;background:var(--accent);display:inline-block}
+
+  .hero{
+    border:2.5px solid var(--line);border-radius:18px;
+    background:var(--surface);box-shadow:var(--shadow);
+    padding:26px 22px;margin-bottom:22px;
+  }
+  .tag{
+    display:inline-flex;align-items:center;gap:7px;
+    background:var(--warn-bg);color:var(--warn);
+    border-radius:999px;padding:5px 13px;font-size:13px;font-weight:700;
+    margin-bottom:14px;
+  }
+  .tag .pulse{width:8px;height:8px;border-radius:50%;background:var(--warn);
+    box-shadow:0 0 0 0 var(--warn);animation:p 2s infinite}
+  @keyframes p{0%{box-shadow:0 0 0 0 rgba(245,158,11,.5)}70%{box-shadow:0 0 0 8px rgba(245,158,11,0)}100%{box-shadow:0 0 0 0 rgba(245,158,11,0)}}
+  h1{font-size:26px;line-height:1.35;margin:0 0 10px;letter-spacing:.5px}
+  .hero p{margin:0;color:var(--ink2);font-size:15.5px}
+
+  .card{
+    border:2px solid var(--line);border-radius:16px;
+    background:var(--surface);padding:20px 20px;margin-bottom:16px;
+    box-shadow:var(--shadow);
+  }
+  .card h2{
+    font-size:17px;margin:0 0 10px;display:flex;align-items:center;gap:9px;
+  }
+  .card h2 .ico{
+    flex:none;width:26px;height:26px;border-radius:8px;
+    background:var(--accent-soft);color:var(--accent);
+    display:grid;place-items:center;font-size:15px;font-weight:700;
+  }
+  .card p{margin:0 0 10px;font-size:15px;color:var(--ink2)}
+  .card p:last-child{margin-bottom:0}
+  .card strong{color:var(--ink)}
+
+  ul.clean{margin:6px 0 0;padding:0;list-style:none}
+  ul.clean li{
+    position:relative;padding-left:22px;margin-bottom:9px;
+    font-size:15px;color:var(--ink2);
+  }
+  ul.clean li:last-child{margin-bottom:0}
+  ul.clean li::before{
+    content:"";position:absolute;left:2px;top:9px;
+    width:7px;height:7px;border-radius:50%;background:var(--accent);
+  }
+  .safe{color:var(--ok);font-weight:700}
+
+  .steps{display:flex;gap:12px;align-items:flex-start;margin-top:4px}
+  .steps .n{
+    flex:none;width:24px;height:24px;border-radius:50%;
+    border:2px solid var(--accent);color:var(--accent);
+    font-size:13px;font-weight:700;display:grid;place-items:center;margin-top:1px;
+  }
+
+  /* 按钮与表单 */
+  .btn{
+    appearance:none;cursor:pointer;font-family:inherit;
+    border:2px solid var(--line);border-radius:11px;
+    padding:10px 16px;font-size:14.5px;font-weight:700;
+    background:var(--surface);color:var(--ink);box-shadow:2px 2px 0 rgba(0,0,0,.14);
+    transition:transform .05s;
+  }
+  .btn:active{transform:translate(2px,2px);box-shadow:none}
+  .btn.danger{color:#fff;background:var(--danger,#e11d48);border-color:var(--danger,#e11d48)}
+  .btn.accent{color:var(--on-accent,#fff);background:var(--accent);border-color:var(--accent)}
+  @media (prefers-color-scheme:dark){.btn.accent{color:#1a120c}}
+  .btn.ghost{font-weight:500;font-size:13.5px;padding:7px 12px;box-shadow:none;
+    border-color:var(--danger,#e11d48);color:var(--danger,#e11d48);background:transparent}
+
+  .field{margin-bottom:11px}
+  .field label{display:block;font-size:12.5px;color:var(--ink3);margin:0 0 5px 2px;font-weight:500}
+  .field input{
+    width:100%;font-family:inherit;font-size:15px;color:var(--ink);
+    background:var(--paper);border:2px solid var(--line);border-radius:10px;
+    padding:10px 12px;outline:none;
+  }
+  .field input:focus{border-color:var(--accent)}
+  .del-form{margin-top:14px;padding-top:14px;border-top:1.5px dashed var(--line);display:none}
+  .del-form.show{display:block}
+  .del-note{font-size:12.5px;color:var(--ink3);margin:2px 0 12px}
+  .row-end{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap}
+  .demo-hint{font-size:12px;color:var(--ink3);margin-top:10px;text-align:center;font-style:italic}
+
+  .mail{background:var(--surface);border:2px solid var(--line);border-radius:16px;
+    padding:20px;box-shadow:var(--shadow);margin-bottom:16px}
+  .mail h2{font-size:16px;margin:0 0 4px}
+  .mail p{font-size:13.5px;color:var(--ink2);margin:0 0 13px}
+  .mail .inline{display:flex;gap:9px;flex-wrap:wrap}
+  .mail .inline input{flex:1 1 180px}
+  .contact-line{font-size:14px;color:var(--ink2);margin-top:12px;text-align:center}
+  .contact-line a{color:var(--ink);font-weight:700;text-decoration:underline;text-underline-offset:3px;word-break:break-all}
+
+  .blessing{
+    text-align:center;color:var(--ink3);font-style:italic;
+    font-size:13px;line-height:1.9;margin:30px auto 4px;max-width:440px;
+    padding-top:22px;border-top:1.5px dashed var(--line);
+  }
+
+  .foot{
+    text-align:center;color:var(--ink3);font-size:13px;
+    margin-top:26px;line-height:1.9;
+  }
+  .foot .u{color:var(--ink2);font-weight:500}
+
+  /* ⏳ reaction：跟公告表情一样能点，点了飞一下、计数 +1 */
+  .rx-wrap{display:flex;justify-content:center;margin:2px 0 14px}
+  .rx{
+    display:inline-flex;align-items:center;gap:8px;
+    padding:7px 15px;font:inherit;line-height:1;cursor:pointer;
+    background:var(--surface);color:var(--ink);
+    border:2px solid var(--line);border-radius:13px;
+    box-shadow:2px 2px 0 rgba(0,0,0,.14);
+    transition:transform .12s,box-shadow .12s;
+    -webkit-tap-highlight-color:transparent;
+  }
+  .rx:hover{transform:translate(-1px,-1px);box-shadow:3px 3px 0 rgba(0,0,0,.22)}
+  .rx:active{transform:translate(1px,1px);box-shadow:1px 1px 0 rgba(0,0,0,.22)}
+  .rx .rx-emoji{font-size:21px}
+  .rx .rx-n{font-size:13px;color:var(--ink3);min-width:1.1em;text-align:left;
+    font-variant-numeric:tabular-nums}
+  .throw-layer{position:fixed;inset:0;z-index:150;pointer-events:none;overflow:hidden}
+  .thrown{position:absolute;left:0;top:0;font-size:26px;will-change:transform,opacity}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="brand"><span class="dot"></span>AutoLib · 图书馆自动预约</div>
+
+  <div class="hero">
+    <div class="tag"><span class="pulse"></span>自动预约 · 暂时停用</div>
+    <h1>关于预约停止的一些说明</h1>
+    <p>学校最近调整了登录方式，自动预约暂时用不了。下面是发生了什么、您的信息安不安全，以及我们接下来的打算。</p>
+  </div>
+
+  <div class="card">
+    <h2><span class="ico">!</span>发生了什么</h2>
+    <p>从 <strong>2026 年 9 月 17 日</strong> 起，学校在登录「统一身份认证」时，新增了一道<strong>手机短信验证码</strong>的二次验证。</p>
+    <p>本工具需要在后台替您登录图书馆系统，才能每天早上帮您抢座。但这个短信验证码只会发到<strong>您本人的手机</strong>上，程序拿不到，所以自动预约<strong>暂时无法进行</strong>。</p>
+  </div>
+
+  <div class="card">
+    <h2><span class="ico">✓</span>您的信息是安全的</h2>
+    <p>您保存在这里的账号信息<span class="safe">没有丢失，也没有泄露</span>，只是暂时不能自动登录而已。您不需要改密码，也不需要重新填写。</p>
+    <p>如果最终确定这个办法无法实现，服务器上所有账号密码都会被<strong>彻底删除</strong>。如果您现在就不放心，也可以点下面的按钮<strong>自己删除</strong>。</p>
+    <div class="row-end">
+      <button class="btn ghost" id="del-toggle" onclick="toggleDel()">立即删除我的账号密码</button>
+    </div>
+    <div class="del-form" id="del-form">
+      <div class="del-note">请输入这个账号的学号和密码，<strong>核对一致后</strong>才会把它从服务器上彻底删除。</div>
+      <div class="field"><label>学号 / 账号</label><input id="del-user" inputmode="numeric" placeholder="例如 2023xxxxxx" autocomplete="off"></div>
+      <div class="field"><label>密码</label><input id="del-pass" type="password" placeholder="登录密码" autocomplete="off"></div>
+      <div class="row-end">
+        <button class="btn ghost" onclick="toggleDel()">取消</button>
+        <button class="btn danger" id="del-go" onclick="doDelete()">核对并彻底删除</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2><span class="ico">↻</span>我们正在做「流浪图书馆计划」</h2>
+    <p>我们在开发一个新办法：让还在学校的同学，用<strong>多余的安卓设备等可以连接宿舍 WiFi 的设备</strong>，帮忙把预约请求发出去，绕开这道短信验证。</p>
+    <ul class="clean">
+      <li>用 iPhone、或者身边没有多余设备的同学，在志愿者允许的情况下，可以「搭」在有这类设备的同学身上完成预约。</li>
+      <li>整个过程里，您的账号密码是<strong>加密传输</strong>的，帮您转发的人也<span class="safe">看不到</span>。</li>
+      <li>是否愿意帮别人转发，完全由每个人自己决定。</li>
+    </ul>
+    <p style="margin-top:12px">计划还在开发中，<strong>做好后会第一时间在这里通知您。</strong></p>
+  </div>
+
+  <div class="card">
+    <h2><span class="ico">…</span>关于本计划</h2>
+    <p>这个计划<strong>漫长而且不一定成功</strong>，请不要抱太高期望。如果您想到了更好的办法，非常欢迎通过邮箱和我们交流。</p>
+    <p>另外我自己精力有限，其他事情要顾，<strong>没办法把全部时间都投在这个项目上</strong>，所以进度可能会比较慢，还请您多担待。</p>
+    <p>原项目的<strong>开源计划</strong>会在审核后发布到 <strong>GitHub</strong> 和 <strong>Gitee</strong>，请稍等。</p>
+  </div>
+
+  <div class="card">
+    <h2><span class="ico">→</span>现在您需要做什么</h2>
+    <div class="steps">
+      <span class="n">1</span>
+      <p style="margin:0"><strong>暂时不用做任何操作</strong>，也不用担心账号。</p>
+    </div>
+    <div class="steps" style="margin-top:12px">
+      <span class="n">2</span>
+      <p style="margin:0">时不时回来看看这个页面，有进展我们会更新在这里。</p>
+    </div>
+  </div>
+
+  <div class="mail">
+    <h2>📮 留个邮箱，做好了通知您</h2>
+    <p>填下邮箱，计划有进展、或者要删数据前，我们会发邮件告诉您。不会用作别的用途。</p>
+    <div class="inline">
+      <input id="sub-mail" type="email" placeholder="您的邮箱" autocomplete="off">
+      <button class="btn" id="sub-go" onclick="doSubscribe()">通知我</button>
+    </div>
+    <div class="contact-line">想到更好的办法？欢迎邮件联系：<br><a href="mailto:msl0314_1@proton.me">msl0314_1@proton.me</a></div>
+  </div>
+
+  <div class="foot">
+    <div class="rx-wrap">
+      <button type="button" class="rx" onclick="throwHourglass(this)" title="催一催 / 我在等" aria-label="催一催">
+        <span class="rx-emoji">⏳</span><span class="rx-n" id="hg-n">0</span>
+      </button>
+    </div>
+    <div class="u">更新于 2026 年 9 月 18 日</div>
+    <div>如有疑问或建议，可通过上方邮箱找到我们</div>
+  </div>
+
+  <div class="blessing">
+    最后祝您学业有成
+  </div>
+
+</div>
+
+<div class="throw-layer" id="throw-layer"></div>
+
+<script>
+  function toggleDel(){
+    var f = document.getElementById('del-form');
+    var t = document.getElementById('del-toggle');
+    var open = f.classList.toggle('show');
+    t.style.display = open ? 'none' : '';
+  }
+  async function doDelete(){
+    var u = (document.getElementById('del-user').value || '').trim();
+    var p = (document.getElementById('del-pass').value || '').trim();
+    if(!u || !p){ alert('请把学号和密码都填上'); return; }
+    if(!confirm('确定要把学号 ' + u + ' 的账号和全部记录从服务器彻底删除吗？此操作无法撤回。')) return;
+    var btn = document.getElementById('del-go');
+    btn.disabled = true; var old = btn.textContent; btn.textContent = '正在核对…';
+    try{
+      var r = await fetch('/api/close/delete', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ pid:u, password:p })
+      });
+      var d = await r.json().catch(function(){ return {}; });
+      if(r.ok){
+        alert(d.message || '已从服务器彻底删除。');
+        document.getElementById('del-pass').value = '';
+        document.getElementById('del-user').value = '';
+        toggleDel();
+      }else{
+        alert(d.error || '删除失败，请稍后再试。');
+      }
+    }catch(e){
+      alert('网络错误，请稍后再试。');
+    }finally{
+      btn.disabled = false; btn.textContent = old;
+    }
+  }
+  async function doSubscribe(){
+    var m = (document.getElementById('sub-mail').value || '').trim();
+    if(!/.+@.+\..+/.test(m)){ alert('请填一个正确的邮箱'); return; }
+    var btn = document.getElementById('sub-go');
+    btn.disabled = true; var old = btn.textContent; btn.textContent = '提交中…';
+    try{
+      var r = await fetch('/api/close/subscribe', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ email:m })
+      });
+      var d = await r.json().catch(function(){ return {}; });
+      if(r.ok){ alert(d.message || '已记下，有进展会邮件通知您。'); document.getElementById('sub-mail').value=''; }
+      else{ alert(d.error || '提交失败，请稍后再试。'); }
+    }catch(e){
+      alert('网络错误，请稍后再试。');
+    }finally{
+      btn.disabled = false; btn.textContent = old;
+    }
+  }
+
+  // ⏳ reaction：全站共享计数。点了先本地 +1、飞一下，攒 700ms 再一起发，服务器为准。
+  var hgPending = 0, hgTimer = null;
+  function throwHourglass(btn){
+    var el = document.getElementById('hg-n');
+    el.textContent = (parseInt(el.textContent, 10) || 0) + 1;
+    flyOne(btn, '⏳');
+    hgPending += 1;
+    clearTimeout(hgTimer);
+    hgTimer = setTimeout(flushHg, 700);
+  }
+  async function flushHg(){
+    if(!hgPending) return;
+    var n = hgPending; hgPending = 0;
+    try{
+      var r = await fetch('/api/close/hourglass', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ n:n })
+      });
+      var d = await r.json().catch(function(){ return {}; });
+      if(r.ok && typeof d.count === 'number'){
+        var el = document.getElementById('hg-n');
+        var cur = parseInt(el.textContent, 10) || 0;
+        // 服务器权威值 + 本地还没发出去的那几下
+        el.textContent = Math.max(cur, d.count + hgPending);
+      }
+    }catch(e){
+      hgPending += n;   // 发送失败退回去，下次再发
+    }
+  }
+  async function loadHg(){
+    try{
+      var r = await fetch('/api/close/hourglass');
+      var d = await r.json().catch(function(){ return {}; });
+      if(r.ok && typeof d.count === 'number'){
+        document.getElementById('hg-n').textContent = d.count;
+      }
+    }catch(e){}
+  }
+  document.addEventListener('DOMContentLoaded', loadHg);
+  function flyOne(btn, emoji){
+    var layer = document.getElementById('throw-layer');
+    if(!layer) return;
+    var box = btn.getBoundingClientRect();
+    var x0 = box.left + box.width / 2, y0 = box.top + box.height / 2;
+    var x1 = innerWidth / 2 + (Math.random() - .5) * innerWidth * .5;
+    var y1 = innerHeight * .42 + (Math.random() - .5) * innerHeight * .24;
+    var spin = Math.round((Math.random() - .5) * 900);
+    var at = function(x, y, s, deg){
+      return 'translate(' + x + 'px,' + y + 'px) translate(-50%,-50%) scale(' + s + ') rotate(' + deg + 'deg)';
+    };
+    var d = document.createElement('div');
+    d.className = 'thrown'; d.textContent = emoji; layer.appendChild(d);
+    var fly = d.animate([
+      { transform: at(x0, y0, .4, 0), opacity: 1 },
+      { transform: at((x0 + x1) / 2, Math.min(y0, y1) - 40, 1.1, spin * .5), opacity: 1, offset: .55 },
+      { transform: at(x1, y1, 2.4, spin), opacity: 1 },
+    ], { duration: 460, easing: 'cubic-bezier(.3,.7,.4,1)' });
+    fly.onfinish = function(){
+      d.animate([
+        { transform: at(x1, y1, 2.4, spin), opacity: 1 },
+        { transform: at(x1, y1, 2.9, spin), opacity: 0 },
+      ], { duration: 260, easing: 'ease-out' }).onfinish = function(){ d.remove(); };
+    };
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    只允许 HTTPS。如果你的服务器用自签名证书，把证书 PEM 放到
+    res/raw/my_cert.pem 并在 <trust-anchors> 里引用。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

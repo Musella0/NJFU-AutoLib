@@ -1,0 +1,90 @@
+# Cloudflare 挡在前面，且 SSL 模式是 Flexible——它用明文回源，源站这边永远只看到 :80。
+# 所以不能按「连接进来的协议」跳转：那样连用户已经在 https 上的请求也会被跳回 https，
+# 浏览器直接撞进重定向死循环（ERR_TOO_MANY_REDIRECTS）。
+# 用户侧真正用的协议只存在于 Cloudflare 透传的 X-Forwarded-Proto 里，只认它。
+http://你的域名, https://你的域名 {
+    encode zstd gzip
+
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        # 首次访问后浏览器自己就不再走明文，省掉那一次可被劫持的跳转。
+        # 不加 includeSubDomains/preload：子域将来若有纯 HTTP 服务不至于被一起锁死。
+        Strict-Transport-Security "max-age=31536000"
+        -Server
+    }
+
+    # 明文访问一律跳 HTTPS。
+    # 起因：会话 Cookie 带 Secure 标记（SESSION_COOKIE_SECURE=true），Safari 在明文
+    # 页面上会直接把它丢掉，用户看到的现象是「验证成功但没登上，提示启用 Cookie」。
+    # 用 308 而不是 301：301 会让客户端把 POST 降级成 GET，Android 端的预约请求会丢 body。
+    # 跳转发生在 handle 之前，下面 handle 里的 log_skip 管不到它——不在这里也跳过的话，
+    # 满网扫 WordPress / .git 的爬虫全走明文，download.log 里九成都是它们的 308。
+    @plaintext header X-Forwarded-Proto http
+    log_skip @plaintext
+    redir @plaintext https://{host}{uri} 308
+
+    # 只记录 APK 下载（其他请求在下面 log_skip 掉），用于统计下载次数
+    log {
+        output file /data/download.log {
+            roll_size 10MiB
+            roll_keep 5
+        }
+        format json
+    }
+
+    # APK 自助更新下载：只服务 /srv/downloads 这一个目录
+    handle_path /download/* {
+        root * /srv/downloads
+        @apk path *.apk
+        # 浏览器/客户端应按安装包处理，而不是当文本打开
+        header @apk Content-Type "application/vnd.android.package-archive"
+        header @apk Content-Disposition "attachment"
+        # 同名包有可能被换掉（发版当天修正一版之类）。不显式声明的话 Cloudflare
+        # 按扩展名默认缓存 4 小时，源站都换了 CDN 还在吐旧文件，且只能去面板清。
+        header @apk Cache-Control "public, max-age=300"
+        file_server
+    }
+
+    # 静态资源在本机直接出，不穿隧道：分机部署时每个跨境请求都可能撞上丢包卡几秒，
+    # 一次页面加载十几个请求里，这几个最大（app.js 144KB、楼层图）也最没必要跨境。
+    # 文件在 git 里，edge 和 backend 各自 git pull 就一致；?v= 是前端的缓存戳，file_server 不看它。
+    # 单机部署时这个目录是同一份源码，行为不变。
+    handle_path /static/* {
+        root * /srv/static
+        header Cache-Control "public, max-age=3600"
+        file_server
+    }
+
+    # 手机中继的 WebSocket（backend/relay_server.py）。Caddy 看到 Upgrade 头会自动按
+    # WebSocket 透传；Cloudflare 也放行 WebSocket。/internal/* 不在这条路上，公网到不了。
+    handle /relay/* {
+        log_skip
+        reverse_proxy {$RELAY_UPSTREAM:relay:5005} {
+            transport http {
+                dial_timeout 10s
+            }
+        }
+    }
+
+    handle {
+        # 业务接口不写访问日志，避免日志文件被刷爆
+        log_skip
+        # 上游由 API_UPSTREAM 决定：单机是同 compose 的 flask-api，
+        # 分机部署时是隧道对面那台的 API（见 SPLIT_DEPLOY.md）。
+        reverse_proxy {$API_UPSTREAM:flask-api:5004} {
+            # 分机部署时上游在 WireGuard 隧道对面，跨境 UDP 有丢包。已建立的连接靠 TCP
+            # 重传扛得住，但新建连接的 SYN 连丢两次就超过默认 3s 的 dial 超时，直接 502
+            # （09-14 切换当晚实测约 5%）。所以：拨号给足时间、拨不通就重试、连接尽量复用。
+            # 单机部署时上游是本机容器，这些设置只是没用上，无副作用。
+            transport http {
+                dial_timeout 10s
+                keepalive 5m
+                keepalive_idle_conns 16
+            }
+            lb_try_duration 15s
+            lb_try_interval 500ms
+        }
+    }
+}

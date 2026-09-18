@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0,maximum-scale=1.0">
+<title>AutoLib · 图书馆自动预约</title>
+<script>
+  // 防止深色模式闪烁：在 CSS 加载前先把主题属性写到 <html>
+  (function(){
+    try{
+      var t = localStorage.getItem('autolib_theme');
+      if(t !== 'light' && t !== 'dark') t = 'system';
+      document.documentElement.setAttribute('data-theme', t);
+    }catch(e){
+      document.documentElement.setAttribute('data-theme', 'system');
+    }
+  })();
+</script>
+<link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;600;700&family=Gaegu:wght@400;700&family=Shadows+Into+Light&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v={{ static_v }}">
+</head>
+<body>
+
+<div class="app">
+
+  <!-- =============== TOP BAR =============== -->
+  <div class="topbar">
+    <div>
+      <div class="hello" id="hello">您好 ☕</div>
+      <div class="date" id="date"></div>
+    </div>
+    <div class="pid-chip" id="pid-chip" onclick="openSheet('accounts')">
+      <span class="dot off" id="pid-dot"></span>
+      <span id="pid-text">--</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 9l6 6 6-6"/></svg>
+    </div>
+  </div>
+
+  <!-- =============== PAGE: HOME =============== -->
+  <div class="page show" id="page-home">
+
+    <!-- 学校密码失效横幅：定时任务连续被 CAS 拒绝密码后由后端置 verified=false 触发 -->
+    <div class="box tight mb-lg cred-banner" id="cred-banner-home" style="display:none"></div>
+
+    <!-- TODAY -->
+    <div class="sec-head">
+      <div class="t">TODAY</div>
+      <div class="act" id="today-date-label"></div>
+    </div>
+
+    <div class="box today-card accent" id="today-card" style="display:none"></div>
+
+    <div class="box today-card ghost" id="today-empty" style="display:none;text-align:center"></div>
+
+    <!-- TOMORROW -->
+    <div class="sec-head">
+      <div class="t">TOMORROW</div>
+      <div class="act" id="tmr-date-label"></div>
+    </div>
+
+    <div class="box today-card tmr-variant" id="tmr-card" style="display:none"></div>
+
+    <div class="box today-card ghost" id="tmr-empty" style="display:none;text-align:center"></div>
+
+    <!-- TOMORROW adjuster -->
+    <div class="sec-head">
+      <div class="t">调整明日</div>
+    </div>
+
+    <div class="box tomorrow" id="tmr-strip" onclick="toggleTmr()">
+      <div class="left">
+        <div class="day-box">
+          <div class="wd" id="tmr-wd">--</div>
+          <div class="n" id="tmr-n">--</div>
+        </div>
+        <div class="info">
+          <div class="tt" id="tmr-title">加载中...</div>
+          <div class="ss" id="tmr-sub"></div>
+        </div>
+      </div>
+      <div class="caret">›</div>
+    </div>
+
+    <div class="tomorrow-body" id="tmr-body">
+      <div class="inner">
+        <div class="label">仅调整明日（会切换到"统一时段"模式）</div>
+
+        <div class="box tight">
+          <div class="label">时段</div>
+          <div class="time-pair mt">
+            <select class="time-input" id="tmr-start"></select>
+            <span class="to">→</span>
+            <select class="time-input" id="tmr-end"></select>
+          </div>
+          <div class="tiny mt" id="tmr-multi-hint" style="display:none;color:var(--warn)"></div>
+        </div>
+
+        <div class="box tight">
+          <div class="label">座位优先级（来自配置）</div>
+          <div class="priorities mt" id="tmr-seats"></div>
+        </div>
+
+        <div class="row-flex" style="margin-top:4px">
+          <button class="btn ghost grow" onclick="closeTmr()">取消</button>
+          <button class="btn accent grow" onclick="saveTmr()">保存明日</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- STUDY LOG -->
+    <div class="sec-head">
+      <div class="t">STUDY LOG · 学习记录</div>
+    </div>
+    <div class="box pad mb-lg">
+      <div id="visit-stats-box">
+        <div class="tiny" style="color:var(--ink3);text-align:center">加载中…</div>
+      </div>
+    </div>
+
+    <!-- WEEK SCHEDULE -->
+    <div class="sec-head">
+      <div class="t">THIS WEEK · 配置预览</div>
+      <div class="act" onclick="go('config')">编辑 →</div>
+    </div>
+
+    <div class="box week">
+      <div class="row-between">
+        <div class="sub">我的每周节奏</div>
+        <div class="tiny" id="week-mode-hint">06 — 22 时</div>
+      </div>
+      <div class="rows">
+        <div class="row hours-row">
+          <span class="day"></span>
+          <div class="track scale">
+            <span class="tick" style="left:0%">8</span>
+            <span class="tick" style="left:28.57%">12</span>
+            <span class="tick" style="left:57.14%">16</span>
+            <span class="tick" style="left:85.71%">20</span>
+            <span class="tick" style="left:100%">22</span>
+          </div>
+        </div>
+        <div id="week-rows"></div>
+      </div>
+      <div class="tiny mt" id="week-footer-hint">💡 实时反映当前配置</div>
+    </div>
+
+    <!-- NOTICES -->
+    <div class="sec-head">
+      <div class="t">NOTICES</div>
+      <div class="act" onclick="toggleNotices()" id="notice-toggle">折叠</div>
+    </div>
+    <div class="col gap" id="notice-list"></div>
+
+  </div>
+
+  <!-- =============== PAGE: CONFIG =============== -->
+  <div class="page" id="page-config">
+
+    <div class="sec-head">
+      <div class="t">CONFIG · 每日预约规则</div>
+    </div>
+
+    <div class="box pad mb-lg" id="cfg-empty">
+      <div class="h2">还没有学号</div>
+      <div class="sub" style="color:var(--ink3);margin-top:4px">添加一个学号后才能配置预约规则。</div>
+      <div class="row-flex mt-lg">
+        <button class="btn accent grow" onclick="openSheet('add-pid')">+ 添加学号</button>
+      </div>
+    </div>
+
+    <div id="cfg-form" style="display:none">
+
+      <div class="box tight mb-lg cred-banner" id="cred-banner-config" style="display:none"></div>
+
+      <div class="box pad mb-lg">
+        <div class="row-between">
+          <div class="h2" id="cfg-pid-label">--</div>
+          <span class="pill warn" id="cfg-verify-badge">未验证</span>
+        </div>
+        <div class="sub" style="color:var(--ink3);margin-top:4px">配置会在每天定时自动抢座。修改保存后下一个抢座窗口生效。</div>
+      </div>
+
+      <!-- Time mode -->
+      <div class="box pad mb-lg">
+        <div class="label">时间模式</div>
+        <div class="seg mt">
+          <button class="on" data-mode="week" onclick="setCfgMode('week')">按星期</button>
+          <button data-mode="simple" onclick="setCfgMode('simple')">统一时段</button>
+        </div>
+
+        <div id="week-mode" class="mt-lg">
+          <div class="col gap-sm" id="week-grid"></div>
+        </div>
+
+        <div id="simple-mode" class="mt-lg" style="display:none">
+          <div class="row-between">
+            <div class="label">每日固定时段</div>
+            <button type="button" class="btn sm ghost" onclick="addSimpleSeg()">+ 加时段</button>
+          </div>
+          <div class="seg-list mt" id="simple-seg-list"></div>
+          <div class="tiny mt" style="color:var(--ink3)">💡 周五实际抢座会自动缩到 20:00 · 支持一天多段</div>
+        </div>
+      </div>
+
+      <!-- Seats -->
+      <div class="box pad mb-lg">
+        <div class="row-between">
+          <div class="label">座位优先级</div>
+          <span class="tiny">按顺序尝试</span>
+        </div>
+        <div class="priorities mt" id="cfg-seats"></div>
+      </div>
+
+      <!-- Toggles -->
+      <div class="box pad mb-lg">
+        <div class="label" style="margin-bottom:4px">功能开关</div>
+        <div class="toggle-row">
+          <div class="info">
+            <div class="t1">自动预约</div>
+            <div class="t2">每日定时自动执行。关闭后暂停所有自动预约。</div>
+          </div>
+          <div class="toggle" id="cfg-toggle-reserve" onclick="tToggle(this,event)"></div>
+        </div>
+        <div class="toggle-row">
+          <div class="info">
+            <div class="t1">迟到保护 🛡</div>
+            <div class="t2">未到馆时自动推迟预约最多 1 小时。<a href="#" onclick="openSheet('lp-info');return false" style="color:var(--accent)">说明</a></div>
+          </div>
+          <div class="toggle" id="cfg-toggle-lp" onclick="toggleLP(this,event)"></div>
+        </div>
+        <!-- 只在迟到保护开着时显示；shift 是老行为，cancel 是推过一次后再探一次、没到就取消 -->
+        <div class="field" id="cfg-lp-mode-row" style="display:none;margin:4px 0 10px">
+          <label>推迟 1 小时后仍未到馆</label>
+          <select id="cfg-lp-mode" style="font-size:13px" onchange="scheduleCfgAutosave()">
+            <option value="shift">不再干预，交给图书馆按规则处理（默认）</option>
+            <option value="cancel">开始前 5 分钟再探一次，仍未到馆就取消预约</option>
+          </select>
+        </div>
+        <div class="toggle-row" data-nap-wip>
+          <div class="info">
+            <div class="t1">自动午休 😴</div>
+            <div class="t2">每日触发时刻自动续约下午时段。<a href="#" onclick="openSheet('nap-about');return false" style="color:var(--accent)">说明</a></div>
+          </div>
+          <div class="toggle" id="cfg-toggle-nap" onclick="tToggle(this,event)"></div>
+        </div>
+      </div>
+
+      <div class="row-flex">
+        <button class="btn ghost grow" onclick="go('home')">取消</button>
+        <button class="btn accent grow" id="btn-save-cfg" onclick="saveCfg()">保存配置</button>
+      </div>
+
+      <div class="mt-lg">
+        <button class="btn accent" style="width:100%" id="btn-reserve-now" onclick="openReserveNow()">⚡ 立即预约</button>
+      </div>
+
+    </div>
+
+  </div>
+
+  <!-- =============== PAGE: SETTINGS =============== -->
+  <div class="page" id="page-settings">
+
+    <div class="sec-head">
+      <div class="t">SETTINGS</div>
+    </div>
+
+    <div class="box pad mb-lg">
+      <div class="label">账号</div>
+      <div class="row-between mt">
+        <div>
+          <div class="h3" id="settings-uid">游客</div>
+          <div class="tiny" id="settings-accounts-meta">未登录</div>
+        </div>
+        <div class="row-flex" style="gap:6px">
+          <button class="btn sm" id="settings-profile-btn" onclick="openSheet('profile')" style="display:none">编辑</button>
+          <button class="btn sm" onclick="openSheet('accounts')">切换学号</button>
+        </div>
+      </div>
+      <div class="toggle-row" style="margin-top:8px">
+        <div class="info">
+          <div class="t1">重置密码后请在这里重新校验→</div>
+        </div>
+        <button class="btn sm" onclick="openSheet('reset-pwd')">重新校验</button>
+      </div>
+      <!-- 只在点的时候去图书馆查一次，没有任何定时任务会自动查；结果就展开在按钮下面 -->
+      <div class="toggle-row" style="border:0;padding-bottom:0;margin-top:8px">
+        <div class="info">
+          <div class="t1">图书馆信用分</div>
+          <div class="t2" id="credit-label">当前分数和扣分记录</div>
+        </div>
+        <button class="btn sm" id="credit-btn" onclick="queryCredit()">查询</button>
+      </div>
+      <div id="credit-box" style="display:none;margin-top:8px"></div>
+    </div>
+
+    <div class="box pad mb-lg">
+      <div class="label" style="margin-bottom:4px">学习记录</div>
+      <div class="toggle-row">
+        <div class="info">
+          <div class="t1">真实在馆时长</div>
+          <div class="t2">按签到 / 暂离 / 返回记录统计实际在座时间。<a href="#" onclick="openSheet('study-time-info');return false" style="color:var(--accent)">说明</a></div>
+        </div>
+        <div class="toggle" id="cfg-toggle-study" onclick="toggleStudyTime(this,event)"></div>
+      </div>
+      <!-- 只在开关打开时显示：补齐还没折算的记录，已经算过的不会重算 -->
+      <div class="toggle-row" id="study-sync-row" style="cursor:pointer;display:none" onclick="syncStudyTimeNow()">
+        <div class="info">
+          <div class="t1">立即同步</div>
+          <div class="t2" id="study-sync-label">每晚 22:10 自动同步；没结束的预约会等结束后再算</div>
+        </div>
+        <div class="sub" style="color:var(--ink3)">同步 ›</div>
+      </div>
+    </div>
+
+    <div class="box pad mb-lg">
+      <div class="row-between">
+        <div class="label">外观</div>
+        <button class="theme-btn" id="theme-btn" onclick="cycleTheme()" title="跟随系统（点击切换）" aria-label="主题：跟随系统"></button>
+      </div>
+    </div>
+
+    <div class="box pad mb-lg">
+      <div class="label" style="margin-bottom:4px">通知</div>
+      <div class="toggle-row">
+        <div class="info">
+          <div class="t1">邮箱通知</div>
+          <div class="t2" id="email-label">未设置</div>
+        </div>
+        <button class="btn sm ghost" onclick="openSheet('email')">编辑</button>
+      </div>
+    </div>
+
+    <div class="box pad mb-lg">
+      <div class="label" style="margin-bottom:4px">午休</div>
+      <div class="toggle-row" style="cursor:pointer" onclick="openSheet('nap-settings')" data-nap-wip>
+        <div class="info">
+          <div class="t1">午休配置</div>
+          <div class="t2" id="nap-settings-label">下午 14:00，同座位</div>
+        </div>
+        <div class="sub" style="color:var(--ink3)">›</div>
+      </div>
+    </div>
+
+    <!-- 版本号和下载地址都来自 /api/app/version，没登记就整张卡片不显示 -->
+    <div class="box pad mb-lg" id="apk-card" style="display:none">
+      <div class="label" style="margin-bottom:4px">安卓客户端</div>
+      <div class="toggle-row" style="cursor:pointer" onclick="downloadApk()">
+        <div class="info">
+          <div class="t1">下载 APK <span id="apk-version" class="sub" style="color:var(--ink3)"></span></div>
+          <div class="t2">桌面小组件不打开 App 就能看今天坐哪，还有学习时长热力图</div>
+        </div>
+        <div class="sub" style="color:var(--ink3)">下载</div>
+      </div>
+      <div class="tiny" id="apk-notes" style="color:var(--ink3);margin-top:6px"></div>
+    </div>
+
+    <div class="box pad mb-lg">
+      <div class="label" style="margin-bottom:4px">关于</div>
+      <div class="toggle-row" style="cursor:pointer" onclick="openSheet('lp-info')">
+        <div class="info">
+          <div class="t1">迟到保护是什么？</div>
+          <div class="t2">查看工作原理和注意事项</div>
+        </div>
+        <div class="sub" style="color:var(--ink3)">›</div>
+      </div>
+      <div class="toggle-row" style="cursor:pointer" onclick="openSheet('nap-about')">
+        <div class="info">
+          <div class="t1">午休是什么？</div>
+          <div class="t2">查看一键午休的工作原理</div>
+        </div>
+        <div class="sub" style="color:var(--ink3)">›</div>
+      </div>
+    </div>
+
+    <!-- 全馆预约概况：每天 07:10 由调度器汇总（/api/library/occupancy），没数据就整张卡片不显示 -->
+    <div class="box pad mb-lg clickable" id="occupancy-card" style="display:none" onclick="openSheet('lib-occupancy')">
+      <div class="row-between">
+        <div class="label" style="margin-bottom:4px">图书馆预约情况</div>
+        <div class="tiny" id="occupancy-updated" style="color:var(--ink3)"></div>
+      </div>
+      <div id="occupancy-preview"></div>
+    </div>
+
+    {% if contacts %}
+    <div class="box pad mb-lg">
+      <div class="label" style="margin-bottom:4px">联系方式</div>
+      {% for c in contacts %}
+      <div class="toggle-row" style="cursor:pointer" onclick="onContact(this)"
+           data-kind="{{ c.kind }}"{% if c.href %} data-href="{{ c.href }}"{% endif %}>
+        <div class="info">
+          <div class="t1">{{ c.title }}</div>
+          <div class="t2 contact-value">{{ c.value }}</div>
+        </div>
+        <div class="sub" style="color:var(--ink3)">{{ c.action }}</div>
+      </div>
+      {% endfor %}
+      <div class="tiny" style="color:var(--ink3);margin-top:6px">遇到 bug、想加功能，或者预约异常，都可以照上面的方式找我。</div>
+    </div>
+    {% endif %}
+
+    <div class="box pad" id="logout-card" style="display:none">
+      <div class="toggle-row" style="cursor:pointer;border:0;padding:4px 0" onclick="doLogout()">
+        <div class="info">
+          <div class="t1" style="color:var(--danger)">退出登录</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- =============== BOTTOM NAV =============== -->
+  <div class="bnav">
+    <button class="on" data-tab="home" onclick="go('home')">主页</button>
+    <button data-tab="config" onclick="go('config')">配置</button>
+    <button data-tab="settings" onclick="go('settings')">设置</button>
+  </div>
+</div>
+
+<!-- =============== SHEETS =============== -->
+<div class="scrim" id="scrim">
+  <div class="sheet" id="sheet-content"></div>
+</div>
+
+<!-- =============== TOASTS =============== -->
+<div class="toasts" id="toasts"></div>
+
+<!-- 公告栏小互动的飞行层（临时功能，用完即弃） -->
+<div class="throw-layer" id="throw-layer"></div>
+
+<!-- 公告栏 Markdown 渲染 -->
+<script src="{{ url_for('static', filename='markdown.js') }}?v={{ static_v }}"></script>
+
+<!-- 演示模式：仅 ?demo=1 时接管接口返回假数据，必须排在 app.js 之前 -->
+<script src="{{ url_for('static', filename='demo.js') }}?v={{ static_v }}"></script>
+<script src="{{ url_for('static', filename='app.js') }}?v={{ static_v }}"></script>
+</body>
+</html>

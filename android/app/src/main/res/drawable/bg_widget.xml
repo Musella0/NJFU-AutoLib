@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 小组件卡片：描边 + 右下错位阴影的手绘卡片风，深浅色跟随 @color 资源 -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:left="3dp"
+        android:top="3dp">
+        <shape>
+            <solid android:color="@color/stroke" />
+            <corners android:radius="20dp" />
+        </shape>
+    </item>
+    <item
+        android:bottom="3dp"
+        android:right="3dp">
+        <shape>
+            <solid android:color="@color/surface" />
+            <stroke
+                android:width="2dp"
+                android:color="@color/stroke" />
+            <corners android:radius="20dp" />
+        </shape>
+    </item>
+</layer-list>

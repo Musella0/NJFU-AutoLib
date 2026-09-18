@@ -1,0 +1,268 @@
+services:
+  # ==================== MongoDB ====================
+  mongo:
+    image: mongo:7
+    container_name: autolib-mongo
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-autolib}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASS:-autolib123}
+    volumes:
+      - mongo_data:/data/db
+    # 不暴露端口，仅容器内网访问
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==================== Flask API ====================
+  flask-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        # 境内构建用镜像站，留空即官方源（见 backend/Dockerfile）
+        APT_MIRROR: ${APT_MIRROR:-}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+    container_name: autolib-api
+    restart: unless-stopped
+    # 不用 python main.py：Werkzeug 开发服务器每个响应都带 Connection: close，Caddy 的
+    # keepalive 连接池形同虚设。分机部署时每个 API 请求都要跨境重新握手，隧道 RTT 240ms
+    # 就是每次白付 0.5s，SYN 一丢就是 1.2s 或 502（09-15 实测）。gunicorn 长连接后一条
+    # 连接反复用，每请求只剩单程往返，SYN 丢包也影响不到已建立的连接。
+    # 单 worker 多线程：flask-limiter 用的是进程内存，多 worker 会各限各的。
+    # 后端 keep-alive 要比 Caddyfile 里的 keepalive 5m 长，让 Caddy 先关，不会拿到半死连接。
+    command: >
+      gunicorn main:app
+      --bind 0.0.0.0:5004
+      --workers 1 --threads 8 --worker-class gthread
+      --keep-alive 330 --timeout 180
+      --access-logfile - --error-logfile -
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      - DB_IP=mongo:27017
+      - MONGO_USER=${MONGO_USER:-autolib}
+      - MONGO_PASS=${MONGO_PASS:-autolib123}
+      - SERVER_IP=0.0.0.0:5004
+      - LOG_FILE=logs/auto_lib.log
+      - FOLDER_PATH=座位信息
+      - TZ=Asia/Shanghai
+      - SECRET_KEY=${SECRET_KEY:-change-me-to-a-random-string}
+      - FLASK_ENV=${FLASK_ENV:-production}
+      - SESSION_COOKIE_SECURE=${SESSION_COOKIE_SECURE:-false}
+      - TRUSTED_PROXY_COUNT=${TRUSTED_PROXY_COUNT:-1}
+      - LIBRARY_LOGIN_MAX_ATTEMPTS=${LIBRARY_LOGIN_MAX_ATTEMPTS:-3}
+      - LIBRARY_LOGIN_RETRY_DELAY_SECONDS=${LIBRARY_LOGIN_RETRY_DELAY_SECONDS:-2}
+      # 图书馆出口：webvpn（默认）/ direct / phone，见 utils/phone_relay.py
+      - LIBRARY_ACCESS=${LIBRARY_ACCESS:-webvpn}
+      - RELAY_INTERNAL_URL=${RELAY_INTERNAL_URL:-http://relay:5005}
+      - RELAY_INTERNAL_TOKEN=${RELAY_INTERNAL_TOKEN:-}
+      # 午休功能总开关，默认关（缺「离馆」接口，已入座的预约释放不掉）
+      - NAP_ENABLED=${NAP_ENABLED:-1}
+      - ADMIN_CREDENTIALS_FILE=/app/data/admin_credentials.enc
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
+      - SMTP_HOST=${SMTP_HOST:-smtp-mail.outlook.com}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+      - RESEND_API_KEY=${RESEND_API_KEY:-}
+      - RESEND_FROM=${RESEND_FROM:-AutoLib <onboarding@resend.dev>}
+      # 「联系方式」卡片，留空则整块不显示
+      - CONTACT_EMAIL=${CONTACT_EMAIL:-}
+      - CONTACT_QQ=${CONTACT_QQ:-}
+      - CONTACT_GITHUB=${CONTACT_GITHUB:-}
+    ports:
+      # 单机部署只绑本机，公网流量统一经过 Caddy 的 HTTPS 入口。
+      # 前后端分机部署（见 SPLIT_DEPLOY.md）时把 API_BIND 设成 WireGuard 隧道地址，
+      # 让另一台机器上的 Caddy 能穿隧道过来；仍然不要绑 0.0.0.0。
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-5004}:5004"
+    volumes:
+      - api_logs:/app/logs
+      # 管理员账号、邮箱和密码哈希经 AES-GCM 加密后保存到宿主机。
+      - ./data:/app/data
+      # 前端热更新：直接挂载源码目录，改 CSS/JS/HTML 后刷新浏览器即可
+      - ./backend/static:/app/static
+      - ./backend/templates:/app/templates
+
+  # ==================== 定时预约任务 ====================
+  scheduler:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        # 境内构建用镜像站，留空即官方源（见 backend/Dockerfile）
+        APT_MIRROR: ${APT_MIRROR:-}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+    container_name: autolib-scheduler
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      - DB_IP=mongo:27017
+      - MONGO_USER=${MONGO_USER:-autolib}
+      - MONGO_PASS=${MONGO_PASS:-autolib123}
+      - LOG_FILE=logs/auto_lib.log
+      - FOLDER_PATH=座位信息
+      - TZ=Asia/Shanghai
+      # 定时预约时间（24小时制，默认每天早晨 7:00 预约次日座位）
+      - SCHEDULE_HOUR=${SCHEDULE_HOUR:-7}
+      - SCHEDULE_MINUTE=${SCHEDULE_MINUTE:-0}
+      # 并发抢座：尽量盖住全部账号的首段，总耗时 ≈ 轮数 × 图书馆延迟
+      - RESERVE_CONCURRENCY=${RESERVE_CONCURRENCY:-16}
+      # 请求没被受理（网关限流/网络异常）时放回队尾重打：最多几次、基础延迟
+      - RESERVE_REJECT_RETRY_MAX=${RESERVE_REJECT_RETRY_MAX:-2}
+      - RESERVE_REJECT_RETRY_DELAY_SECONDS=${RESERVE_REJECT_RETRY_DELAY_SECONDS:-0.5}
+      # 收尾（刷预约状态、发邮件、写面板）的线程数，不占抢座工人的槽位
+      - RESERVE_FINISH_WORKERS=${RESERVE_FINISH_WORKERS:-4}
+      # 午休功能总开关，默认关（缺「离馆」接口，已入座的预约释放不掉）
+      - NAP_ENABLED=${NAP_ENABLED:-1}
+      - HTTP_CONNECT_TIMEOUT=${HTTP_CONNECT_TIMEOUT:-10}
+      - HTTP_READ_TIMEOUT=${HTTP_READ_TIMEOUT:-30}
+      # 预登录：把 webvpn + CAS 的 4~8 秒挪到抢座窗口之前，
+      # 失败只会退回 7:00 现场登录，不影响抢座本身
+      - PRELOGIN_ENABLED=${PRELOGIN_ENABLED:-1}
+      - PRELOGIN_LEAD_MINUTES=${PRELOGIN_LEAD_MINUTES:-10}
+      - PRELOGIN_REFRESH_LEAD_SECONDS=${PRELOGIN_REFRESH_LEAD_SECONDS:-30}
+      - PRELOGIN_MAX_AGE_SECONDS=${PRELOGIN_MAX_AGE_SECONDS:-1800}
+      - SESSION_VERIFY_CONNECT_TIMEOUT=${SESSION_VERIFY_CONNECT_TIMEOUT:-3}
+      - SESSION_VERIFY_READ_TIMEOUT=${SESSION_VERIFY_READ_TIMEOUT:-5}
+      # 距上次校验不到这么久的预登录会话 7:00 直接用，不再多问服务端一次
+      - PRELOGIN_VERIFY_FRESH_SECONDS=${PRELOGIN_VERIFY_FRESH_SECONDS:-120}
+      # 撞上图书馆的账号级锁（「您有预约操作正在进行」）时等多久再打同一张座位、最多几次
+      - RESERVE_BUSY_RETRY_DELAY_SECONDS=${RESERVE_BUSY_RETRY_DELAY_SECONDS:-0.4}
+      - RESERVE_BUSY_RETRY_MAX=${RESERVE_BUSY_RETRY_MAX:-3}
+      # 超窗时段的占位/换约/补约
+      - SEGMENT_HOLD_ENABLED=${SEGMENT_HOLD_ENABLED:-1}
+      - SEGMENT_SWAP_DEADLINE_MINUTES=${SEGMENT_SWAP_DEADLINE_MINUTES:-30}
+      - SEGMENT_RETRY_NOTIFY_AFTER=${SEGMENT_RETRY_NOTIFY_AFTER:-5}
+      # 图书馆返回“系统繁忙”或发生临时网络错误时，等待 2、4 秒后重试。
+      - LIBRARY_LOGIN_MAX_ATTEMPTS=${LIBRARY_LOGIN_MAX_ATTEMPTS:-3}
+      - LIBRARY_LOGIN_RETRY_DELAY_SECONDS=${LIBRARY_LOGIN_RETRY_DELAY_SECONDS:-2}
+      # 图书馆出口：webvpn（默认）/ direct / phone，见 utils/phone_relay.py
+      - LIBRARY_ACCESS=${LIBRARY_ACCESS:-webvpn}
+      - RELAY_INTERNAL_URL=${RELAY_INTERNAL_URL:-http://relay:5005}
+      - RELAY_INTERNAL_TOKEN=${RELAY_INTERNAL_TOKEN:-}
+      - NOTIFY_MIN_INTERVAL=${NOTIFY_MIN_INTERVAL:-0.6}
+      # 邮件通知配置（可选，默认走 Outlook 587/STARTTLS）
+      - SMTP_HOST=${SMTP_HOST:-smtp-mail.outlook.com}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+      - RESEND_API_KEY=${RESEND_API_KEY:-}
+      - RESEND_FROM=${RESEND_FROM:-AutoLib <onboarding@resend.dev>}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
+      - ADMIN_CREDENTIALS_FILE=/app/data/admin_credentials.enc
+      # 学校闭馆公告：密钥只注入 scheduler，不下发给网页或 Android。
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_BASE_URL=${LLM_BASE_URL:-}
+      - LLM_MODEL=${LLM_MODEL:-}
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
+      - SCHOOL_NOTICE_SCAN_LIMIT=${SCHOOL_NOTICE_SCAN_LIMIT:-20}
+      - SCHOOL_NOTICE_MAX_BYTES=${SCHOOL_NOTICE_MAX_BYTES:-1048576}
+      # 座位占用快照：只读 ic-web，用固定观测账号发 GET，不碰任何用户配置。
+      # SEAT_SNAPSHOT_PID 留空则整套快照任务跳过（代码里不再内置任何真实学号）。
+      - SEAT_SNAPSHOT_ENABLED=${SEAT_SNAPSHOT_ENABLED:-1}
+      - SEAT_SNAPSHOT_PID=${SEAT_SNAPSHOT_PID:-}
+      - SEAT_SNAPSHOT_PRE_MINUTES=${SEAT_SNAPSHOT_PRE_MINUTES:-15}
+      - SEAT_SNAPSHOT_RUSH_SECONDS=${SEAT_SNAPSHOT_RUSH_SECONDS:-60}
+      - SEAT_SNAPSHOT_DELAY_MINUTES=${SEAT_SNAPSHOT_DELAY_MINUTES:-5}
+      - SEAT_OCCUPANCY_STATS_DELAY_MINUTES=${SEAT_OCCUPANCY_STATS_DELAY_MINUTES:-10}
+      - STUDY_TIME_SYNC_AT=${STUDY_TIME_SYNC_AT:-22:10}
+      - SEAT_SNAPSHOT_ROOM_INTERVAL=${SEAT_SNAPSHOT_ROOM_INTERVAL:-0.3}
+    entrypoint: ["python", "scheduler_runner.py"]
+    volumes:
+      - scheduler_logs:/app/logs
+      # 读取管理员邮箱；文件本身仍是 AES-GCM 加密存储。
+      - ./data:/app/data:ro
+
+  # ==================== 手机中继 ====================
+  # 收每个用户 App 的 WebSocket，替 api / scheduler 把图书馆请求送到手机上、经校园网发出
+  # （LIBRARY_ACCESS=phone 时才有流量；webvpn 模式下它只是闲着）。协议见 backend/relay_server.py。
+  # 对外只有 /relay/ws 一条路，由 Caddy 转发；/internal/* 只在 compose 网络里可达。
+  relay:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        APT_MIRROR: ${APT_MIRROR:-}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+    container_name: autolib-relay
+    restart: unless-stopped
+    command: python relay_server.py
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      - DB_IP=mongo:27017
+      - MONGO_USER=${MONGO_USER:-autolib}
+      - MONGO_PASS=${MONGO_PASS:-autolib123}
+      - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
+      - RELAY_INTERNAL_TOKEN=${RELAY_INTERNAL_TOKEN:-}
+      - RELAY_HEARTBEAT_SECONDS=${RELAY_HEARTBEAT_SECONDS:-30}
+    ports:
+      # 单机只绑本机；分机部署时 RELAY_BIND 设成隧道地址，让 edge 的 Caddy 能转 WebSocket 过来
+      - "${RELAY_BIND:-127.0.0.1}:${RELAY_PORT:-5005}:5005"
+
+  # ==================== 座位数据初始化 ====================
+  seed:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        # 境内构建用镜像站，留空即官方源（见 backend/Dockerfile）
+        APT_MIRROR: ${APT_MIRROR:-}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+    container_name: autolib-seed
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      - DB_IP=mongo:27017
+      - MONGO_USER=${MONGO_USER:-autolib}
+      - MONGO_PASS=${MONGO_PASS:-autolib123}
+      - FOLDER_PATH=座位信息
+      - TZ=Asia/Shanghai
+    entrypoint: ["python", "seed_devices.py"]
+    restart: "no"
+
+  # ==================== HTTPS 反向代理 ====================
+  caddy:
+    image: caddy:2-alpine
+    container_name: autolib-caddy
+    restart: unless-stopped
+    depends_on:
+      flask-api:
+        condition: service_started
+    environment:
+      # 业务接口的上游。单机就是同一 compose 里的 flask-api；
+      # 分机部署时 edge 那台改用 docker-compose.edge.yml，这里不用动。
+      - API_UPSTREAM=${API_UPSTREAM:-flask-api:5004}
+      - RELAY_UPSTREAM=${RELAY_UPSTREAM:-relay:5005}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # APK 下载目录：只暴露这一个目录，仓库其他文件不可达
+      - ./downloads:/srv/downloads:ro
+      # 静态资源本机直出（见 Caddyfile 的 handle_path /static/*）
+      - ./backend/static:/srv/static:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  mongo_data:
+    external: true
+    name: autolib-docker_mongo_data
+  api_logs:
+  scheduler_logs:
+  caddy_data:
+  caddy_config:
